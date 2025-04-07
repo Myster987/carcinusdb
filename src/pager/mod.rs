@@ -12,8 +12,9 @@ use crate::{
 
 mod io;
 
-pub(crate) const DEFAULT_PAGE_SIZE: usize = 4096;
+pub(crate) const PAGE_SIZE: usize = 4096;
 
+#[derive(Debug)]
 pub struct Pager {
     file: BlockIO<File>,
     pub block_size: usize,
@@ -23,6 +24,7 @@ pub struct Pager {
 impl Pager {
     pub fn new(path: impl AsRef<Path>) -> DatabaseResult<Self> {
         let block_size = Fs::block_size(&path)?;
+
         let file = OpenOptions::default()
             .create(true)
             .read(true)
@@ -33,9 +35,9 @@ impl Pager {
             .open(&path)?;
 
         Ok(Self {
-            file: BlockIO::new(file, block_size, DEFAULT_PAGE_SIZE),
+            file: BlockIO::new(file, block_size, PAGE_SIZE),
             block_size,
-            page_size: DEFAULT_PAGE_SIZE,
+            page_size: PAGE_SIZE,
         })
     }
 

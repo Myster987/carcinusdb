@@ -7,22 +7,21 @@ use std::{
 use bytes::{Buf, BytesMut};
 use config::Config;
 
-use crate::{error::DatabaseResult, storage::page::{ConfigPage, CONFIG_PAGE_SIZE}};
+use crate::{error::DatabaseResult, pager::Pager, storage::page::{ConfigPage, CONFIG_PAGE_SIZE}};
 
 pub mod config;
 
 #[derive(Debug)]
 pub struct Database {
-    config: Config
+    config: Config,
+    pager: Pager
 }
 
 impl Database {
     pub fn init(path: impl AsRef<Path>) -> DatabaseResult<Self> {
-        let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
-    
-        let mut buffer = BytesMut::with_capacity(CONFIG_PAGE_SIZE);
-        buffer.resize(CONFIG_PAGE_SIZE, 0);
+        let pager = Pager::new(path)?;        
+        // let mut reader = BufReader::new(file);
+        
     
         let _ = reader.read(&mut buffer)?;
         let mut cursor = Cursor::new(&buffer[..]);

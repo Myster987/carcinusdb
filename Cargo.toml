@@ -18,4 +18,3 @@ tokio = { version = "1.44.1", features = ["full"] }
 bytes = "1.10.1"
 
 libc = "0.2.171"
-bytemuck = "1.22.0"

@@ -17,6 +17,11 @@ pub enum DatabaseError {
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    // internal
+    #[error(transparent)]
+    UtilsError(#[from] crate::utils::Error),
+
     // other
     #[error("unknown database error")]
     Unknown,

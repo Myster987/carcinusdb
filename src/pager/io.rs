@@ -67,6 +67,7 @@ impl FileOps for File {
     }
 }
 
+#[derive(Debug)]
 pub struct BlockIO<I> {
     io: I,
     pub block_size: usize,

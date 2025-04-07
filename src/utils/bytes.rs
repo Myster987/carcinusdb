@@ -1,28 +1,7 @@
-use bytes::{Buf, BytesMut};
+use bytes::Buf;
 
-use crate::{
-    error::{DatabaseError, DatabaseResult},
-    pager::DEFAULT_PAGE_SIZE,
-};
 
-pub struct Buffer {
-    pub content: BytesMut,
-}
-
-impl Buffer {
-    pub fn alloc(size: usize) -> Self {
-        let mut buffer = BytesMut::with_capacity(size);
-        buffer.resize(size, 0);
-
-        Self { content: buffer }
-    }
-}
-
-impl Default for Buffer {
-    fn default() -> Self {
-        Buffer::alloc(DEFAULT_PAGE_SIZE)
-    }
-}
+use crate::error::{DatabaseError, DatabaseResult};
 
 pub fn get_u8(src: &mut impl Buf) -> DatabaseResult<u8> {
     if !src.has_remaining() {

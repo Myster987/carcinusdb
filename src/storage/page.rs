@@ -1,22 +1,32 @@
-//! ## 6 bytes header
-
-use std::{io::Cursor, mem};
-
-use bytes::{Buf, BytesMut};
+use std::{
+    alloc::{Layout, alloc_zeroed},
+    io::Cursor,
+    mem,
+    ptr::{self, NonNull},
+};
 
 use crate::{
     error::DatabaseResult,
-    pager::DEFAULT_PAGE_SIZE,
-    utils::bytes::{Buffer, get_bool, get_u16, get_u32},
+    pager::PAGE_SIZE,
+    utils::{
+        buffer::Buffer,
+        bytes::{get_u16, get_u32},
+        cast::{self},
+    },
 };
 
-use super::PageNumber;
+use super::{PageNumber, SLOT_SIZE};
 
-pub const CONFIG_PAGE_SIZE: usize = 6;
+pub const CONFIG_PAGE_SIZE: usize = mem::size_of::<ConfigPage>();
 
-pub const PAGE_HEADER_SIZE: usize = 6;
+pub const PAGE_HEADER_SIZE: usize = mem::size_of::<PageHeader>();
+pub const PAGE_ALIGNMENT: usize = PAGE_SIZE;
 
-pub const CELL_HEADER_SIZE: usize = 7;
+pub const MIN_PAGE_SIZE: usize = 512;
+pub const MAX_PAGE_SIZE: usize = 64 << 10;
+
+pub const CELL_HEADER_SIZE: usize = mem::size_of::<CellHeader>();
+pub const CELL_ALIGNMENT: usize = mem::align_of::<CellHeader>();
 
 /// offset, bytes
 /// 0   4 - version
@@ -40,52 +50,82 @@ impl ConfigPage {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+#[repr(C, align(8))]
 pub struct CellHeader {
-    /// size of cell
-    size: u16,
-
-    pub is_overflow: bool,
+    /// Number of cell's left child
     pub left_child: PageNumber,
+    /// Size of cell
+    size: u16,
+    /// True if `Cell` has overflow
+    pub is_overflow: bool,
 }
 
-// impl CellHeader {
-//     pub fn new()
+// impl From<&[u8]> for CellHeader {
+//     /// Note that this assumes that slice of bytes is size of `CELL_HEADER_SIZE`.
+//     fn from(value: &[u8]) -> Self {
+//         // let cell_header = *from_bytes(value);
+//         let cell_header = cast_slice(value)[0];
+
+//         cell_header
+//     }
 // }
-
-impl From<&[u8]> for CellHeader {
-    fn from(value: &[u8]) -> Self {
-        let mut cursor = Cursor::new(value);
-
-        let size = get_u16(&mut cursor).unwrap();
-        let is_overflow = get_bool(&mut cursor).unwrap();
-        let left_child = get_u32(&mut cursor).unwrap();
-
-        Self {
-            size,
-            is_overflow,
-            left_child,
-        }
-    }
-}
 
 pub struct Cell {
     pub header: CellHeader,
 
     /// If [`Cellheader::is_overflow`] is true then last 4 bytes point to overflow page
-    pub content: BytesMut,
+    pub content: [u8],
 }
 
 impl Cell {
-    pub fn new(content: &[u8]) -> Self {
-        let header = CellHeader::from(content);
+    pub fn new(mut content: Vec<u8>) -> Box<Self> {
+        let aligned_size = Self::align_to_payload(&content);
 
-        Self {
-            header,
-            content: BytesMut::from(content),
+        content.resize(aligned_size as usize, 0);
+
+        let mut buf: Buffer<CellHeader> = unsafe {
+            let layout =
+                Layout::from_size_align((aligned_size as usize) + CELL_HEADER_SIZE, CELL_ALIGNMENT)
+                    .unwrap();
+
+            let ptr = NonNull::new(std::slice::from_raw_parts_mut(
+                alloc_zeroed(layout),
+                layout.size(),
+            ))
+            .unwrap();
+
+            Buffer::from_non_null(ptr, true)
+        };
+
+        buf.header_mut().size = aligned_size;
+
+        buf.cotent_mut().copy_from_slice(&content);
+
+        unsafe {
+            Box::from_raw(ptr::slice_from_raw_parts(
+                buf.into_non_null().cast::<u8>().as_ptr(),
+                aligned_size as usize,
+            ) as *mut Cell)
         }
     }
 
-    
+    /// Total size of `Cell` with header.
+    pub fn total_size(&self) -> u16 {
+        (CELL_HEADER_SIZE + self.content.len()) as u16
+    }
+
+    /// Total size of `Cell` with header and slot id.
+    pub fn storage_size(&self) -> u16 {
+        self.total_size() + (SLOT_SIZE as u16)
+    }
+
+    pub fn align_to_payload(payload: &[u8]) -> u16 {
+        Layout::from_size_align(payload.len(), CELL_ALIGNMENT)
+            .unwrap()
+            .pad_to_align()
+            .size() as u16
+    }
 }
 
 pub struct PageHeader {
@@ -113,8 +153,8 @@ pub struct PageHeader {
 impl PageHeader {
     pub fn new(size: usize) -> Self {
         Self {
-            free_space: Page::usable_space(size) as u16,
             num_slots: 0,
+            free_space: Page::usable_space(size) as u16,
             last_used_offset: Page::usable_space(size) as u16,
         }
     }
@@ -154,16 +194,14 @@ impl From<&[u8]> for PageHeader {
 /// ```
 ///
 pub struct Page {
-    pub header: PageHeader,
-    buffer: Buffer,
+    buffer: Buffer<PageHeader>,
 }
 
 impl Page {
     pub fn new(size: usize) -> Self {
-        let header = PageHeader::new(size);
-        let buffer = Buffer::alloc(size);
+        let buffer = Buffer::alloc_page(size);
 
-        Self { header, buffer }
+        Self { buffer }
     }
 
     pub fn usable_space(size: usize) -> usize {
@@ -171,31 +209,42 @@ impl Page {
     }
 
     pub fn len(&self) -> u16 {
-        self.header.num_slots
+        self.buffer.header().num_slots
     }
 
-    pub fn slot_array(&self) -> &[u16] {
-        let start = PAGE_HEADER_SIZE;
-        let end = start + self.header.num_slots as usize * 2;
-        bytemuck::cast_slice(&self.buffer.content.as_ref()[start..end])
+    pub fn size(&self) -> usize {
+        self.buffer.size 
     }
 
-    pub fn slot_array_mut(&mut self) -> &mut [u16] {
-        let start = PAGE_HEADER_SIZE;
-        let end = start + self.header.num_slots as usize * 2;
-        bytemuck::cast_slice_mut(&mut self.buffer.content.as_mut()[start..end])
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
-    pub fn get_cell_at_offset(&self, offset: usize) -> Cell {
+    // pub fn slot_array(&self) -> &[u16] {
+    //     let start = PAGE_HEADER_SIZE;
+    //     let end = start + self.header.num_slots as usize * 2;
+    //     cast::cast_slice(&self.buffer.content.as_ref()[start..end])
+    // }
 
+    // pub fn slot_array_mut(&mut self) -> &mut [u16] {
+    //     let start = PAGE_HEADER_SIZE;
+    //     let end = start + self.header.num_slots as usize * 2;
+    //     cast::cast_slice_mut(&mut self.buffer.content.as_mut()[start..end])
+    // }
 
-        todo!()
-    }
+    // pub fn cell_header_at_offset(&self, offset: usize) -> Cell {
+    //     let start = offset - CELL_HEADER_SIZE;
+    //     let end = offset;
+    //     let slice_of_buffer = &self.buffer.content[start..=end];
+    //     let cell_header = CellHeader::from(slice_of_buffer);
+
+    //     todo!()
+    // }
 }
 
 impl Default for Page {
     fn default() -> Self {
-        let header = PageHeader::new(DEFAULT_PAGE_SIZE);
+        let header = PageHeader::new(PAGE_SIZE);
         let buffer = Buffer::default();
 
         Self { header, buffer }
@@ -205,8 +254,8 @@ impl Default for Page {
 impl From<Buffer> for Page {
     fn from(value: Buffer) -> Self {
         assert!(
-            value.content.len() == DEFAULT_PAGE_SIZE,
-            "Buffer size is invalid. Expected: {DEFAULT_PAGE_SIZE}, got: {}",
+            value.content.len() == PAGE_SIZE,
+            "Buffer size is invalid. Expected: {PAGE_SIZE}, got: {}",
             value.content.len()
         );
 
@@ -225,11 +274,10 @@ impl From<Buffer> for Page {
 mod tests {
     use std::io::Write;
 
-    use crate::error::DatabaseError;
-
     use super::*;
 
     #[test]
+    #[ignore = "currently not needed"]
     fn create_test_file() -> anyhow::Result<()> {
         let mut f = std::fs::File::create_new("test.db")?;
 
@@ -238,27 +286,6 @@ mod tests {
 
         f.write(&version.to_be_bytes())?;
         f.write(&page_size.to_be_bytes())?;
-
-        Ok(())
-    }
-
-    #[test]
-    fn aligment() -> anyhow::Result<()> {
-        let a: &[u8] = &[0, 1, 0];
-
-        let b: &[u16] = bytemuck::try_cast_slice(a).map_err(|_| DatabaseError::Unknown)?;
-
-        println!("u16: {:?}", b);
-        println!("u8: {:?}", a);
-
-        Ok(())
-    }
-
-    #[test]
-    fn buffer_test() -> anyhow::Result<()> {
-        let buf = Buffer::alloc(4096);
-
-        let page = Page::from(buf);
 
         Ok(())
     }
