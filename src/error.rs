@@ -22,6 +22,10 @@ pub enum DatabaseError {
     #[error(transparent)]
     UtilsError(#[from] crate::utils::Error),
 
+    #[error(transparent)]
+    StorageError(#[from] crate::storage::Error),
+    
+
     // other
     #[error("unknown database error")]
     Unknown,

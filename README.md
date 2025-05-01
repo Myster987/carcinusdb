@@ -1,6 +1,16 @@
 # CarcinusDB
 
-**Named after Green Crab (Carcinus maenas)** that is known for:
+## Architecture:
 
--   rapid spread (it's considered one of the most invasive species in marine environment)
--   highly adaptable and aggressive
+1. ### Storage
+
+All data is stored in /carnicusdb directory. Each database has separet folder inside main directory.
+Example:
+
+```
+/carnicusdb
+    - /database1
+    - /database2
+    - /database3
+    ... 
+```

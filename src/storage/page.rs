@@ -6,21 +6,17 @@ use std::{
 };
 
 use crate::{
-    error::DatabaseResult,
-    pager::PAGE_SIZE,
-    utils::{
-        buffer::Buffer,
-        bytes::{get_u16, get_u32},
-        cast::{self},
-    },
+    utils::{buffer::Buffer, bytes::get_u16},
 };
 
 use super::{PageNumber, SLOT_SIZE};
 
-pub const CONFIG_PAGE_SIZE: usize = mem::size_of::<ConfigPage>();
+// pub const CONFIG_PAGE_SIZE: usize = mem::size_of::<ConfigPage>();
+
+pub const DEFAULT_PAGE_SIZE: usize = 4096;
 
 pub const PAGE_HEADER_SIZE: usize = mem::size_of::<PageHeader>();
-pub const PAGE_ALIGNMENT: usize = PAGE_SIZE;
+// pub const PAGE_ALIGNMENT: usize = PAGE_SIZE;
 
 pub const MIN_PAGE_SIZE: usize = 512;
 pub const MAX_PAGE_SIZE: usize = 64 << 10;
@@ -31,24 +27,24 @@ pub const CELL_ALIGNMENT: usize = mem::align_of::<CellHeader>();
 /// offset, bytes
 /// 0   4 - version
 /// 4   2 - page size
-#[derive(Debug)]
-pub struct ConfigPage {
-    pub version: u32,
-    pub page_size: u16,
-}
+// #[derive(Debug)]
+// pub struct ConfigPage {
+//     pub version: u32,
+//     pub page_size: u16,
+// }
 
-impl ConfigPage {
-    pub fn new(version: u32, page_size: u16) -> Self {
-        Self { version, page_size }
-    }
+// impl ConfigPage {
+//     pub fn new(version: u32, page_size: u16) -> Self {
+//         Self { version, page_size }
+//     }
 
-    pub fn from_bytes(cursor: &mut Cursor<&[u8]>) -> DatabaseResult<Self> {
-        let version = get_u32(cursor)?;
-        let page_size = get_u16(cursor)?;
+//     pub fn from_bytes(cursor: &mut Cursor<&[u8]>) -> DatabaseResult<Self> {
+//         let version = get_u32(cursor)?;
+//         let page_size = get_u16(cursor)?;
 
-        Ok(Self { version, page_size })
-    }
-}
+//         Ok(Self { version, page_size })
+//     }
+// }
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C, align(8))]
@@ -213,7 +209,7 @@ impl Page {
     }
 
     pub fn size(&self) -> usize {
-        self.buffer.size 
+        self.buffer.size
     }
 
     pub fn is_empty(&self) -> bool {
@@ -244,15 +240,14 @@ impl Page {
 
 impl Default for Page {
     fn default() -> Self {
-        let header = PageHeader::new(PAGE_SIZE);
         let buffer = Buffer::default();
 
-        Self { header, buffer }
+        Self { buffer }
     }
 }
 
-impl From<Buffer> for Page {
-    fn from(value: Buffer) -> Self {
+impl<H> From<Buffer<H>> for Page {
+    fn from(value: Buffer<H>) -> Self {
         assert!(
             value.content.len() == PAGE_SIZE,
             "Buffer size is invalid. Expected: {PAGE_SIZE}, got: {}",

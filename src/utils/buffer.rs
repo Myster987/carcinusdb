@@ -1,10 +1,13 @@
 use std::{
-    alloc::{alloc_zeroed, dealloc, Layout}, fmt::Debug, mem::ManuallyDrop, ptr::NonNull
+    alloc::{Layout, alloc_zeroed, dealloc},
+    fmt::Debug,
+    mem::ManuallyDrop,
+    ptr::NonNull,
 };
 
 use crate::{
-    pager::PAGE_SIZE,
-    storage::page::{CELL_ALIGNMENT, MAX_PAGE_SIZE, MIN_PAGE_SIZE, PAGE_ALIGNMENT},
+    os::DISK_BLOCK_SIZE,
+    storage::page::{CELL_ALIGNMENT, MAX_PAGE_SIZE, MIN_PAGE_SIZE},
 };
 
 use super::{Error, Result, cast::is_aligned_to};
@@ -61,7 +64,7 @@ impl<H> Buffer<H> {
             (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
             "Page of size {size} is not between {MIN_PAGE_SIZE} AND {MAX_PAGE_SIZE}"
         );
-        Self::new(size, PAGE_ALIGNMENT)
+        Self::new(size, *DISK_BLOCK_SIZE)
     }
 
     pub fn new(size: usize, align: usize) -> Self {
@@ -195,7 +198,7 @@ impl<H> AsRef<[u8]> for Buffer<H> {
 }
 
 impl<H> AsMut<[u8]> for Buffer<H> {
-    fn as_mut(&mut self) -> &mut[u8] {
+    fn as_mut(&mut self) -> &mut [u8] {
         self.as_slice_mut()
     }
 }
@@ -206,16 +209,10 @@ impl<H> Drop for Buffer<H> {
             unsafe {
                 dealloc(
                     self.header.cast().as_ptr(),
-                    Layout::from_size_align(self.size, PAGE_ALIGNMENT).unwrap(),
+                    Layout::from_size_align(self.size, *DISK_BLOCK_SIZE).unwrap(),
                 );
             }
         }
-    }
-}
-
-impl<H> Default for Buffer<H> {
-    fn default() -> Self {
-        Self::new(PAGE_SIZE, PAGE_ALIGNMENT)
     }
 }
 

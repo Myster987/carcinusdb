@@ -2,17 +2,13 @@ use std::path::Path;
 
 use std::fs::File;
 
-use io::BlockIO;
+use crate::utils::io::BlockIO;
 
 use crate::{
     error::DatabaseResult,
     os::{FileSystemBlockSize, Fs, Open, OpenOptions},
     storage::PageNumber,
 };
-
-mod io;
-
-pub(crate) const PAGE_SIZE: usize = 4096;
 
 #[derive(Debug)]
 pub struct Pager {
@@ -22,7 +18,7 @@ pub struct Pager {
 }
 
 impl Pager {
-    pub fn new(path: impl AsRef<Path>) -> DatabaseResult<Self> {
+    pub fn new(path: impl AsRef<Path>, page_size: usize) -> DatabaseResult<Self> {
         let block_size = Fs::block_size(&path)?;
 
         let file = OpenOptions::default()
@@ -35,9 +31,9 @@ impl Pager {
             .open(&path)?;
 
         Ok(Self {
-            file: BlockIO::new(file, block_size, PAGE_SIZE),
+            file: BlockIO::new(file, block_size, page_size),
             block_size,
-            page_size: PAGE_SIZE,
+            page_size,
         })
     }
 

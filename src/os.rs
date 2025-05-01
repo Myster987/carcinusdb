@@ -2,7 +2,15 @@ use std::{
     fs::{self, File},
     io,
     path::Path,
+    sync::LazyLock,
 };
+
+/// Contains disk block size.
+/// # Note
+/// It uses `/etc/passwd` file that is allways present on Linux/Unix but not on Windows (so it won't work)
+pub static DISK_BLOCK_SIZE: LazyLock<usize> = LazyLock::new(|| {
+    Fs::block_size("/etc/passwd").expect("Something when wrong when calculating disk block size.")
+});
 
 pub trait FileSystemBlockSize {
     fn block_size(path: impl AsRef<Path>) -> io::Result<usize>;
