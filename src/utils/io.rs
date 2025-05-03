@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-use crate::storage::PageNumber;
+use crate::{os::DISK_BLOCK_SIZE, storage::heap::PageNumber};
 
 pub trait FileOps {
     /// Creates file in filesystem at the given path.
@@ -67,20 +67,16 @@ impl FileOps for File {
     }
 }
 
+/// Wrapper to simplify working with page like structures on disk
 #[derive(Debug)]
 pub struct BlockIO<I> {
     io: I,
-    pub block_size: usize,
     pub page_size: usize,
 }
 
 impl<I> BlockIO<I> {
-    pub fn new(io: I, block_size: usize, page_size: usize) -> Self {
-        Self {
-            io,
-            block_size,
-            page_size,
-        }
+    pub fn new(io: I, page_size: usize) -> Self {
+        Self { io, page_size }
     }
 }
 
@@ -90,26 +86,22 @@ impl<I: Seek + Read> BlockIO<I> {
         let capacity;
         let inner_offset;
 
-        let Self {
-            block_size,
-            page_size,
-            ..
-        } = *self;
+        let Self { page_size, .. } = *self;
         let page_number = page_number as usize;
 
-        if page_size >= block_size {
+        if page_size >= *DISK_BLOCK_SIZE {
             capacity = page_size;
             offset = page_size * page_number;
             inner_offset = 0;
         } else {
-            capacity = block_size;
-            offset = (page_size * page_number) & !(block_size - 1);
+            capacity = *DISK_BLOCK_SIZE;
+            offset = (page_size * page_number) & !(*DISK_BLOCK_SIZE - 1);
             inner_offset = page_number * page_size - offset;
         }
 
         self.io.seek(SeekFrom::Start(offset as u64))?;
 
-        if page_size >= block_size {
+        if page_size >= *DISK_BLOCK_SIZE {
             return self.io.read(buffer);
         }
 
