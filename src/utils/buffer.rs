@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
     os::DISK_BLOCK_SIZE,
-    storage::page::{CELL_ALIGNMENT, MAX_PAGE_SIZE, MIN_PAGE_SIZE},
+    storage::heap::page::{CELL_ALIGNMENT, MAX_PAGE_SIZE, MIN_PAGE_SIZE},
 };
 
 use super::{Error, Result, cast::is_aligned_to};
@@ -28,7 +28,7 @@ pub struct Buffer<H> {
     /// Pointer to header at the beginning of buffer
     header: NonNull<H>,
     /// Pointer to content right after the header
-    content: NonNull<[u8]>,
+    pub content: NonNull<[u8]>,
     /// Total size of buffer (size of header + size of content)
     pub size: usize,
     /// Flag that indicates if this `Buffer` is owning memory and when dropped should deallocate it.
@@ -151,7 +151,7 @@ impl<H> Buffer<H> {
         }
     }
 
-    fn usable_space(size: usize) -> u16 {
+    pub fn usable_space(size: usize) -> u16 {
         (size - size_of::<H>()) as u16
     }
 
