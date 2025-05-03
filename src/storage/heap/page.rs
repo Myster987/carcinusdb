@@ -5,18 +5,14 @@ use std::{
     ptr::{self, NonNull},
 };
 
-use crate::{
-    utils::{buffer::Buffer, bytes::get_u16},
-};
+use crate::utils::{buffer::Buffer, bytes::get_u16};
 
 use super::{PageNumber, SLOT_SIZE};
 
-// pub const CONFIG_PAGE_SIZE: usize = mem::size_of::<ConfigPage>();
 
 pub const DEFAULT_PAGE_SIZE: usize = 4096;
 
 pub const PAGE_HEADER_SIZE: usize = mem::size_of::<PageHeader>();
-// pub const PAGE_ALIGNMENT: usize = PAGE_SIZE;
 
 pub const MIN_PAGE_SIZE: usize = 512;
 pub const MAX_PAGE_SIZE: usize = 64 << 10;
@@ -24,27 +20,6 @@ pub const MAX_PAGE_SIZE: usize = 64 << 10;
 pub const CELL_HEADER_SIZE: usize = mem::size_of::<CellHeader>();
 pub const CELL_ALIGNMENT: usize = mem::align_of::<CellHeader>();
 
-/// offset, bytes
-/// 0   4 - version
-/// 4   2 - page size
-// #[derive(Debug)]
-// pub struct ConfigPage {
-//     pub version: u32,
-//     pub page_size: u16,
-// }
-
-// impl ConfigPage {
-//     pub fn new(version: u32, page_size: u16) -> Self {
-//         Self { version, page_size }
-//     }
-
-//     pub fn from_bytes(cursor: &mut Cursor<&[u8]>) -> DatabaseResult<Self> {
-//         let version = get_u32(cursor)?;
-//         let page_size = get_u16(cursor)?;
-
-//         Ok(Self { version, page_size })
-//     }
-// }
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C, align(8))]
@@ -194,14 +169,14 @@ pub struct Page {
 }
 
 impl Page {
-    pub fn new(size: usize) -> Self {
+    pub fn alloc(size: usize) -> Self {
         let buffer = Buffer::alloc_page(size);
 
         Self { buffer }
     }
 
-    pub fn usable_space(size: usize) -> usize {
-        size - PAGE_HEADER_SIZE
+    pub fn usable_space(size: usize) -> u16 {
+        Buffer::<PageHeader>::usable_space(size)
     }
 
     pub fn len(&self) -> u16 {
@@ -216,17 +191,25 @@ impl Page {
         self.len() == 0
     }
 
-    // pub fn slot_array(&self) -> &[u16] {
-    //     let start = PAGE_HEADER_SIZE;
-    //     let end = start + self.header.num_slots as usize * 2;
-    //     cast::cast_slice(&self.buffer.content.as_ref()[start..end])
-    // }
+    pub fn header(&self) -> &PageHeader {
+        self.buffer.header()
+    }
 
-    // pub fn slot_array_mut(&mut self) -> &mut [u16] {
-    //     let start = PAGE_HEADER_SIZE;
-    //     let end = start + self.header.num_slots as usize * 2;
-    //     cast::cast_slice_mut(&mut self.buffer.content.as_mut()[start..end])
-    // }
+    pub fn header_mut(&mut self) -> &mut PageHeader {
+        self.buffer.header_mut()
+    }
+
+    pub fn slot_array_non_null(&self) -> NonNull<[u16]> {
+        NonNull::slice_from_raw_parts(self.buffer.content.cast(), self.header().num_slots as usize)
+    }
+
+    pub fn slot_array(&self) -> &[u16] {
+        unsafe { self.slot_array_non_null().as_ref() }
+    }
+
+    pub fn slot_array_mut(&self) -> &mut [u16] {
+        unsafe { self.slot_array_non_null().as_mut() }
+    }
 
     // pub fn cell_header_at_offset(&self, offset: usize) -> Cell {
     //     let start = offset - CELL_HEADER_SIZE;
@@ -238,30 +221,11 @@ impl Page {
     // }
 }
 
-impl Default for Page {
-    fn default() -> Self {
-        let buffer = Buffer::default();
+impl<H> From<Buffer<H>> for Page {
+    fn from(buffer: Buffer<H>) -> Self {
+        let buffer = buffer.cast();
 
         Self { buffer }
-    }
-}
-
-impl<H> From<Buffer<H>> for Page {
-    fn from(value: Buffer<H>) -> Self {
-        assert!(
-            value.content.len() == PAGE_SIZE,
-            "Buffer size is invalid. Expected: {PAGE_SIZE}, got: {}",
-            value.content.len()
-        );
-
-        let buffer = value.content.as_ref();
-
-        let page_header = PageHeader::from(&buffer[..PAGE_HEADER_SIZE]);
-
-        Self {
-            header: page_header,
-            buffer: value,
-        }
     }
 }
 
@@ -270,18 +234,4 @@ mod tests {
     use std::io::Write;
 
     use super::*;
-
-    #[test]
-    #[ignore = "currently not needed"]
-    fn create_test_file() -> anyhow::Result<()> {
-        let mut f = std::fs::File::create_new("test.db")?;
-
-        let version: u32 = 1;
-        let page_size: u16 = 4096;
-
-        f.write(&version.to_be_bytes())?;
-        f.write(&page_size.to_be_bytes())?;
-
-        Ok(())
-    }
 }

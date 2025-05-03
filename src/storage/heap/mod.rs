@@ -1,7 +1,14 @@
-//! Each table gets it's own directory that contains:
-//! - meta (metadata file)
-//! - fsm
-//! - block.0, block.1, block.2, etc...
+//! Each table is stored in data/ directory.
+//! Table and indexes are divided into block of [BLOCK_SIZE]   
 
-/// Size of each block that table will be divided into.
-const BLOCK_SIZE: usize = 2_usize.pow(30) * 1;
+pub mod manager;
+pub mod page;
+pub mod pager;
+
+pub type PageNumber = u32;
+pub type SlotNumber = u16;
+
+/// Size of each block that table will be divided into (DEFAULT 1GB).
+pub const BLOCK_SIZE: usize = 2_usize.pow(30) * 1;
+
+pub const SLOT_SIZE: usize = std::mem::size_of::<SlotNumber>();
