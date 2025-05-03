@@ -6,11 +6,11 @@ use std::{
 
 use bytes::{Buf, BytesMut};
 
-use crate::{error::DatabaseResult, pager::Pager};
+use crate::error::DatabaseResult;
 
 #[derive(Debug)]
 pub struct Database {
-    pager: Pager,
+    // pager: Pager,
 }
 
 impl Database {

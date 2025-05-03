@@ -1,9 +1,13 @@
-use crate::utils::traits::Unsigned;
+use super::{ResourceId, column::Column};
 
-use super::column::Column;
-
-pub struct Table<T: Unsigned> {
-    id: usize,
+pub struct Table {
+    id: ResourceId,
     name: String,
-    columns: Vec<Column<T>>,
+    columns: Vec<Column>,
+}
+
+impl Table {
+    pub fn new(id: ResourceId, name: String, columns: Vec<Column>) -> Self {
+        Self { id, name, columns }
+    }
 }
