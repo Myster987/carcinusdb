@@ -1,14 +1,14 @@
 use std::{
     alloc::{Layout, alloc_zeroed},
-    io::Cursor,
+    collections::HashMap,
+    io::{Cursor, Read},
     mem,
     ptr::{self, NonNull},
 };
 
 use crate::utils::{buffer::Buffer, bytes::get_u16};
 
-use super::{PageNumber, SLOT_SIZE};
-
+use super::{PageNumber, SLOT_SIZE, SlotNumber};
 
 pub const DEFAULT_PAGE_SIZE: usize = 4096;
 
@@ -19,7 +19,6 @@ pub const MAX_PAGE_SIZE: usize = 64 << 10;
 
 pub const CELL_HEADER_SIZE: usize = mem::size_of::<CellHeader>();
 pub const CELL_ALIGNMENT: usize = mem::align_of::<CellHeader>();
-
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C, align(8))]
@@ -79,6 +78,26 @@ impl Cell {
                 aligned_size as usize,
             ) as *mut Cell)
         }
+    }
+
+    pub fn new_overflow(mut content: Vec<u8>, overflow_page: PageNumber) -> Box<Self> {
+        content.extend_from_slice(&overflow_page.to_le_bytes());
+
+        let mut cell = Self::new(content);
+        cell.header.is_overflow = true;
+
+        cell
+    }
+
+    pub fn overflow_page(&self) -> PageNumber {
+        if !self.header.is_overflow {
+            return 0;
+        }
+        PageNumber::from_le_bytes(
+            self.content[self.content.len() - mem::size_of::<PageNumber>()..]
+                .try_into()
+                .expect("Failed parsing overflow page number"),
+        )
     }
 
     /// Total size of `Cell` with header.
@@ -166,13 +185,17 @@ impl From<&[u8]> for PageHeader {
 ///
 pub struct Page {
     buffer: Buffer<PageHeader>,
+    overflow: HashMap<SlotNumber, Box<Cell>>,
 }
 
 impl Page {
     pub fn alloc(size: usize) -> Self {
         let buffer = Buffer::alloc_page(size);
 
-        Self { buffer }
+        Self {
+            buffer,
+            overflow: HashMap::new(),
+        }
     }
 
     pub fn usable_space(size: usize) -> u16 {
@@ -189,6 +212,16 @@ impl Page {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    pub fn max_payload_size(usable_space: u16) -> u16 {
+        (usable_space - CELL_HEADER_SIZE as u16 - SLOT_SIZE as u16) & !(CELL_ALIGNMENT as u16 - 1)
+    }
+
+    pub fn ideal_payload_size(page_size: usize, min_cell: usize) -> u16 {
+        let ideal_size = Self::max_payload_size(Self::usable_space(page_size) / min_cell as u16);
+
+        ideal_size
     }
 
     pub fn header(&self) -> &PageHeader {
@@ -223,9 +256,14 @@ impl Page {
 
 impl<H> From<Buffer<H>> for Page {
     fn from(buffer: Buffer<H>) -> Self {
-        let buffer = buffer.cast();
+        let mut buffer = buffer.cast();
 
-        Self { buffer }
+        *buffer.header_mut() = PageHeader::new(buffer.size);
+
+        Self {
+            buffer,
+            overflow: HashMap::new(),
+        }
     }
 }
 

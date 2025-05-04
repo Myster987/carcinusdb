@@ -5,7 +5,6 @@ mod cli;
 mod database;
 mod error;
 mod os;
-mod pager;
 mod query;
 mod sql;
 mod storage;
@@ -16,6 +15,7 @@ mod vm;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     simple_logger::init_with_level(log::Level::Info).unwrap();
+    dotenvy::dotenv()?;
 
     let cli = Cli::parse();
 

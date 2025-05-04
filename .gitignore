@@ -3,5 +3,6 @@
 Cargo.lock
 
 *.db
+.env*
 
 PLAN.md

@@ -18,6 +18,10 @@ pub enum DatabaseError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
+    // env
+    #[error(transparent)]
+    Env(#[from] std::env::VarError),
+
     // internal
     #[error(transparent)]
     UtilsError(#[from] crate::utils::Error),

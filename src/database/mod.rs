@@ -1,29 +1,21 @@
-use std::{
-    fs::File,
-    io::{BufReader, Cursor, Read},
-    path::{Path, PathBuf},
-};
+use std::{env, path::PathBuf};
 
-use bytes::{Buf, BytesMut};
-
-use crate::error::DatabaseResult;
+use crate::{error::DatabaseResult, storage::file_system_manager::FileSystemManager};
 
 #[derive(Debug)]
 pub struct Database {
-    // pager: Pager,
+    file_system_manager: FileSystemManager,
 }
 
 impl Database {
-    // pub fn init(path: impl AsRef<Path>) -> DatabaseResult<Self> {
-    //     let pager = Pager::new(path)?;
-    //     // let mut reader = BufReader::new(file);
+    pub fn init(database_name: &str) -> DatabaseResult<Self> {
+        let env_base_path = env::var("CARNICUSDB_BASE_PATH")?;
+        let base_path = PathBuf::from(env_base_path);
 
-    //     Ok(Self {
-    //     })
-    // }
+        let file_system_manager = FileSystemManager::new(base_path, database_name);
 
-    // pub fn read_page_zero(&self) -> DatabaseResult<PageZero> {
-    //     let mut file = File::open(self.work_dir)?;
-
-    // }
+        Ok(Self {
+            file_system_manager,
+        })
+    }
 }
