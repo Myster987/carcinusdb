@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-use crate::{os::DISK_BLOCK_SIZE, storage::heap::PageNumber};
+use crate::{os::DISK_BLOCK_SIZE, storage::PageNumber};
 
 pub trait FileOps {
     /// Creates file in filesystem at the given path.

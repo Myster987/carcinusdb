@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
     os::DISK_BLOCK_SIZE,
-    storage::heap::page::{CELL_ALIGNMENT, MAX_PAGE_SIZE, MIN_PAGE_SIZE},
+    storage::page::{CELL_ALIGNMENT, MAX_PAGE_SIZE, MIN_PAGE_SIZE},
 };
 
 use super::{Error, Result, cast::is_aligned_to};
@@ -38,7 +38,7 @@ pub struct Buffer<H> {
 impl<H> Buffer<H> {
     /// Allocates a pointer for buffer with given `layout`. Note that layout size = `header` + `content`. \
     /// # Fails:
-    /// * `layout.size() <= size_of::<H>()` - buffer needs to fit header and some content
+    /// * `layout.size() <= size_of::<H>()` - buffer needs to fit header and some content.
     pub fn try_alloc(layout: Layout) -> Result<NonNull<[u8]>> {
         if layout.size() <= size_of::<H>() {
             return Err(Error::InvalidAllocation(format!(
@@ -59,6 +59,9 @@ impl<H> Buffer<H> {
         Self::try_alloc(layout).unwrap()
     }
 
+    /// Allocates buffer if it's size fits in MIN and MAX `Page` size.
+    /// # Panics
+    /// - If size is **less or more** than `Page` size should be.
     pub fn alloc_page(size: usize) -> Self {
         assert!(
             (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
@@ -77,7 +80,7 @@ impl<H> Buffer<H> {
     ///
     /// # Safety
     ///
-    /// * `pointer` must be aligned to at least `CELL_ALIGNMENT`. Required by BTree
+    /// * `pointer` must be aligned to at least `CELL_ALIGNMENT`. Required by BTree.
     pub unsafe fn try_from_non_null(pointer: NonNull<[u8]>, is_owner: bool) -> Result<Self> {
         if pointer.len() <= size_of::<H>() {
             return Err(Error::InvalidAllocation(format!(
@@ -106,13 +109,18 @@ impl<H> Buffer<H> {
         })
     }
 
+    /// Converts pointer to Buffer.
+    ///
+    /// # Safety
+    ///
+    /// See `Buffer::try_from_non_null`.
     pub fn from_non_null(pointer: NonNull<[u8]>, is_owner: bool) -> Self {
         unsafe { Self::try_from_non_null(pointer, is_owner).unwrap() }
     }
 
     /// Converts `Buffer<H>` into `Buffer<T>` and doesn't drop owned memory. \
     /// # Fails:
-    /// * `size <= size_of::<H>()` - buffer needs to fit header and some content
+    /// * `size <= size_of::<H>()` - buffer needs to fit header and some content.
     pub fn cast<T>(self) -> Buffer<T> {
         let Self {
             header,
@@ -151,22 +159,27 @@ impl<H> Buffer<H> {
         }
     }
 
+    /// Calculates usable space in `Buffer` without header.
     pub fn usable_space(size: usize) -> u16 {
         (size - size_of::<H>()) as u16
     }
 
+    /// Returns reference to header.
     pub fn header(&self) -> &H {
         unsafe { self.header.as_ref() }
     }
 
+    /// Returns mutable reference to header.
     pub fn header_mut(&mut self) -> &mut H {
         unsafe { self.header.as_mut() }
     }
 
+    /// Returns slice to `Buffer`'s content.
     pub fn cotent(&self) -> &[u8] {
         unsafe { self.content.as_ref() }
     }
 
+    /// Returns mutable slice to `Buffer`'s content.
     pub fn cotent_mut(&mut self) -> &mut [u8] {
         unsafe { self.content.as_mut() }
     }
@@ -176,6 +189,7 @@ impl<H> Buffer<H> {
         NonNull::slice_from_raw_parts(self.header.cast::<u8>(), self.size)
     }
 
+    /// Converts `Buffer` to [`NonNull`] pointer.
     pub fn into_non_null(self) -> NonNull<[u8]> {
         ManuallyDrop::new(self).as_non_null()
     }
@@ -204,6 +218,7 @@ impl<H> AsMut<[u8]> for Buffer<H> {
 }
 
 impl<H> Drop for Buffer<H> {
+    /// If `Buffer` is owner, then it deallocates memory, otherwise heap memory is still valid.
     fn drop(&mut self) {
         if self.is_owner {
             unsafe {
