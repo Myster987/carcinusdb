@@ -175,12 +175,12 @@ impl<H> Buffer<H> {
     }
 
     /// Returns slice to `Buffer`'s content.
-    pub fn cotent(&self) -> &[u8] {
+    pub fn content(&self) -> &[u8] {
         unsafe { self.content.as_ref() }
     }
 
     /// Returns mutable slice to `Buffer`'s content.
-    pub fn cotent_mut(&mut self) -> &mut [u8] {
+    pub fn content_mut(&mut self) -> &mut [u8] {
         unsafe { self.content.as_mut() }
     }
 
@@ -237,7 +237,7 @@ impl<H: Debug> Debug for Buffer<H> {
             .field("size", &self.size)
             .field("is_owner", &self.is_owner)
             .field("header", self.header())
-            .field("content", &self.cotent())
+            .field("content", &self.content())
             .finish()
     }
 }

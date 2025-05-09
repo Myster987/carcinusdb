@@ -1,5 +1,10 @@
 use std::{
-    alloc::{alloc_zeroed, Layout}, collections::HashMap, fmt::Debug, io::Cursor, mem, ptr::{self, NonNull}
+    alloc::{Layout, alloc, alloc_zeroed},
+    collections::HashMap,
+    fmt::Debug,
+    io::Cursor,
+    mem,
+    ptr::{self, NonNull},
 };
 
 use crate::utils::{buffer::Buffer, bytes::get_u16, cast};
@@ -42,7 +47,7 @@ pub struct CellHeader {
 pub struct Cell {
     pub header: CellHeader,
 
-    /// If [`Cellheader::is_overflow`] is true then last
+    /// If [`Cellheader::is_overflow`] is true then last 4 bytes point to overflow page
     pub content: [u8],
 }
 
@@ -69,7 +74,7 @@ impl Cell {
 
         buf.header_mut().size = aligned_size;
 
-        buf.cotent_mut().copy_from_slice(&content);
+        buf.content_mut().copy_from_slice(&content);
 
         // Creates pointer to heap, because `Cell` size can't by known at compile time.
         // Content is already aligned. which makes this operation safe.
@@ -119,6 +124,38 @@ impl Cell {
             .unwrap()
             .pad_to_align()
             .size() as u16
+    }
+}
+
+impl ToOwned for Cell {
+    type Owned = Box<Self>;
+
+    fn to_owned(&self) -> Self::Owned {
+        let layout = Layout::for_value(self);
+        let size = layout.size();
+
+        // allocates new memory on heap (first by creating fake slice and then corecing it into thin pointer)
+        let owned = unsafe {
+            NonNull::new_unchecked(
+                NonNull::new(std::slice::from_raw_parts_mut(alloc(layout), size))
+                    .unwrap()
+                    .as_ptr() as *mut u8,
+            )
+        };
+
+        let cell = ptr::from_ref(self);
+        // copies data from current heap location into another (casts &self into thin NonNull<u8> pointer and copies header with content of cell)
+        unsafe {
+            owned.copy_from_nonoverlapping(
+                NonNull::new_unchecked(cell.cast_mut().cast()),
+                self.total_size() as usize,
+            );
+            // this is Weird DST part, if we have allocated 50 bytes and DST stores 40 bytes and 10 bytes is header, then size of DST is 40 not 50
+            // that's why we have to create fake pointer with size of DST (self.content.len() in this case), because when using self.total_size() it will break
+            Box::from_raw(
+                ptr::slice_from_raw_parts(owned.as_ptr(), self.content.len()) as *mut Self,
+            )
+        }
     }
 }
 
@@ -406,9 +443,9 @@ impl Default for Page {
 impl Debug for Page {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Page")
-        .field("buffer", &self.buffer)
-        .field("overflow", &self.overflow)
-        .finish()
+            .field("buffer", &self.buffer)
+            .field("overflow", &self.overflow)
+            .finish()
     }
 }
 
@@ -419,11 +456,28 @@ mod tests {
 
     #[test]
     fn main_test() -> anyhow::Result<()> {
-        let mut page = Page::alloc(512);
+        // let mut page = Page::alloc(512);
 
-        page.slot_array_mut();
-        
-        println!("{:?}", page);
+        // let s = "maciek";
+
+        // println!("{:?}", page.slot_array_mut());
+
+        // println!("{:?}", page);
+
+        let content = "Maciek".to_string();
+
+        let cell = Cell::new(content.as_bytes().to_vec());
+        let owned = cell.to_owned();
+
+        println!(
+            "cell: {}, owned: {}",
+            size_of_val(&cell),
+            size_of_val(&owned)
+        );
+
+        println!("{:?}", cell);
+
+        println!("{:?}", owned);
 
         Ok(())
     }
