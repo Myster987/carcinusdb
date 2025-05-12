@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use std::fs::File;
+use std::sync::atomic::AtomicUsize;
 
 use crate::utils::io::BlockIO;
 
@@ -10,7 +11,22 @@ use crate::{
     storage::PageNumber,
 };
 
-/// Controls 1 block (file)
+use super::page::{OverflowPage, Page};
+
+/// Page is locked from I/O to prevent concurrent access
+const PAGE_LOCKED: usize = 0b0010;
+
+pub enum MemPageInner {
+    BTree(Page),
+    Overflow(OverflowPage)
+}
+
+pub struct MemPage {
+    pub flags: AtomicUsize,
+    inner: MemPageInner
+}
+
+/// Is responsive for reading and writing to file
 #[derive(Debug)]
 pub struct Pager {
     file: BlockIO<File>,

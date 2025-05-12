@@ -3,6 +3,7 @@ use thiserror::Error;
 pub mod schema;
 pub mod page;
 pub mod pager;
+pub mod btree;
 
 pub type PageNumber = u32;
 pub type SlotNumber = u16;

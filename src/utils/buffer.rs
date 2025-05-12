@@ -31,8 +31,6 @@ pub struct Buffer<H> {
     pub content: NonNull<[u8]>,
     /// Total size of buffer (size of header + size of content)
     pub size: usize,
-    /// Flag that indicates if this `Buffer` is owning memory and when dropped should deallocate it.
-    is_owner: bool,
 }
 
 impl<H> Buffer<H> {
@@ -73,15 +71,15 @@ impl<H> Buffer<H> {
     pub fn new(size: usize, align: usize) -> Self {
         let layout =
             Layout::from_size_align(size, align).expect("Invalid buffer size or alignment");
-        Self::from_non_null(Self::alloc(layout), true)
+        Self::from_non_null(Self::alloc(layout))
     }
 
     /// Creates `Buffer` from `NonNull<[u8]>` pointer. \
     ///
     /// # Safety
     ///
-    /// * `pointer` must be aligned to at least `CELL_ALIGNMENT`. Required by BTree.
-    pub unsafe fn try_from_non_null(pointer: NonNull<[u8]>, is_owner: bool) -> Result<Self> {
+    /// - `pointer` must be aligned to at least `CELL_ALIGNMENT`. Required by BTree.
+    pub unsafe fn try_from_non_null(pointer: NonNull<[u8]>) -> Result<Self> {
         if pointer.len() <= size_of::<H>() {
             return Err(Error::InvalidAllocation(format!(
                 "Allocating {} with {} bytes is incorrect. You need at least {} to fit header ({} bytes)",
@@ -105,7 +103,6 @@ impl<H> Buffer<H> {
             header: pointer.cast(),
             content,
             size: pointer.len(),
-            is_owner,
         })
     }
 
@@ -114,8 +111,8 @@ impl<H> Buffer<H> {
     /// # Safety
     ///
     /// See `Buffer::try_from_non_null`.
-    pub fn from_non_null(pointer: NonNull<[u8]>, is_owner: bool) -> Self {
-        unsafe { Self::try_from_non_null(pointer, is_owner).unwrap() }
+    pub fn from_non_null(pointer: NonNull<[u8]>) -> Self {
+        unsafe { Self::try_from_non_null(pointer).unwrap() }
     }
 
     /// Converts `Buffer<H>` into `Buffer<T>` and doesn't drop owned memory. \
@@ -126,7 +123,6 @@ impl<H> Buffer<H> {
             header,
             content: _,
             size,
-            is_owner,
         } = self;
 
         assert!(
@@ -138,9 +134,7 @@ impl<H> Buffer<H> {
             size_of::<H>()
         );
 
-        if is_owner {
-            std::mem::forget(self);
-        }
+        std::mem::forget(self);
 
         let header = header.cast();
 
@@ -155,7 +149,6 @@ impl<H> Buffer<H> {
             header,
             content,
             size,
-            is_owner,
         }
     }
 
@@ -220,13 +213,11 @@ impl<H> AsMut<[u8]> for Buffer<H> {
 impl<H> Drop for Buffer<H> {
     /// If `Buffer` is owner, then it deallocates memory, otherwise heap memory is still valid.
     fn drop(&mut self) {
-        if self.is_owner {
-            unsafe {
-                dealloc(
-                    self.header.cast().as_ptr(),
-                    Layout::from_size_align(self.size, *DISK_BLOCK_SIZE).unwrap(),
-                );
-            }
+        unsafe {
+            dealloc(
+                self.header.cast().as_ptr(),
+                Layout::from_size_align(self.size, *DISK_BLOCK_SIZE).unwrap(),
+            );
         }
     }
 }
@@ -235,7 +226,6 @@ impl<H: Debug> Debug for Buffer<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Buffer")
             .field("size", &self.size)
-            .field("is_owner", &self.is_owner)
             .field("header", self.header())
             .field("content", &self.content())
             .finish()
@@ -248,10 +238,6 @@ mod tests {
 
     #[test]
     fn basic() -> anyhow::Result<()> {
-        let buf: Buffer<u32> = Buffer::new(16, 4);
-
-        println!("{:?}", buf);
-
         Ok(())
     }
 }

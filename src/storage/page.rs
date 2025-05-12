@@ -1,11 +1,13 @@
 use std::{
     alloc::{Layout, alloc, alloc_zeroed},
-    collections::HashMap,
+    collections::{BinaryHeap, HashMap},
     fmt::Debug,
     io::Cursor,
     mem,
     ptr::{self, NonNull},
 };
+
+use tokio::signal::unix::signal;
 
 use crate::utils::{buffer::Buffer, bytes::get_u16, cast};
 
@@ -69,7 +71,7 @@ impl Cell {
             ))
             .unwrap();
 
-            Buffer::from_non_null(ptr, true)
+            Buffer::from_non_null(ptr)
         };
 
         buf.header_mut().size = aligned_size;
@@ -152,6 +154,7 @@ impl ToOwned for Cell {
             );
             // this is Weird DST part, if we have allocated 50 bytes and DST stores 40 bytes and 10 bytes is header, then size of DST is 40 not 50
             // that's why we have to create fake pointer with size of DST (self.content.len() in this case), because when using self.total_size() it will break
+            // all this operations should be safe, because we ensure proper alignmet
             Box::from_raw(
                 ptr::slice_from_raw_parts(owned.as_ptr(), self.content.len()) as *mut Self,
             )
@@ -271,6 +274,10 @@ impl Page {
         (usable_space - CELL_HEADER_SIZE as u16 - SLOT_SIZE as u16) & !(CELL_ALIGNMENT as u16 - 1)
     }
 
+    pub fn max_allowed_payload_size(&self) -> u16 {
+        Self::max_payload_size(Self::usable_space(self.size()))
+    }
+
     /// Returns most optimal item sizes that page can hold
     pub fn ideal_payload_size(page_size: usize, min_cell: usize) -> u16 {
         let ideal_size = Self::max_payload_size(Self::usable_space(page_size) / min_cell as u16);
@@ -337,7 +344,32 @@ impl Page {
         unsafe { cell.as_mut() }
     }
 
-    pub fn insert(&mut self, index: SlotNumber, cell: Box<Cell>) {}
+    /// Returns owned cell by coping.
+    pub fn owned_cell(&self, index: SlotNumber) -> Box<Cell> {
+        self.cell(index).to_owned()
+    }
+
+    /// Inserts cell at given index. Can cause overflow.
+    pub fn insert(&mut self, index: SlotNumber, cell: Box<Cell>) {
+        assert!(
+            cell.content.len() <= self.max_allowed_payload_size() as usize,
+            "can't store data of size {} when max allowed payload size is {}",
+            cell.content.len(),
+            self.max_allowed_payload_size()
+        );
+
+        assert!(
+            index <= self.len(),
+            "index out of range for page of length: {}",
+            self.len()
+        );
+
+        if self.is_overflow() {
+            self.overflow.insert(index, cell);
+        } else if let Err(cell) = self.try_insert(index, cell) {
+            self.overflow.insert(index, cell);
+        }
+    }
 
     fn try_insert(&mut self, index: SlotNumber, cell: Box<Cell>) -> Result<SlotNumber, Box<Cell>> {
         // We can't fit `Cell` in this `Page`.
@@ -353,7 +385,7 @@ impl Page {
 
         if avalible_space < cell.storage_size() {
             // defragmet page (delete dead cells)
-            todo!()
+            self.compact();
         }
 
         // Offset to beginning of a location where new `cell` will be inserted
@@ -385,12 +417,21 @@ impl Page {
         Ok(index)
     }
 
+    /// Removes given index in slot array and returns owned cell (`Box<Cell>`) that was under this index. Also incresess free space
     pub fn remove(&mut self, index: SlotNumber) -> Box<Cell> {
         let len = self.len();
 
-        self.header_mut().num_slots -= 1;
+        let cell = self.owned_cell(index);
 
-        todo!()
+        assert!(index < len, "index {index} out of range for length {len}");
+
+        self.slot_array_mut()
+            .copy_within(index as usize + 1..len as usize, index as usize);
+
+        self.header_mut().num_slots -= 1;
+        self.header_mut().free_space += cell.storage_size();
+
+        cell
     }
 
     /// Reclaims unused space after deleted cells. Current free space doesn't change, but placement of cells  
@@ -409,7 +450,34 @@ impl Page {
     /// +-------------------------------------------------------------------------------------+
     /// ```
     ///
-    fn compact(&mut self) {}
+    fn compact(&mut self) {
+        let mut order = BinaryHeap::from_iter(
+            self.slot_array()
+                .iter()
+                .enumerate()
+                .map(|(i, offset)| (i, *offset)),
+        );
+
+        let mut current_offset = self.size() - PAGE_HEADER_SIZE;
+
+        while let Some((index, offset)) = order.pop() {
+            unsafe {
+                let cell = self.cell_at_offset(offset);
+                let size = cell.as_ref().total_size() as usize;
+
+                current_offset -= size;
+
+                cell.cast::<u8>().copy_to(
+                    self.buffer.content.byte_add(current_offset).cast::<u8>(),
+                    size,
+                );
+
+                self.slot_array_mut()[index] = current_offset as u16;
+            }
+        }
+
+        self.header_mut().last_used_offset = current_offset as u16;
+    }
 }
 
 impl AsRef<[u8]> for Page {
@@ -449,6 +517,67 @@ impl Debug for Page {
     }
 }
 
+#[derive(Debug)]
+pub struct OverflowPageHeader {
+    /// Next overflow page
+    pub next: PageNumber,
+    /// Number of bytes stored in this page
+    pub num_bytes: u16,
+}
+
+pub struct OverflowPage {
+    buffer: Buffer<OverflowPageHeader>,
+}
+
+impl OverflowPage {
+    pub fn alloc(size: usize) -> Self {
+        Self { buffer: Buffer::alloc_page(size) }
+    }
+
+    pub fn usable_space(size: usize) -> u16 {
+        Buffer::<OverflowPageHeader>::usable_space(size)
+    }
+
+    pub fn header(&self) -> &OverflowPageHeader {
+        self.buffer.header()
+    }
+
+    
+    pub fn header_mut(&mut self) -> &mut OverflowPageHeader {
+        self.buffer.header_mut()
+    }
+
+    /// Returns read-only reference to payload (not whole buffer)
+    pub fn payload(&self) -> &[u8] {
+        &self.buffer.content()[..self.header().num_bytes as usize]
+    }
+}
+
+impl AsRef<[u8]> for OverflowPage {
+    fn as_ref(&self) -> &[u8] {
+        self.buffer.as_ref()
+    }
+}
+impl AsMut<[u8]> for OverflowPage {
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.buffer.as_mut()
+    }
+}
+
+impl<H> From<Buffer<H>> for OverflowPage  {
+    fn from(buffer: Buffer<H>) -> Self {
+        let mut buffer = buffer.cast();
+
+        *buffer.header_mut() = OverflowPageHeader {
+            next: 0,
+            num_bytes: 0
+        };
+
+        Self { buffer }
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
 
@@ -464,16 +593,12 @@ mod tests {
 
         // println!("{:?}", page);
 
-        let content = "Maciek".to_string();
+        let content = "1".to_string();
 
         let cell = Cell::new(content.as_bytes().to_vec());
         let owned = cell.to_owned();
 
-        println!(
-            "cell: {}, owned: {}",
-            size_of_val(&cell),
-            size_of_val(&owned)
-        );
+        println!("cell: {}, owned: {}", cell.total_size(), owned.total_size());
 
         println!("{:?}", cell);
 
