@@ -1,6 +1,5 @@
 use bytes::Buf;
 
-
 use crate::error::{DatabaseError, DatabaseResult};
 
 pub fn get_u8(src: &mut impl Buf) -> DatabaseResult<u8> {

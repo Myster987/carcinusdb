@@ -2,14 +2,11 @@ use std::{
     alloc::{Layout, alloc, alloc_zeroed},
     collections::{BinaryHeap, HashMap},
     fmt::Debug,
-    io::Cursor,
     mem,
     ptr::{self, NonNull},
 };
 
-use tokio::signal::unix::signal;
-
-use crate::utils::{buffer::Buffer, bytes::get_u16, cast};
+use crate::utils::{buffer::Buffer, cast};
 
 use super::{PAGE_NUMBER_SIZE, PageNumber, SLOT_SIZE, SlotNumber};
 
@@ -503,6 +500,7 @@ impl<H> From<Buffer<H>> for Page {
         }
     }
 }
+
 impl Default for Page {
     fn default() -> Self {
         Self::alloc(DEFAULT_PAGE_SIZE)
@@ -531,7 +529,9 @@ pub struct OverflowPage {
 
 impl OverflowPage {
     pub fn alloc(size: usize) -> Self {
-        Self { buffer: Buffer::alloc_page(size) }
+        Self {
+            buffer: Buffer::alloc_page(size),
+        }
     }
 
     pub fn usable_space(size: usize) -> u16 {
@@ -542,7 +542,6 @@ impl OverflowPage {
         self.buffer.header()
     }
 
-    
     pub fn header_mut(&mut self) -> &mut OverflowPageHeader {
         self.buffer.header_mut()
     }
@@ -564,19 +563,18 @@ impl AsMut<[u8]> for OverflowPage {
     }
 }
 
-impl<H> From<Buffer<H>> for OverflowPage  {
+impl<H> From<Buffer<H>> for OverflowPage {
     fn from(buffer: Buffer<H>) -> Self {
         let mut buffer = buffer.cast();
 
         *buffer.header_mut() = OverflowPageHeader {
             next: 0,
-            num_bytes: 0
+            num_bytes: 0,
         };
 
         Self { buffer }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

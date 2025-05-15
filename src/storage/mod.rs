@@ -1,9 +1,13 @@
 use thiserror::Error;
 
-pub mod schema;
+pub mod btree;
+pub mod buffer_pool;
+pub mod cache;
+pub mod file_system_manager;
+pub mod heap;
 pub mod page;
 pub mod pager;
-pub mod btree;
+pub mod schema;
 
 pub type PageNumber = u32;
 pub type SlotNumber = u16;
@@ -18,4 +22,8 @@ pub enum Error {
     // heap
     #[error("page {0} not found")]
     PageNotFound(PageNumber),
+
+    // io
+    #[error(transparent)]
+    Io(#[from] std::io::Error)
 }
