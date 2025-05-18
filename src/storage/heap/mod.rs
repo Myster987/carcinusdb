@@ -1,4 +1,5 @@
 pub mod block_manager;
+pub mod fsm;
 
 pub type BlockId = u32;
 pub type BlockNumber = u32;

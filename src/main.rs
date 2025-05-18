@@ -1,7 +1,5 @@
-use clap::Parser;
-use cli::{Cli, CommandArgs};
+use std::env;
 
-mod cli;
 mod database;
 mod error;
 mod os;
@@ -17,19 +15,10 @@ async fn main() -> anyhow::Result<()> {
     simple_logger::init_with_level(log::Level::Info).unwrap();
     dotenvy::dotenv()?;
 
-    let cli = Cli::parse();
+    let hostname = env::var("CARCINUSDB_HOSTNAME")?;
+    let port = env::var("CARCINUSDB_PORT")?.parse::<u16>()?;
 
-    match cli.command {
-        cli::Commands::Run(CommandArgs {
-            database_file_path,
-            hostname,
-            port,
-        }) => {
-            log::info!("File path: {}", database_file_path);
-            log::info!("Hostname: {}", hostname);
-            log::info!("Port: {}", port);
-        }
-    }
+    database::run(hostname, port).await?;
 
     Ok(())
 }

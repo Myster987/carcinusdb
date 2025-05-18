@@ -1,11 +1,19 @@
 use std::{
     path::{Path, PathBuf},
     str::FromStr,
+    sync::LazyLock,
 };
 
 use super::heap::{BlockId, BlockNumber};
 
+pub const FILE_SYSTEM_MANAGER: LazyLock<FileSystemManager> = LazyLock::new(|| {
+    let base_dir =
+        std::env::var("CARCINUSDB_BASE").expect("CARCINUS_BASE env variable not configured");
+    FileSystemManager::new(&base_dir)
+});
+
 /// Manages paths
+#[derive(Debug)]
 pub struct FileSystemManager {
     base_dir: PathBuf,
 }
@@ -15,6 +23,10 @@ impl FileSystemManager {
         Self {
             base_dir: PathBuf::from_str(base_dir).expect("Could parse carcinusdb base dir."),
         }
+    }
+
+    pub fn base_dir(&self) -> PathBuf {
+        self.base_dir.clone()
     }
 
     pub fn metadata_path(&self) -> PathBuf {

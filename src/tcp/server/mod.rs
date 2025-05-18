@@ -27,22 +27,3 @@ impl TcpServer {
         Ok(Connection::new(stream))
     }
 }
-
-pub async fn start(addr: SocketAddr) -> DatabaseResult<()> {
-    let tcp_server = TcpServer::new(addr).await?;
-
-    log::info!("Listening on: {}", tcp_server.local_addr());
-    loop {
-        let conn = tcp_server.accept_connection().await?;
-
-        handle_connection(conn)?
-    }
-
-    Ok(())
-}
-
-pub fn handle_connection(conn: Connection) -> DatabaseResult<()> {
-    log::info!("Connection from: {}", conn.client_address());
-
-    Ok(())
-}
