@@ -5,4 +5,6 @@ Cargo.lock
 *.db
 .env*
 
-PLAN.md
+TODO.md
+
+carnicusdb

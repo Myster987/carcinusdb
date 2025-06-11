@@ -1,6 +1,5 @@
 use thiserror::Error;
 
-pub mod btree;
 pub mod buffer_pool;
 pub mod cache;
 pub mod file_system_manager;
@@ -8,6 +7,8 @@ pub mod heap;
 pub mod page;
 pub mod pager;
 pub mod schema;
+
+pub type Oid = u32;
 
 pub type PageNumber = u32;
 pub type SlotNumber = u16;
@@ -23,7 +24,11 @@ pub enum Error {
     #[error("page {0} not found")]
     PageNotFound(PageNumber),
 
+    // utils
+    #[error(transparent)]
+    Utils(#[from] crate::utils::Error),
+
     // io
     #[error(transparent)]
-    Io(#[from] std::io::Error)
+    Io(#[from] std::io::Error),
 }

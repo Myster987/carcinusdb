@@ -36,25 +36,27 @@ impl BlockManager {
         }
     }
 
-    /// Returns `BlockNumber` relative to page number
+    /// Returns `BlockNumber` relative to page number.
     ///
     /// # Example
     ///
     /// lets say that block_0 can hold [0-10_000) pages, block_1 [10_000, 20_000), etc
     /// and this function for page: 12_345 will return block_1 because we know for sure that
-    /// this page must be there   
+    /// this page must be there.
     fn calculate_page_block(&self, page_number: PageNumber) -> BlockNumber {
         page_number / (BLOCK_SIZE / self.page_size) as u32
     }
 
-    /// Returns page offset relative to block it is stored in
+    /// Returns page offset relative to block it is stored in.
     fn calculate_page_offset(&self, page_number: PageNumber) -> PageNumber {
         (page_number) % (BLOCK_SIZE / self.page_size) as u32
     }
 
-    /// Reads given page from disk into buffer
+    /// Reads given page from disk into buffer.
+    /// 
     /// # Note 
-    /// One block holds [0; BLOCK_SIZE / PAGE_SIZE) pages
+    /// 
+    /// One block holds [0; BLOCK_SIZE / PAGE_SIZE) pages.
     pub fn read_page(&self, page_number: PageNumber, buffer: &mut [u8]) -> Result<()> {
         let block_num = self.calculate_page_block(page_number);
         let block_ref = self

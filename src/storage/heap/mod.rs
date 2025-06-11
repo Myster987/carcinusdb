@@ -1,7 +1,9 @@
+use crate::storage::Oid;
+
 pub mod block_manager;
 pub mod fsm;
 
-pub type BlockId = u32;
+pub type BlockId = Oid;
 pub type BlockNumber = u32;
 
 /// Size of 1 block (1 GB)

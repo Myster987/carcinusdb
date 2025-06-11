@@ -12,13 +12,17 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Utilities `Error`.
 #[derive(Debug, Error)]
 pub enum Error {
+    // bytes
     #[error("invalid aligment")]
     InvalidAligment,
     #[error("size mismatch")]
     SizeMismatch,
+    #[error("invalid bytes")]
+    InvalidBytes,
+
+    // alloc
     #[error("invalid allocation. {0}")]
     InvalidAllocation(String),
-
     #[error(transparent)]
     Allocator(#[from] std::alloc::LayoutError),
     #[error("unknown error")]

@@ -1,14 +1,26 @@
+use crate::storage::{Oid, schema::utf8_length_prefix};
+
 pub struct Column {
+    table_oid: Oid,
     name: String,
     data_type: DataType,
+    non_null: bool,
     primary_key: bool,
 }
 
 impl Column {
-    pub fn new(name: String, data_type: DataType, is_primary_key: bool) -> Self {
+    pub fn new(
+        table_oid: Oid,
+        name: String,
+        data_type: DataType,
+        non_null: bool,
+        is_primary_key: bool,
+    ) -> Self {
         Self {
+            table_oid,
             name,
             data_type,
+            non_null,
             primary_key: is_primary_key,
         }
     }
@@ -36,14 +48,5 @@ impl DataType {
             DataType::Boolean => 1,
             DataType::VarChar(len) => utf8_length_prefix(*len),
         }
-    }
-}
-
-/// When encoding in utf8, it can use from 1 to 4 bytes per character, so when saving to file we need to assume worst case scenario and calculate prefixes for   
-pub fn utf8_length_prefix(max_length: usize) -> usize {
-    match max_length {
-        0..64 => 1,
-        64..16384 => 2,
-        _ => 4,
     }
 }

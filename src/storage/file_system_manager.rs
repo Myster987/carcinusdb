@@ -4,7 +4,9 @@ use std::{
     sync::LazyLock,
 };
 
-use super::heap::{BlockId, BlockNumber};
+use crate::storage::Oid;
+
+use super::heap::BlockNumber;
 
 pub const FILE_SYSTEM_MANAGER: LazyLock<FileSystemManager> = LazyLock::new(|| {
     let base_dir =
@@ -37,18 +39,26 @@ impl FileSystemManager {
         self.base_dir.join("data")
     }
 
-    pub fn database_dir(&self, db_name: &str) -> PathBuf {
-        self.data_dir().join(db_name)
+    pub fn database_dir(&self, db_oid: Oid) -> PathBuf {
+        self.data_dir().join(format!("{db_oid}"))
     }
 
-    pub fn schema_path(&self, db_name: &str) -> PathBuf {
-        self.database_dir(db_name).join("schema")
+    pub fn schema_path(&self, db_oid: Oid) -> PathBuf {
+        self.database_dir(db_oid).join("schema")
+    }
+
+    pub fn table_catalog_path(&self, db_oid: Oid) -> PathBuf {
+        self.database_dir(db_oid).join("table")
+    }
+
+    pub fn index_catalog_path(&self, db_oid: Oid) -> PathBuf {
+        self.database_dir(db_oid).join("index")
     }
 
     pub fn table_block_path(
         &self,
         db_path: &Path,
-        table_id: BlockId,
+        table_id: Oid,
         block_number: BlockNumber,
     ) -> PathBuf {
         db_path.join(format!("{table_id}.{block_number}"))
@@ -57,17 +67,17 @@ impl FileSystemManager {
     pub fn index_block_path(
         &self,
         db_path: &Path,
-        table_id: BlockId,
+        index_id: Oid,
         block_number: BlockNumber,
     ) -> PathBuf {
-        db_path.join(format!("{table_id}_idx.{block_number}"))
+        db_path.join(format!("{index_id}_idx.{block_number}"))
     }
 
-    pub fn table_fsm_path(&self, db_path: &Path, table_id: BlockId) -> PathBuf {
+    pub fn table_fsm_path(&self, db_path: &Path, table_id: Oid) -> PathBuf {
         db_path.join(format!("{table_id}_fsm"))
     }
 
-    pub fn index_fsm_path(&self, db_path: &Path, table_id: BlockId) -> PathBuf {
+    pub fn index_fsm_path(&self, db_path: &Path, table_id: Oid) -> PathBuf {
         db_path.join(format!("{table_id}_idx_fsm"))
     }
 }

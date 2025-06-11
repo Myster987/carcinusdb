@@ -213,6 +213,7 @@ impl<H> AsMut<[u8]> for Buffer<H> {
 impl<H> Drop for Buffer<H> {
     /// If `Buffer` is owner, then it deallocates memory, otherwise heap memory is still valid.
     fn drop(&mut self) {
+        println!("Buffer droped");
         unsafe {
             dealloc(
                 self.header.cast().as_ptr(),

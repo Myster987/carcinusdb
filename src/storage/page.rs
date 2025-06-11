@@ -2,7 +2,7 @@ use std::{
     alloc::{Layout, alloc, alloc_zeroed},
     collections::{BinaryHeap, HashMap},
     fmt::Debug,
-    mem,
+    mem::{self, ManuallyDrop},
     ptr::{self, NonNull},
 };
 
@@ -475,6 +475,12 @@ impl Page {
 
         self.header_mut().last_used_offset = current_offset as u16;
     }
+
+    pub fn into_buffer(mut self) -> Buffer<PageHeader> {
+        let Page { buffer, overflow } = self;
+
+        buffer
+    }
 }
 
 impl AsRef<[u8]> for Page {
@@ -580,6 +586,16 @@ impl<H> From<Buffer<H>> for OverflowPage {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn page_into() -> anyhow::Result<()> {
+        let page = Page::alloc(512);
+        println!("{:?}", page);
+        let buffer = page.into_buffer();
+        println!("{:?}", buffer);
+
+        Ok(())
+    }
 
     #[test]
     fn main_test() -> anyhow::Result<()> {
