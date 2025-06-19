@@ -3,7 +3,10 @@ use std::{
     fmt::Debug,
     mem::ManuallyDrop,
     ptr::NonNull,
+    sync::Arc,
 };
+
+use parking_lot::RwLock;
 
 use crate::{
     os::DISK_BLOCK_SIZE,
@@ -12,18 +15,33 @@ use crate::{
 
 use super::{Error, Result, cast::is_aligned_to};
 
+// pub struct SharedBuffer<H> {
+//     pub buffer: Arc<RwLock<Buffer<H>>>,
+// }
+
+// impl<H> SharedBuffer<H> {
+//     pub fn new(buffer: Buffer<H>) -> Self {
+//         Self {
+//             buffer: Arc::new(RwLock::new(buffer)),
+//         }
+//     }
+
+//     pub fn alloc_page(size: usize) -> Self {
+//         Self::new(Buffer::alloc_page(size))
+//     }
+
+//     pub fn lock_shared(&self) -> parking_lot::RwLockReadGuard<Buffer<H>> {
+//         self.buffer.read()
+//     }
+
+//     pub fn lock_exclusive(&self) -> parking_lot::RwLockWriteGuard<Buffer<H>> {
+//         self.buffer.write()
+//     }
+// }
+
+pub type SharedBuffer<H> = Arc<RwLock<Buffer<H>>>;
+
 /// Buffer with header that is building blocks of all pages.
-/// It allows pointing to memory of other `Buffer`.
-///
-/// # Safety
-///
-/// ## Case 1: Owner Buffer is dropped
-///
-/// If the `"owner" Buffer` is dropped, then using other `Buffers` that were pointing to "owner's" memory mustn't be used (use after free).
-///
-/// # Guaranties
-///
-/// Until `"owner" Buffer` is valid, dropping other `Buffers` that point to it's memory is safe, because they can't deallocate "owner" memory.
 pub struct Buffer<H> {
     /// Pointer to header at the beginning of buffer
     header: NonNull<H>,
@@ -196,6 +214,10 @@ impl<H> Buffer<H> {
     pub fn as_slice_mut(&mut self) -> &mut [u8] {
         unsafe { self.as_non_null().as_mut() }
     }
+
+    pub fn reset(&mut self) {
+        unsafe { std::ptr::write_bytes(self.header.as_ptr(), 0, self.size) };
+    }
 }
 
 impl<H> AsRef<[u8]> for Buffer<H> {
@@ -213,7 +235,6 @@ impl<H> AsMut<[u8]> for Buffer<H> {
 impl<H> Drop for Buffer<H> {
     /// If `Buffer` is owner, then it deallocates memory, otherwise heap memory is still valid.
     fn drop(&mut self) {
-        println!("Buffer droped");
         unsafe {
             dealloc(
                 self.header.cast().as_ptr(),
@@ -239,6 +260,18 @@ mod tests {
 
     #[test]
     fn basic() -> anyhow::Result<()> {
+        let mut buffer: Buffer<u8> = Buffer::alloc_page(512);
+        
+        println!("{:?}", buffer);
+
+        *buffer.header_mut() += 7;
+        buffer.content_mut()[..6].copy_from_slice(b"Maciek");
+
+        println!("{:?}", buffer);
+        
+        buffer.reset();
+
+        println!("{:?}", buffer);
         Ok(())
     }
 }

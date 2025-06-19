@@ -23,6 +23,8 @@ pub enum Error {
     // heap
     #[error("page {0} not found")]
     PageNotFound(PageNumber),
+    #[error("invalid page type")]
+    InvalidPageType,
 
     // utils
     #[error(transparent)]

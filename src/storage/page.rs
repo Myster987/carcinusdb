@@ -2,15 +2,24 @@ use std::{
     alloc::{Layout, alloc, alloc_zeroed},
     collections::{BinaryHeap, HashMap},
     fmt::Debug,
-    mem::{self, ManuallyDrop},
+    mem::{self},
     ptr::{self, NonNull},
+    sync::LazyLock,
 };
 
-use crate::utils::{buffer::Buffer, cast};
+use crate::utils::{
+    buffer::{Buffer, SharedBuffer},
+    cast,
+};
 
-use super::{PAGE_NUMBER_SIZE, PageNumber, SLOT_SIZE, SlotNumber};
+use super::{Error, PAGE_NUMBER_SIZE, PageNumber, SLOT_SIZE, SlotNumber};
 
-pub const DEFAULT_PAGE_SIZE: usize = 4096;
+pub const DEFAULT_PAGE_SIZE: LazyLock<usize> = LazyLock::new(|| match std::env::var("PAGE_SIZE") {
+    Ok(page_size) => page_size
+        .parse::<usize>()
+        .expect("\"PAGE_SIZE\" env is invalid: {page_size}. Expected to be number."),
+    Err(_) => 4096,
+});
 
 pub const PAGE_HEADER_SIZE: usize = mem::size_of::<PageHeader>();
 
@@ -162,6 +171,8 @@ impl ToOwned for Cell {
 /// Stores information about `Page`
 #[derive(Debug, Clone, Copy)]
 pub struct PageHeader {
+    // Type of page
+    page_type: u8,
     /// Free space in page
     free_space: u16,
 
@@ -189,6 +200,7 @@ pub struct PageHeader {
 impl PageHeader {
     pub fn new(size: usize) -> Self {
         Self {
+            page_type: 0,
             num_slots: 0,
             free_space: Page::usable_space(size) as u16,
             last_used_offset: Page::usable_space(size) as u16,
@@ -201,6 +213,28 @@ impl From<&[u8]> for PageHeader {
     /// Assumes that `&[u8]` len == size_of `PageHeader`
     fn from(value: &[u8]) -> Self {
         cast::from_bytes::<Self>(value).to_owned()
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug)]
+pub enum PageType {
+    IndexInternal = 5,
+    TableInternal = 10,
+    IndexLeaf = 15,
+    TableLeaf = 20,
+}
+
+impl TryFrom<u8> for PageType {
+    type Error = Error;
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            5 => Ok(Self::IndexInternal),
+            10 => Ok(Self::TableInternal),
+            15 => Ok(Self::IndexLeaf),
+            20 => Ok(Self::TableLeaf),
+            _ => Err(Error::InvalidPageType),
+        }
     }
 }
 
@@ -232,7 +266,9 @@ pub struct Page {
 
 impl Page {
     pub fn alloc(size: usize) -> Self {
-        let buffer = Buffer::alloc_page(size);
+        let mut buffer = Buffer::alloc_page(size);
+        let header = PageHeader::new(size);
+        *buffer.header_mut() = header;
 
         Self {
             buffer,
@@ -242,6 +278,10 @@ impl Page {
 
     pub fn usable_space(size: usize) -> u16 {
         Buffer::<PageHeader>::usable_space(size)
+    }
+
+    pub fn page_type(&self) -> PageType {
+        self.header().page_type.try_into().unwrap()
     }
 
     /// Number of slots stored in `Page`
@@ -476,8 +516,11 @@ impl Page {
         self.header_mut().last_used_offset = current_offset as u16;
     }
 
-    pub fn into_buffer(mut self) -> Buffer<PageHeader> {
-        let Page { buffer, overflow } = self;
+    pub fn into_buffer(self) -> Buffer<PageHeader> {
+        let Page {
+            buffer,
+            overflow: _,
+        } = self;
 
         buffer
     }
@@ -509,7 +552,7 @@ impl<H> From<Buffer<H>> for Page {
 
 impl Default for Page {
     fn default() -> Self {
-        Self::alloc(DEFAULT_PAGE_SIZE)
+        Self::alloc(*DEFAULT_PAGE_SIZE)
     }
 }
 impl Debug for Page {
@@ -521,6 +564,7 @@ impl Debug for Page {
     }
 }
 
+/*
 #[derive(Debug)]
 pub struct OverflowPageHeader {
     /// Next overflow page
@@ -581,6 +625,7 @@ impl<H> From<Buffer<H>> for OverflowPage {
         Self { buffer }
     }
 }
+*/
 
 #[cfg(test)]
 mod tests {

@@ -1,17 +1,8 @@
-use std::{
-    collections::HashMap,
-    fs::File,
-    io::{Cursor, Read, Seek, SeekFrom},
-    path::PathBuf,
-    ptr::{self, NonNull}
-};
+use std::{collections::HashMap, fs::File};
 
 use crate::{
-    storage::{Oid, PageNumber, Result},
-    utils::{
-        buffer::Buffer,
-        bytes::{get_u32, get_u64}, cast,
-    },
+    storage::{Oid, PageNumber},
+    utils::cast,
 };
 
 const TABLE_SIZE: usize = size_of::<Table>();
@@ -56,7 +47,7 @@ impl TableCatalog {
 /// - name, 20, 63 * 4 = 252
 ///
 /// **Total: 272**
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Table {
     oid: Oid,
     /// utf-8 encoded string. assuming worst case that, each character will take 4 bytesm, max len 63 chars. trailing spaces and new line symbols will be trimmed
@@ -67,41 +58,56 @@ pub struct Table {
 }
 
 impl Table {
+    pub fn name(&self) -> &str {
+        // unsafe { std::slice::from_raw_parts(self.name, self.name.len()) }
+        std::str::from_utf8(&self.name).unwrap()
+    }
     pub fn as_bytes(&self) -> &[u8] {
         // unsafe { std::slice::from_raw_parts((self as *const Table) as *const u8, TABLE_SIZE) }
         cast::bytes_of(self)
     }
 
-    pub fn from_bytes(data: &[u8]) -> &Self {
-        assert!(data.len() == TABLE_SIZE);
-        let table = ptr::slice_from_raw_parts(data.as_ptr(), TABLE_SIZE) as *mut Table;
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        cast::bytes_of_mut(self)
+    }
 
-        unsafe { NonNull::new_unchecked(table).as_ref() }
+    pub fn from_bytes(data: &[u8]) -> &Self {
+        // let table = ptr::slice_from_raw_parts(data.as_ptr(), TABLE_SIZE) as *mut Table;
+        // unsafe { NonNull::new_unchecked(table).as_ref() }
+        cast::from_bytes(data)
+    }
+
+    pub fn from_bytes_mut(data: &mut [u8]) -> &mut Self {
+        cast::from_bytes_mut(data)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    
+
     use super::*;
 
     #[test]
     fn main_test() -> anyhow::Result<()> {
+        let name = {
+            let s = b"Maciek";
+            let mut arr = [0; 252];
+            arr[..s.len()].copy_from_slice(s);
+            arr
+        };
         let table = Table {
             oid: 1,
-            name: [0; 252],
+            name,
             estimated_pages: 10,
             estimated_rows: 700,
-            namespace: 3
+            namespace: 3,
         };
 
-        println!("{:?}", table);
-        println!("{:?}", table.as_bytes());
-        // println!("{}", u64::from_le_bytes([188, 2, 0, 0, 0, 0 ,0 ,0]));
 
         let table_2 = Table::from_bytes(table.as_bytes());
 
-        println!("{:?}", table_2);
+        assert_eq!(table, *table_2);
+
         Ok(())
     }
 }
