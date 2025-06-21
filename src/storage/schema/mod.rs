@@ -4,7 +4,6 @@ use crate::storage::{schema::{index::Index, table::Table}, Oid};
 
 pub mod column;
 pub mod index;
-pub mod parse;
 pub mod table;
 
 pub struct Schema {

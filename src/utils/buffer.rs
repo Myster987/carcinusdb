@@ -1,12 +1,10 @@
 use std::{
-    alloc::{Layout, alloc_zeroed, dealloc},
+    alloc::{alloc_zeroed, dealloc, Layout},
     fmt::Debug,
     mem::ManuallyDrop,
-    ptr::NonNull,
-    sync::Arc,
+    ptr::{self, NonNull},
+    rc::Rc,
 };
-
-use parking_lot::RwLock;
 
 use crate::{
     os::DISK_BLOCK_SIZE,
@@ -15,33 +13,9 @@ use crate::{
 
 use super::{Error, Result, cast::is_aligned_to};
 
-// pub struct SharedBuffer<H> {
-//     pub buffer: Arc<RwLock<Buffer<H>>>,
-// }
+pub type BufferDropFn = Rc<dyn Fn(NonNull<[u8]>)>;
 
-// impl<H> SharedBuffer<H> {
-//     pub fn new(buffer: Buffer<H>) -> Self {
-//         Self {
-//             buffer: Arc::new(RwLock::new(buffer)),
-//         }
-//     }
-
-//     pub fn alloc_page(size: usize) -> Self {
-//         Self::new(Buffer::alloc_page(size))
-//     }
-
-//     pub fn lock_shared(&self) -> parking_lot::RwLockReadGuard<Buffer<H>> {
-//         self.buffer.read()
-//     }
-
-//     pub fn lock_exclusive(&self) -> parking_lot::RwLockWriteGuard<Buffer<H>> {
-//         self.buffer.write()
-//     }
-// }
-
-pub type SharedBuffer<H> = Arc<RwLock<Buffer<H>>>;
-
-/// Buffer with header that is building blocks of all pages.
+/// Buffer with header that is building blocks of all pages. If `drop` is not None, then it is called insted of deallocating memory.
 pub struct Buffer<H> {
     /// Pointer to header at the beginning of buffer
     header: NonNull<H>,
@@ -49,6 +23,8 @@ pub struct Buffer<H> {
     pub content: NonNull<[u8]>,
     /// Total size of buffer (size of header + size of content)
     pub size: usize,
+    /// Runs when `Buffer` is dropped
+    drop: Option<BufferDropFn>,
 }
 
 impl<H> Buffer<H> {
@@ -78,18 +54,18 @@ impl<H> Buffer<H> {
     /// Allocates buffer if it's size fits in MIN and MAX `Page` size.
     /// # Panics
     /// - If size is **less or more** than `Page` size should be.
-    pub fn alloc_page(size: usize) -> Self {
+    pub fn alloc_page(size: usize, drop: Option<BufferDropFn>) -> Self {
         assert!(
             (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
             "Page of size {size} is not between {MIN_PAGE_SIZE} AND {MAX_PAGE_SIZE}"
         );
-        Self::new(size, *DISK_BLOCK_SIZE)
+        Self::new(size, *DISK_BLOCK_SIZE, drop)
     }
 
-    pub fn new(size: usize, align: usize) -> Self {
+    pub fn new(size: usize, align: usize, drop: Option<BufferDropFn>) -> Self {
         let layout =
             Layout::from_size_align(size, align).expect("Invalid buffer size or alignment");
-        Self::from_non_null(Self::alloc(layout))
+        Self::from_non_null(Self::alloc(layout), drop)
     }
 
     /// Creates `Buffer` from `NonNull<[u8]>` pointer. \
@@ -97,7 +73,10 @@ impl<H> Buffer<H> {
     /// # Safety
     ///
     /// - `pointer` must be aligned to at least `CELL_ALIGNMENT`. Required by BTree.
-    pub unsafe fn try_from_non_null(pointer: NonNull<[u8]>) -> Result<Self> {
+    pub unsafe fn try_from_non_null(
+        pointer: NonNull<[u8]>,
+        drop: Option<BufferDropFn>,
+    ) -> Result<Self> {
         if pointer.len() <= size_of::<H>() {
             return Err(Error::InvalidAllocation(format!(
                 "Allocating {} with {} bytes is incorrect. You need at least {} to fit header ({} bytes)",
@@ -121,6 +100,7 @@ impl<H> Buffer<H> {
             header: pointer.cast(),
             content,
             size: pointer.len(),
+            drop,
         })
     }
 
@@ -129,19 +109,19 @@ impl<H> Buffer<H> {
     /// # Safety
     ///
     /// See `Buffer::try_from_non_null`.
-    pub fn from_non_null(pointer: NonNull<[u8]>) -> Self {
-        unsafe { Self::try_from_non_null(pointer).unwrap() }
+    pub fn from_non_null(pointer: NonNull<[u8]>, drop: Option<BufferDropFn>) -> Self {
+        unsafe { Self::try_from_non_null(pointer, drop).unwrap() }
     }
 
     /// Converts `Buffer<H>` into `Buffer<T>` and doesn't drop owned memory. \
     /// # Fails:
     /// * `size <= size_of::<H>()` - buffer needs to fit header and some content.
     pub fn cast<T>(self) -> Buffer<T> {
-        let Self {
-            header,
-            content: _,
-            size,
-        } = self;
+        let buf = ManuallyDrop::new(self);
+
+        let header = unsafe { ptr::read(&buf.header) };
+        let size = buf.size;
+        let drop = unsafe { ptr::read(&buf.drop) };
 
         assert!(
             size <= size_of::<T>(),
@@ -151,8 +131,6 @@ impl<H> Buffer<H> {
             size_of::<H>() + 1,
             size_of::<H>()
         );
-
-        std::mem::forget(self);
 
         let header = header.cast();
 
@@ -167,6 +145,7 @@ impl<H> Buffer<H> {
             header,
             content,
             size,
+            drop,
         }
     }
 
@@ -215,8 +194,19 @@ impl<H> Buffer<H> {
         unsafe { self.as_non_null().as_mut() }
     }
 
+    /// Zeroes whole buffer.
     pub fn reset(&mut self) {
         unsafe { std::ptr::write_bytes(self.header.as_ptr(), 0, self.size) };
+    }
+
+    /// Deallocates buffer. It is no longer valid.
+    pub fn deallocate(&mut self) {
+        unsafe {
+            dealloc(
+                self.header.cast().as_ptr(),
+                Layout::from_size_align(self.size, *DISK_BLOCK_SIZE).unwrap(),
+            );
+        }
     }
 }
 
@@ -233,13 +223,11 @@ impl<H> AsMut<[u8]> for Buffer<H> {
 }
 
 impl<H> Drop for Buffer<H> {
-    /// If `Buffer` is owner, then it deallocates memory, otherwise heap memory is still valid.
+    /// If `Buffer` has drop fn, then it is called insted of deallocation of memory.
     fn drop(&mut self) {
-        unsafe {
-            dealloc(
-                self.header.cast().as_ptr(),
-                Layout::from_size_align(self.size, *DISK_BLOCK_SIZE).unwrap(),
-            );
+        match &self.drop {
+            Some(drop_fn) => drop_fn(self.as_non_null()),
+            None => self.deallocate(),
         }
     }
 }
@@ -260,15 +248,15 @@ mod tests {
 
     #[test]
     fn basic() -> anyhow::Result<()> {
-        let mut buffer: Buffer<u8> = Buffer::alloc_page(512);
-        
+        let mut buffer: Buffer<u8> = Buffer::alloc_page(512, None);
+
         println!("{:?}", buffer);
 
         *buffer.header_mut() += 7;
         buffer.content_mut()[..6].copy_from_slice(b"Maciek");
 
         println!("{:?}", buffer);
-        
+
         buffer.reset();
 
         println!("{:?}", buffer);

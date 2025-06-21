@@ -17,19 +17,19 @@ pub fn get_u16(src: &mut impl Buf) -> Result<u16> {
     if !src.has_remaining() {
         return Err(Error::InvalidBytes);
     }
-    Ok(src.get_u16())
+    Ok(src.get_u16_le())
 }
 
 pub fn get_u32(src: &mut impl Buf) -> Result<u32> {
     if !src.has_remaining() {
         return Err(Error::InvalidBytes);
     }
-    Ok(src.get_u32())
+    Ok(src.get_u32_le())
 }
 
 pub fn get_u64(src: &mut impl Buf) -> Result<u64> {
     if !src.has_remaining() {
         return Err(Error::InvalidBytes);
     }
-    Ok(src.get_u64())
+    Ok(src.get_u64_le())
 }

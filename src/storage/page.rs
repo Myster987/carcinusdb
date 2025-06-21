@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::utils::{
-    buffer::{Buffer, SharedBuffer},
+    buffer::{Buffer, BufferDropFn},
     cast,
 };
 
@@ -29,8 +29,8 @@ pub const MAX_PAGE_SIZE: usize = 64 << 10;
 pub const CELL_HEADER_SIZE: usize = mem::size_of::<CellHeader>();
 pub const CELL_ALIGNMENT: usize = mem::align_of::<CellHeader>();
 
-#[derive(Debug, Clone, Copy)]
 #[repr(C, align(8))]
+#[derive(Debug, Clone, Copy)]
 pub struct CellHeader {
     /// Number of cell's left child
     pub left_child: PageNumber,
@@ -77,7 +77,7 @@ impl Cell {
             ))
             .unwrap();
 
-            Buffer::from_non_null(ptr)
+            Buffer::from_non_null(ptr, None)
         };
 
         buf.header_mut().size = aligned_size;
@@ -168,11 +168,23 @@ impl ToOwned for Cell {
     }
 }
 
-/// Stores information about `Page`
+/// Stores information about `Page`. Using C representation: \
+/// 
+/// ```text
+/// next_page - 4 bytes - offset 0
+/// free_space - 2 byres - offset 4
+/// num_slots - 2 bytes - offset 6
+/// last_used_offset - 2 bytes - offset 8
+/// page_type - 1 byte - offset 1 - 1 padding byte
+/// 
+/// ```
+/// Total size: 12 bytes
+#[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct PageHeader {
-    // Type of page
-    page_type: u8,
+    /// Stores pointer to next `Page` on the same level and allows for better concurrency (B-link-tree by P. Lehman and S. Yao)
+    pub next_page: PageNumber,
+
     /// Free space in page
     free_space: u16,
 
@@ -189,12 +201,11 @@ pub struct PageHeader {
     ///          |                                |
     ///          +--------------------------------+
     /// ```
-    /// True offset is calculated by adding page header size (6 bytes) to `last_used_offset`.\
-    /// `Offset` to cells = 6 bytes (48 bits) + `last_used_offset`
+    /// True offset is calculated by adding page header size to `last_used_offset`.\
     last_used_offset: u16,
 
-    /// Stores pointer to next `Page` on the same level and allows for better concurrency (B-link-tree by P. Lehman and S. Yao)
-    pub next_page: PageNumber,
+    // Type of page
+    page_type: u8,
 }
 
 impl PageHeader {
@@ -238,7 +249,9 @@ impl TryFrom<u8> for PageType {
     }
 }
 
-/// *Page is B-Tree node representation on disk (Page = Node)* \
+/// *Page is B-Tree node representation on disk (Page = Node).* \
+/// Page contains `Buffer`, which by defaul contains drop function that deallocates `Page`. \
+/// If this behavior is unwanted, then pass custom drop function as parameter either in `Page::new` or `Page::alloc`
 /// # Layout:
 ///
 /// ```text
@@ -265,8 +278,15 @@ pub struct Page {
 }
 
 impl Page {
-    pub fn alloc(size: usize) -> Self {
-        let mut buffer = Buffer::alloc_page(size);
+    pub fn new(buffer: Buffer<PageHeader>) -> Self {
+        Self {
+            buffer,
+            overflow: HashMap::new(),
+        }
+    }
+
+    pub fn alloc(size: usize, drop: Option<BufferDropFn>) -> Self {
+        let mut buffer = Buffer::alloc_page(size, drop);
         let header = PageHeader::new(size);
         *buffer.header_mut() = header;
 
@@ -278,6 +298,11 @@ impl Page {
 
     pub fn usable_space(size: usize) -> u16 {
         Buffer::<PageHeader>::usable_space(size)
+    }
+
+    pub fn read_u8(&self, position: usize) -> u8 {
+        // self.buffer.
+        todo!()
     }
 
     pub fn page_type(&self) -> PageType {
@@ -552,7 +577,7 @@ impl<H> From<Buffer<H>> for Page {
 
 impl Default for Page {
     fn default() -> Self {
-        Self::alloc(*DEFAULT_PAGE_SIZE)
+        Self::alloc(*DEFAULT_PAGE_SIZE, None)
     }
 }
 impl Debug for Page {
@@ -634,7 +659,7 @@ mod tests {
 
     #[test]
     fn page_into() -> anyhow::Result<()> {
-        let page = Page::alloc(512);
+        let page = Page::alloc(512, None);
         println!("{:?}", page);
         let buffer = page.into_buffer();
         println!("{:?}", buffer);
@@ -644,25 +669,12 @@ mod tests {
 
     #[test]
     fn main_test() -> anyhow::Result<()> {
-        // let mut page = Page::alloc(512);
+        let mut page = Page::alloc(512, None);
+        page.header_mut().next_page = 2;
+        page.header_mut().page_type = 5.try_into().unwrap();
 
-        // let s = "maciek";
-
-        // println!("{:?}", page.slot_array_mut());
-
-        // println!("{:?}", page);
-
-        let content = "1".to_string();
-
-        let cell = Cell::new(content.as_bytes().to_vec());
-        let owned = cell.to_owned();
-
-        println!("cell: {}, owned: {}", cell.total_size(), owned.total_size());
-
-        println!("{:?}", cell);
-
-        println!("{:?}", owned);
-
+        println!("{:?}", (512 - PAGE_HEADER_SIZE).to_le_bytes());
+        println!("{:?}", cast::bytes_of(page.header()));
         Ok(())
     }
 }

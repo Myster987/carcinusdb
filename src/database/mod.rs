@@ -1,16 +1,11 @@
 use crate::{
     error::DatabaseResult,
-    storage::file_system_manager::FILE_SYSTEM_MANAGER,
     tcp::server::{TcpServer, connection::Connection},
 };
 
-pub mod config;
-pub mod metadata;
 
 pub async fn run(hostname: String, port: u16) -> DatabaseResult<()> {
     log::info!("Starting CarcinusDB...");
-
-    config::create_base_dir()?;
 
     let addr = format!("{hostname}:{port}")
         .parse()

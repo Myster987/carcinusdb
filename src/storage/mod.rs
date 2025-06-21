@@ -1,16 +1,16 @@
 use thiserror::Error;
 
 pub mod buffer_pool;
-pub mod cache;
-pub mod file_system_manager;
-pub mod heap;
 pub mod page;
 pub mod pager;
 pub mod schema;
+pub mod wal;
+pub mod database;
 
 pub type Oid = u32;
 
 pub type PageNumber = u32;
+pub type TransactionId = u32;
 pub type SlotNumber = u16;
 
 pub const PAGE_NUMBER_SIZE: usize = std::mem::size_of::<PageNumber>();
