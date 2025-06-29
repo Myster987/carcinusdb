@@ -1,234 +1,96 @@
-use std::{
-    alloc::{Layout, alloc, alloc_zeroed},
-    collections::{BinaryHeap, HashMap},
-    fmt::Debug,
-    mem::{self},
-    ptr::{self, NonNull},
-    sync::LazyLock,
+use std::{cell::RefCell, collections::{BinaryHeap, HashMap}, io::Cursor, sync::Arc};
+
+use crate::{
+    storage::{Error, PageNumber, Result as StorageResult, SlotNumber},
+    utils::{
+        buffer::{Buffer, BufferDropFn},
+        bytes,
+    },
 };
 
-use crate::utils::{
-    buffer::{Buffer, BufferDropFn},
-    cast,
-};
+pub const DEFAULT_PAGE_SIZE: u16 = 4096;
 
-use super::{Error, PAGE_NUMBER_SIZE, PageNumber, SLOT_SIZE, SlotNumber};
-
-pub const DEFAULT_PAGE_SIZE: LazyLock<usize> = LazyLock::new(|| match std::env::var("PAGE_SIZE") {
-    Ok(page_size) => page_size
-        .parse::<usize>()
-        .expect("\"PAGE_SIZE\" env is invalid: {page_size}. Expected to be number."),
-    Err(_) => 4096,
-});
-
-pub const PAGE_HEADER_SIZE: usize = mem::size_of::<PageHeader>();
+const DEFAULT_CACHE_SIZE: i32 = -2000;
 
 pub const MIN_PAGE_SIZE: usize = 512;
 pub const MAX_PAGE_SIZE: usize = 64 << 10;
 
-pub const CELL_HEADER_SIZE: usize = mem::size_of::<CellHeader>();
-pub const CELL_ALIGNMENT: usize = mem::align_of::<CellHeader>();
-
-#[repr(C, align(8))]
-#[derive(Debug, Clone, Copy)]
-pub struct CellHeader {
-    /// Number of cell's left child
-    pub left_child: PageNumber,
-    /// Size of cell
-    size: u16,
-    /// True if `Cell` has overflow
-    pub is_overflow: bool,
+/// Returns usable space (`Page` size - reserved bytes at the end of `Page`).
+pub fn usable_space(page_size: usize, reserved: usize) -> usize {
+    page_size - reserved
 }
 
-// impl From<&[u8]> for CellHeader {
-//     /// Note that this assumes that slice of bytes is size of `CELL_HEADER_SIZE`.
-//     fn from(value: &[u8]) -> Self {
-//         // let cell_header = *from_bytes(value);
-//         let cell_header = cast_slice(value)[0];
+pub fn min_cell_size(usable_space: usize) -> usize {
+    ((usable_space - 12) * 32 / 255) - 23
+}
 
-//         cell_header
-//     }
-// }
+pub fn max_cell_size(usable_space: usize) -> usize {
+    ((usable_space - 12) * 64 / 255) - 23
+}
 
-/// Helps with operations on `Page`
 #[derive(Debug)]
-pub struct Cell {
-    pub header: CellHeader,
-
-    /// If [`Cellheader::is_overflow`] is true then last 4 bytes point to overflow page
-    pub content: [u8],
+pub struct DatabaseHeader {
+    /// Version number of db.
+    version: u32,
+    /// Size of each page in database.
+    page_size: u16,
+    /// Nummber of bytes reserved at the end of each `Page`. Default is 0
+    pub reserved_space: u8,
+    /// Counts how many times database file was changed. Increments on each update.
+    change_counter: u32,
+    /// Size of database in `Pages`.
+    pub database_size: PageNumber,
+    /// Page number of first freelist trunk page.
+    pub freelist_trunk_page: PageNumber,
+    /// Total number of freelist pages.
+    pub freelist_pages: u32,
+    /// Increments when schema changes.
+    schema_cookie: u32,
+    /// Cache size is stored as negative number, and it means that it holds X KiB of memory.
+    pub default_page_cache_size: i32,
 }
 
-impl Cell {
-    pub fn new(mut content: Vec<u8>) -> Box<Self> {
-        let aligned_size = Self::align_to_payload(&content);
-
-        content.resize(aligned_size as usize, 0);
-
-        // Alignment makes it safe. `content` is aligned to `CELL_ALIGNMENT`, so we don't have to worry about invalid buffer size.
-        let mut buf: Buffer<CellHeader> = unsafe {
-            let layout =
-                Layout::from_size_align((aligned_size as usize) + CELL_HEADER_SIZE, CELL_ALIGNMENT)
-                    .unwrap();
-
-            let ptr = NonNull::new(std::slice::from_raw_parts_mut(
-                alloc_zeroed(layout),
-                layout.size(),
-            ))
-            .unwrap();
-
-            Buffer::from_non_null(ptr, None)
-        };
-
-        buf.header_mut().size = aligned_size;
-
-        buf.content_mut().copy_from_slice(&content);
-
-        // Creates pointer to heap, because `Cell` size can't by known at compile time.
-        // Content is already aligned. which makes this operation safe.
-        unsafe {
-            Box::from_raw(ptr::slice_from_raw_parts(
-                buf.into_non_null().cast::<u8>().as_ptr(),
-                aligned_size as usize,
-            ) as *mut Cell)
-        }
-    }
-
-    /// Creates `Cell` by extending `content` with `overflow_page` number
-    pub fn new_overflow(mut content: Vec<u8>, overflow_page: PageNumber) -> Box<Self> {
-        content.extend_from_slice(&overflow_page.to_le_bytes());
-
-        let mut cell = Self::new(content);
-        cell.header.is_overflow = true;
-
-        cell
-    }
-
-    pub fn over_page(&self) -> PageNumber {
-        if !self.header.is_overflow {
-            return 0;
-        }
-
-        PageNumber::from_le_bytes(
-            self.content[self.content.len() - PAGE_NUMBER_SIZE..]
-                .try_into()
-                .expect("Invalid page number"),
-        )
-    }
-
-    /// Total size of `Cell` with header.
-    pub fn total_size(&self) -> u16 {
-        (CELL_HEADER_SIZE + self.content.len()) as u16
-    }
-
-    /// Total size of `Cell` with header and slot id.
-    pub fn storage_size(&self) -> u16 {
-        self.total_size() + (SLOT_SIZE as u16)
-    }
-
-    /// Returns payload size, after it is aligned to `CELL_ALIGNMENT`.
-    pub fn align_to_payload(payload: &[u8]) -> u16 {
-        Layout::from_size_align(payload.len(), CELL_ALIGNMENT)
-            .unwrap()
-            .pad_to_align()
-            .size() as u16
-    }
-}
-
-impl ToOwned for Cell {
-    type Owned = Box<Self>;
-
-    fn to_owned(&self) -> Self::Owned {
-        let layout = Layout::for_value(self);
-        let size = layout.size();
-
-        // allocates new memory on heap (first by creating fake slice and then corecing it into thin pointer)
-        let owned = unsafe {
-            NonNull::new_unchecked(
-                NonNull::new(std::slice::from_raw_parts_mut(alloc(layout), size))
-                    .unwrap()
-                    .as_ptr() as *mut u8,
-            )
-        };
-
-        let cell = ptr::from_ref(self);
-        // copies data from current heap location into another (casts &self into thin NonNull<u8> pointer and copies header with content of cell)
-        unsafe {
-            owned.copy_from_nonoverlapping(
-                NonNull::new_unchecked(cell.cast_mut().cast()),
-                self.total_size() as usize,
-            );
-            // this is Weird DST part, if we have allocated 50 bytes and DST stores 40 bytes and 10 bytes is header, then size of DST is 40 not 50
-            // that's why we have to create fake pointer with size of DST (self.content.len() in this case), because when using self.total_size() it will break
-            // all this operations should be safe, because we ensure proper alignmet
-            Box::from_raw(
-                ptr::slice_from_raw_parts(owned.as_ptr(), self.content.len()) as *mut Self,
-            )
+impl DatabaseHeader {
+    pub fn get_page_size(&self) -> usize {
+        if self.page_size == 1 {
+            MAX_PAGE_SIZE
+        } else {
+            self.page_size as usize
         }
     }
 }
 
-/// Stores information about `Page`. Using C representation: \
-/// 
-/// ```text
-/// next_page - 4 bytes - offset 0
-/// free_space - 2 byres - offset 4
-/// num_slots - 2 bytes - offset 6
-/// last_used_offset - 2 bytes - offset 8
-/// page_type - 1 byte - offset 1 - 1 padding byte
-/// 
-/// ```
-/// Total size: 12 bytes
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct PageHeader {
-    /// Stores pointer to next `Page` on the same level and allows for better concurrency (B-link-tree by P. Lehman and S. Yao)
-    pub next_page: PageNumber,
-
-    /// Free space in page
-    free_space: u16,
-
-    /// Number of items in slot array
-    num_slots: u16,
-
-    /// Offset to last inserted cell in page.
-    ///
-    /// ```text
-    /// +--------+------------+-------------------+--------+--------+--------+
-    /// | Header | Slot array | Free space        | Cell 3 | Cell 2 | Cell 1 |
-    /// +--------+------------+-------------------+--------+--------+--------+
-    ///          ^ start                          ^ offset                                 
-    ///          |                                |
-    ///          +--------------------------------+
-    /// ```
-    /// True offset is calculated by adding page header size to `last_used_offset`.\
-    last_used_offset: u16,
-
-    // Type of page
-    page_type: u8,
-}
-
-impl PageHeader {
-    pub fn new(size: usize) -> Self {
+impl Default for DatabaseHeader {
+    fn default() -> Self {
         Self {
-            page_type: 0,
-            num_slots: 0,
-            free_space: Page::usable_space(size) as u16,
-            last_used_offset: Page::usable_space(size) as u16,
-            next_page: 0,
+            version: 1,
+            page_size: DEFAULT_PAGE_SIZE,
+            reserved_space: 0,
+            change_counter: 1,
+            database_size: 1,
+            freelist_trunk_page: 0,
+            freelist_pages: 0,
+            schema_cookie: 0,
+            default_page_cache_size: DEFAULT_CACHE_SIZE,
         }
     }
 }
 
-impl From<&[u8]> for PageHeader {
-    /// Assumes that `&[u8]` len == size_of `PageHeader`
-    fn from(value: &[u8]) -> Self {
-        cast::from_bytes::<Self>(value).to_owned()
-    }
+/// Writes database header to buffer. Takes uses 31 bytes at the beginning.
+pub fn write_database_header(buf: &mut [u8], header: &DatabaseHeader) {
+    buf[..4].copy_from_slice(&header.version.to_le_bytes());
+    buf[4..6].copy_from_slice(&header.page_size.to_le_bytes());
+    buf[6] = header.reserved_space;
+    buf[7..11].copy_from_slice(&header.change_counter.to_le_bytes());
+    buf[11..15].copy_from_slice(&header.database_size.to_le_bytes());
+    buf[15..19].copy_from_slice(&header.freelist_trunk_page.to_le_bytes());
+    buf[19..23].copy_from_slice(&header.freelist_pages.to_le_bytes());
+    buf[23..27].copy_from_slice(&header.schema_cookie.to_le_bytes());
+    buf[27..31].copy_from_slice(&header.default_page_cache_size.to_le_bytes());
 }
 
 #[repr(u8)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum PageType {
     IndexInternal = 5,
     TableInternal = 10,
@@ -251,7 +113,7 @@ impl TryFrom<u8> for PageType {
 
 /// *Page is B-Tree node representation on disk (Page = Node).* \
 /// Page contains `Buffer`, which by defaul contains drop function that deallocates `Page`. \
-/// If this behavior is unwanted, then pass custom drop function as parameter either in `Page::new` or `Page::alloc`
+/// If this behavior is unwanted, then pass custom drop function as parameter in `Page::alloc`
 /// # Layout:
 ///
 /// ```text
@@ -267,60 +129,127 @@ impl TryFrom<u8> for PageType {
 ///                 |                                                        |
 ///                 +--------------------------------------------------------+
 /// ```
+/// # Header
+///
+/// Depending on `PageType` header is either 8 (Leaf Pages) or 12 (Internal Pages).
+///
+///
+/// ```text
+/// page_type           - 1 byte    - offset 0 - represent PageType.
+/// first_freeblock     - 2 bytes   - offset 1 - points to start of first freeblock, if set to 0, then there are no freeblocks.
+/// num_slots           - 2 bytes   - offset 3 - number of slots in slot array.
+/// last_used_offset    - 2 bytes   - offset 5 - offset to last used space. Used to calculate if new data can fit in Page.
+/// num_free_fragments  - 1 byte    - offset 7 - number of free fragments. Tiny gaps between cells, to small to fit new data.
+/// next_page           - 4 bytes   - offset 8 - present only in Internal Pages. Points to next B-Tree page.
+///
+/// ```
+/// Total size: 12 bytes (Internal Pages) or 8 bytes (Lead Pages) bytes long.
 ///
 /// # Overflow:
 /// If `Page` contains `Cells` that overflow, it maintains hashmap of slots pointing to overflowing `Cells`.
 /// Only chunk of `Cell` is stored in `Page` and it needs to be reassembled by going over
 ///
-pub struct Page {
-    buffer: Buffer<PageHeader>,
-    overflow: HashMap<SlotNumber, Box<Cell>>,
+pub struct Page<'a> {
+    offset: usize,
+    buffer: Arc<RefCell<Buffer<'a>>>,
+    overflow: HashMap<SlotNumber, bool>,
 }
 
-impl Page {
-    pub fn new(buffer: Buffer<PageHeader>) -> Self {
+impl<'a> Page<'a> {
+    pub fn new(offset: usize, buffer: Arc<RefCell<Buffer<'a>>>) -> Self {
         Self {
+            offset,
             buffer,
             overflow: HashMap::new(),
         }
     }
 
-    pub fn alloc(size: usize, drop: Option<BufferDropFn>) -> Self {
-        let mut buffer = Buffer::alloc_page(size, drop);
-        let header = PageHeader::new(size);
-        *buffer.header_mut() = header;
-
-        Self {
-            buffer,
-            overflow: HashMap::new(),
-        }
+    pub fn alloc(offset: usize, size: usize, drop: Option<BufferDropFn<'a>>) -> Self {
+        let buf = Buffer::alloc_page(size, drop);
+        Self::new(offset, Arc::new(RefCell::new(buf)))
     }
 
-    pub fn usable_space(size: usize) -> u16 {
-        Buffer::<PageHeader>::usable_space(size)
+    pub fn as_ptr(&self) -> &'a mut [u8] {
+        let buf = self.buffer.as_ptr();
+        unsafe { buf.as_mut().unwrap().as_mut_slice() }
     }
 
-    pub fn read_u8(&self, position: usize) -> u8 {
-        // self.buffer.
-        todo!()
+    fn read_u8(&self, pos: usize) -> u8 {
+        self.as_ptr()[self.offset + pos]
+    }
+
+    fn read_u16_no_offset(&self, pos: usize) -> u16 {
+        let buf = self.as_ptr();
+        u16::from_le_bytes([buf[pos], buf[pos + 1]])
+    }
+
+    fn read_u16(&self, pos: usize) -> u16 {
+        self.read_u16_no_offset(self.offset + pos)
+    }
+
+    fn read_u32_no_offset(&self, pos: usize) -> u32 {
+        let buf = self.as_ptr();
+        u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]])
+    }
+
+    fn read_u32(&self, pos: usize) -> u32 {
+        self.read_u32_no_offset(self.offset + pos)
+    }
+
+    fn write_u8(&self, pos: usize, value: u8) {
+        let buf = self.as_ptr();
+        buf[self.offset + pos] = value;
+    }
+
+    fn write_u16_no_offset(&self, pos: usize, value: u16) {
+        let buf = self.as_ptr();
+        buf[pos..pos + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u16(&self, pos: usize, value: u16) {
+        self.write_u16_no_offset(self.offset + pos, value);
+    }
+
+    fn write_u32_no_offset(&self, pos: usize, value: u32) {
+        let buf = self.as_ptr();
+        buf[pos..pos + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u32(&self, pos: usize, value: u32) {
+        self.write_u32_no_offset(self.offset + pos, value);
+    }
+
+    pub fn try_page_type(&self) -> Option<PageType> {
+        self.read_u8(0).try_into().ok()
     }
 
     pub fn page_type(&self) -> PageType {
-        self.header().page_type.try_into().unwrap()
+        self.try_page_type().unwrap()
     }
 
-    /// Number of slots stored in `Page`
+    pub fn first_freeblock(&self) -> u16 {
+        self.read_u16(1)
+    }
+
+    pub fn last_used_offset(&self) -> u16 {
+        self.read_u16(5)
+    }
+
+    pub fn free_fragments(&self) -> u8 {
+        self.read_u8(7)
+    }
+
+    /// Returns next `PageNumber` if `PageType` is internal or None if `Page` is Lead
+    pub fn try_next_page(&self) -> Option<PageNumber> {
+        match self.page_type() {
+            PageType::IndexInternal | PageType::TableInternal => Some(self.read_u32(8)),
+            PageType::IndexLeaf | PageType::TableLeaf => None,
+        }
+    }
+
+    /// Returns number of slots in `Page`.
     pub fn len(&self) -> u16 {
-        self.buffer.header().num_slots
-    }
-
-    /// Size of `Page` in bytes (including header)
-    pub fn size(&self) -> usize {
-        self.buffer.size
-    }
-
-    pub fn free_space(&self) -> u16 {
-        self.header().free_space
+        self.read_u16(3)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -331,350 +260,235 @@ impl Page {
         !self.overflow.is_empty()
     }
 
-    /// Returns max payload that can be inserted into `Page`
-    pub fn max_payload_size(usable_space: u16) -> u16 {
-        (usable_space - CELL_HEADER_SIZE as u16 - SLOT_SIZE as u16) & !(CELL_ALIGNMENT as u16 - 1)
-    }
-
-    pub fn max_allowed_payload_size(&self) -> u16 {
-        Self::max_payload_size(Self::usable_space(self.size()))
-    }
-
-    /// Returns most optimal item sizes that page can hold
-    pub fn ideal_payload_size(page_size: usize, min_cell: usize) -> u16 {
-        let ideal_size = Self::max_payload_size(Self::usable_space(page_size) / min_cell as u16);
-
-        ideal_size
-    }
-
-    pub fn header(&self) -> &PageHeader {
-        self.buffer.header()
-    }
-
-    pub fn header_mut(&mut self) -> &mut PageHeader {
-        self.buffer.header_mut()
-    }
-
-    pub fn slot_array_non_null(&self) -> NonNull<[u16]> {
-        NonNull::slice_from_raw_parts(self.buffer.content.cast(), self.header().num_slots as usize)
-    }
-
-    pub fn slot_array(&self) -> &[u16] {
-        unsafe { self.slot_array_non_null().as_ref() }
-    }
-
-    pub fn slot_array_mut(&self) -> &mut [u16] {
-        unsafe { self.slot_array_non_null().as_mut() }
-    }
-
-    /// Returns pointer to `CellHeader` at given offset.
-    ///
-    /// # Safety
-    ///
-    /// This function is marked as unsafe because we cannot guarantee that bytes at given offset will be valid.
-    unsafe fn cell_header_at_offset(&self, offset: u16) -> NonNull<CellHeader> {
-        unsafe { self.buffer.content.byte_add(offset as usize).cast() }
-    }
-
-    // Returns pointer cell at given offset
-    unsafe fn cell_at_offset(&self, offset: u16) -> NonNull<Cell> {
-        let header = unsafe { self.cell_header_at_offset(offset) };
-        let size = unsafe { header.as_ref().size } as usize;
-
-        let cell = ptr::slice_from_raw_parts(header.cast::<u8>().as_ptr(), size) as *mut Cell;
-
-        // Safety: pointer must be non-null
-        unsafe { NonNull::new_unchecked(cell) }
-    }
-
-    /// Returns cell at given slot index
-    fn cell_at_slot(&self, index: SlotNumber) -> NonNull<Cell> {
-        let offset = self.slot_array()[index as usize];
-
-        unsafe { self.cell_at_offset(offset) }
-    }
-
-    pub fn cell(&self, index: SlotNumber) -> &Cell {
-        let cell = self.cell_at_slot(index);
-        // Safety same as `Self::cell_at_slot`
-        unsafe { cell.as_ref() }
-    }
-
-    pub fn cell_mut(&mut self, index: SlotNumber) -> &mut Cell {
-        let mut cell = self.cell_at_slot(index);
-        // Safety same as `Self::cell_at_slot`
-        unsafe { cell.as_mut() }
-    }
-
-    /// Returns owned cell by coping.
-    pub fn owned_cell(&self, index: SlotNumber) -> Box<Cell> {
-        self.cell(index).to_owned()
-    }
-
-    /// Inserts cell at given index. Can cause overflow.
-    pub fn insert(&mut self, index: SlotNumber, cell: Box<Cell>) {
-        assert!(
-            cell.content.len() <= self.max_allowed_payload_size() as usize,
-            "can't store data of size {} when max allowed payload size is {}",
-            cell.content.len(),
-            self.max_allowed_payload_size()
-        );
-
-        assert!(
-            index <= self.len(),
-            "index out of range for page of length: {}",
-            self.len()
-        );
-
-        if self.is_overflow() {
-            self.overflow.insert(index, cell);
-        } else if let Err(cell) = self.try_insert(index, cell) {
-            self.overflow.insert(index, cell);
+    /// Depending on `PageType`, this function returns 12 or 8.
+    pub fn header_size(&self) -> usize {
+        match self.page_type() {
+            PageType::IndexInternal | PageType::TableInternal => 12,
+            PageType::IndexLeaf | PageType::TableLeaf => 8,
         }
     }
 
-    fn try_insert(&mut self, index: SlotNumber, cell: Box<Cell>) -> Result<SlotNumber, Box<Cell>> {
-        // We can't fit `Cell` in this `Page`.
-        if self.header().free_space < cell.storage_size() {
-            return Err(cell);
-        }
-
-        let avalible_space = {
-            let end = self.header().last_used_offset;
-            let start = self.header().num_slots * SLOT_SIZE as u16;
-            end - start
-        };
-
-        if avalible_space < cell.storage_size() {
-            // defragmet page (delete dead cells)
-            self.compact();
-        }
-
-        // Offset to beginning of a location where new `cell` will be inserted
-        let offset = self.header().last_used_offset - cell.total_size();
-
-        unsafe {
-            let header = self.cell_header_at_offset(offset);
-            header.write(cell.header);
-
-            let mut content =
-                NonNull::slice_from_raw_parts(header.add(1).cast(), cell.header.size as usize);
-            content.as_mut().copy_from_slice(&cell.content);
-        }
-
-        self.header_mut().last_used_offset = offset;
-        self.header_mut().free_space -= cell.storage_size();
-
-        self.header_mut().num_slots += 1;
-
-        if index < self.header_mut().num_slots {
-            let end = self.header().num_slots as usize - 1;
-
-            self.slot_array_mut()
-                .copy_within(index as usize..end, index as usize + 1);
-        }
-
-        self.slot_array_mut()[index as usize] = offset;
-
-        Ok(index)
+    /// Returns avalible space without header.
+    pub fn storage_space(&self) -> u16 {
+        (self.buffer.borrow().size() - self.header_size()) as u16
     }
 
-    /// Removes given index in slot array and returns owned cell (`Box<Cell>`) that was under this index. Also incresess free space
-    pub fn remove(&mut self, index: SlotNumber) -> Box<Cell> {
-        let len = self.len();
-
-        let cell = self.owned_cell(index);
-
-        assert!(index < len, "index {index} out of range for length {len}");
-
-        self.slot_array_mut()
-            .copy_within(index as usize + 1..len as usize, index as usize);
-
-        self.header_mut().num_slots -= 1;
-        self.header_mut().free_space += cell.storage_size();
-
-        cell
+    /// Free space between slot array and last cell.
+    pub fn free_space(&self) -> u16 {
+        self.last_used_offset() - ((self.offset + self.header_size()) as u16 + self.len() * 2)
     }
 
-    /// Reclaims unused space after deleted cells. Current free space doesn't change, but placement of cells  
-    ///
-    /// ## Before:
-    /// ```text
-    /// +-------------------------------------------------------------------------------------+
-    /// | 01 | 02 | 03 |             |  Cell 3  |     DEL     | Cell 2 |  DEL  |    Cell 1    |
-    /// +-------------------------------------------------------------------------------------+
-    ///
-    /// ```
-    /// ## After:
-    /// ```text
-    /// +-------------------------------------------------------------------------------------+
-    /// | 01 | 02 | 03 |  ---  shifted to the right  -->  |  Cell 3  |  Cell 2 |    Cell 1    |
-    /// +-------------------------------------------------------------------------------------+
-    /// ```
-    ///
-    fn compact(&mut self) {
-        let mut order = BinaryHeap::from_iter(
-            self.slot_array()
-                .iter()
-                .enumerate()
-                .map(|(i, offset)| (i, *offset)),
-        );
-
-        let mut current_offset = self.size() - PAGE_HEADER_SIZE;
-
-        while let Some((index, offset)) = order.pop() {
-            unsafe {
-                let cell = self.cell_at_offset(offset);
-                let size = cell.as_ref().total_size() as usize;
-
-                current_offset -= size;
-
-                cell.cast::<u8>().copy_to(
-                    self.buffer.content.byte_add(current_offset).cast::<u8>(),
-                    size,
-                );
-
-                self.slot_array_mut()[index] = current_offset as u16;
-            }
-        }
-
-        self.header_mut().last_used_offset = current_offset as u16;
+    /// Returns offset to Cell at given slot index. Note that in order to work correctly, valid index is needed otherwise it will return weird number.
+    pub fn slot_at(&self, idx: usize) -> SlotNumber {
+        let slot_offset = self.header_size() + idx * 2;
+        self.read_u16(slot_offset)
     }
 
-    pub fn into_buffer(self) -> Buffer<PageHeader> {
-        let Page {
-            buffer,
-            overflow: _,
-        } = self;
+    pub fn cell_get(
+        &self,
+        idx: usize,
+        min_cell_size: usize,
+        max_cell_size: usize,
+        usable_space: usize,
+    ) -> StorageResult<BTreeCell<'a>> {
+        let buf = self.as_ptr();
 
-        buffer
+        let offset_to_cell = self.slot_at(idx);
+
+        // // buf lifetime is change to 'a.
+        // let buf = unsafe {
+        //     std::mem::transmute::<&[u8], &'a [u8]>(buf)
+        // };
+
+        read_btree_cell(
+            buf,
+            self.page_type(),
+            offset_to_cell as u64,
+            min_cell_size,
+            max_cell_size,
+            usable_space,
+        )
     }
+
 }
 
-impl AsRef<[u8]> for Page {
-    fn as_ref(&self) -> &[u8] {
-        self.buffer.as_ref()
-    }
-}
-impl AsMut<[u8]> for Page {
-    fn as_mut(&mut self) -> &mut [u8] {
-        self.buffer.as_mut()
-    }
+/// Wraps possible types of cell stored in `Page`. On disk each variable is stored in little endian except varints.
+pub enum BTreeCell<'a> {
+    IndexInternalCell(IndexInternalCell<'a>),
+    IndexLeafCell(IndexLeafCell<'a>),
+    TableInternalCell(TableInternalCell),
+    TableLeafCell(TableLeafCell<'a>),
 }
 
-impl<H> From<Buffer<H>> for Page {
-    fn from(buffer: Buffer<H>) -> Self {
-        let mut buffer = buffer.cast();
 
-        *buffer.header_mut() = PageHeader::new(buffer.size);
+pub struct IndexInternalCell<'a> {
+    /// Left child of BTree Page
+    pub left_child: PageNumber,
+    /// Total size of Cell including overflow Pages
+    payload_size: u64,
+    /// Pointer to content of cell living in Page. It doesn't include overflowing payload
+    payload: &'a [u8],
+    /// If cell is overflowing then it points to first overflowing page
+    first_overflow: Option<PageNumber>,
+}
 
-        Self {
-            buffer,
-            overflow: HashMap::new(),
+pub struct IndexLeafCell<'a> {
+    /// Total size of Cell including overflow Pages
+    payload_size: u64,
+    /// Pointer to content of cell living in Page. It doesn't include overflowing payload
+    payload: &'a [u8],
+    /// If cell is overflowing then it points to first overflowing page
+    first_overflow: Option<PageNumber>,
+}
+
+pub struct TableInternalCell {
+    /// Unique ID of row
+    row_id: i64,
+    /// Left child of BTree Page
+    pub left_child: PageNumber,
+}
+
+pub struct TableLeafCell<'a> {
+    /// Unique ID of row
+    row_id: i64,
+    /// Total size of Cell including overflow Pages
+    payload_size: u64,
+    /// Pointer to content of cell living in Page. It doesn't include overflowing payload
+    payload: &'a [u8],
+    /// If cell is overflowing then it points to first overflowing page
+    first_overflow: Option<PageNumber>,
+}
+
+/// Creates `BTreeCell` based on provided `PageType`.
+pub fn read_btree_cell<'a>(
+    buf: &'a [u8],
+    page_type: PageType,
+    pos: u64,
+    min_cell_size: usize,
+    max_cell_size: usize,
+    usable_space: usize,
+) -> StorageResult<BTreeCell<'a>> {
+    let mut cursor = Cursor::new(buf);
+    cursor.set_position(pos as u64);
+
+    match page_type {
+        PageType::IndexInternal => {
+            let left_child = bytes::get_u32(&mut cursor)?;
+            let payload_size = bytes::read_varint(&mut cursor);
+
+            let (is_overflowing, local_payload_size) = cell_overflows(
+                payload_size as usize,
+                min_cell_size,
+                max_cell_size,
+                usable_space,
+            );
+
+            let first_overflow = if is_overflowing {
+                Some(bytes::get_u32(&mut cursor)?)
+            } else {
+                None
+            };
+
+            let start = cursor.position() as usize;
+            let end = start + local_payload_size;
+
+            let payload = &cursor.into_inner()[start..end];
+
+            let cell = IndexInternalCell {
+                left_child,
+                payload_size,
+                payload,
+                first_overflow,
+            };
+
+            Ok(BTreeCell::IndexInternalCell(cell))
+        }
+        PageType::IndexLeaf => {
+            let payload_size = bytes::read_varint(&mut cursor);
+
+            let (is_overflowing, local_payload_size) = cell_overflows(
+                payload_size as usize,
+                min_cell_size,
+                max_cell_size,
+                usable_space,
+            );
+
+            let first_overflow = if is_overflowing {
+                Some(bytes::get_u32(&mut cursor)?)
+            } else {
+                None
+            };
+
+            let start = cursor.position() as usize;
+            let end = start + local_payload_size;
+
+            let payload = &cursor.into_inner()[start..end];
+
+            let cell = IndexLeafCell {
+                payload_size,
+                payload,
+                first_overflow,
+            };
+
+            Ok(BTreeCell::IndexLeafCell(cell))
+        }
+        PageType::TableInternal => {
+            let row_id = bytes::zigzag_decode(bytes::read_varint(&mut cursor));
+            let left_child = bytes::get_u32(&mut cursor)?;
+            let cell = TableInternalCell { row_id, left_child };
+            Ok(BTreeCell::TableInternalCell(cell))
+        }
+        PageType::TableLeaf => {
+            let row_id = bytes::zigzag_decode(bytes::read_varint(&mut cursor));
+            let payload_size = bytes::read_varint(&mut cursor);
+
+            let (is_overflowing, local_payload_size) = cell_overflows(
+                payload_size as usize,
+                min_cell_size,
+                max_cell_size,
+                usable_space,
+            );
+
+            let first_overflow = if is_overflowing {
+                Some(bytes::get_u32(&mut cursor)?)
+            } else {
+                None
+            };
+
+            let start = cursor.position() as usize;
+            let end = start + local_payload_size;
+
+            let payload = &cursor.into_inner()[start..end];
+
+            let cell = TableLeafCell {
+                row_id,
+                payload_size,
+                payload,
+                first_overflow,
+            };
+            Ok(BTreeCell::TableLeafCell(cell))
         }
     }
 }
 
-impl Default for Page {
-    fn default() -> Self {
-        Self::alloc(*DEFAULT_PAGE_SIZE, None)
+/// Calculates if cell overflows and returns size of payload that is stored in cell with overflow pointer (not includes overflow content).
+pub fn cell_overflows(
+    payload_size: usize,
+    min_cell_size: usize,
+    max_cell_size: usize,
+    usable_space: usize,
+) -> (bool, usize) {
+    if payload_size <= max_cell_size {
+        return (false, payload_size);
     }
+    let mut to_store = min_cell_size + ((payload_size - min_cell_size) % (usable_space - 4));
+    if to_store > max_cell_size {
+        to_store = min_cell_size
+    }
+    (true, to_store + 4)
 }
-impl Debug for Page {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Page")
-            .field("buffer", &self.buffer)
-            .field("overflow", &self.overflow)
-            .finish()
-    }
-}
-
-/*
-#[derive(Debug)]
-pub struct OverflowPageHeader {
-    /// Next overflow page
-    pub next: PageNumber,
-    /// Number of bytes stored in this page
-    pub num_bytes: u16,
-}
-
-pub struct OverflowPage {
-    buffer: Buffer<OverflowPageHeader>,
-}
-
-impl OverflowPage {
-    pub fn alloc(size: usize) -> Self {
-        Self {
-            buffer: Buffer::alloc_page(size),
-        }
-    }
-
-    pub fn usable_space(size: usize) -> u16 {
-        Buffer::<OverflowPageHeader>::usable_space(size)
-    }
-
-    pub fn header(&self) -> &OverflowPageHeader {
-        self.buffer.header()
-    }
-
-    pub fn header_mut(&mut self) -> &mut OverflowPageHeader {
-        self.buffer.header_mut()
-    }
-
-    /// Returns read-only reference to payload (not whole buffer)
-    pub fn payload(&self) -> &[u8] {
-        &self.buffer.content()[..self.header().num_bytes as usize]
-    }
-}
-
-impl AsRef<[u8]> for OverflowPage {
-    fn as_ref(&self) -> &[u8] {
-        self.buffer.as_ref()
-    }
-}
-impl AsMut<[u8]> for OverflowPage {
-    fn as_mut(&mut self) -> &mut [u8] {
-        self.buffer.as_mut()
-    }
-}
-
-impl<H> From<Buffer<H>> for OverflowPage {
-    fn from(buffer: Buffer<H>) -> Self {
-        let mut buffer = buffer.cast();
-
-        *buffer.header_mut() = OverflowPageHeader {
-            next: 0,
-            num_bytes: 0,
-        };
-
-        Self { buffer }
-    }
-}
-*/
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
-
-    #[test]
-    fn page_into() -> anyhow::Result<()> {
-        let page = Page::alloc(512, None);
-        println!("{:?}", page);
-        let buffer = page.into_buffer();
-        println!("{:?}", buffer);
-
-        Ok(())
-    }
-
-    #[test]
-    fn main_test() -> anyhow::Result<()> {
-        let mut page = Page::alloc(512, None);
-        page.header_mut().next_page = 2;
-        page.header_mut().page_type = 5.try_into().unwrap();
-
-        println!("{:?}", (512 - PAGE_HEADER_SIZE).to_le_bytes());
-        println!("{:?}", cast::bytes_of(page.header()));
-        Ok(())
-    }
 }
