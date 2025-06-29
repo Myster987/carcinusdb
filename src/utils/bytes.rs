@@ -97,6 +97,14 @@ pub fn write_varint(buf: &mut [u8], value: u64) -> usize {
     n
 }
 
+pub fn zigzag_encode(value: i64) -> u64 {
+    (value >> 63) as u64 ^ (value << 1) as u64
+}
+
+pub fn zigzag_decode(value: u64) -> i64 {
+    (value >> 1) as i64 ^ -((value & 1) as i64)
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -109,6 +117,17 @@ mod tests {
         write_varint(&mut buf, num);
 
         assert!(num == read_varint(&mut buf.as_slice()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_zigzag() -> anyhow::Result<()> {
+        let num = 123_456_789;
+
+        let encoded = zigzag_encode(num);
+
+        assert!(num == zigzag_decode(encoded));
 
         Ok(())
     }
