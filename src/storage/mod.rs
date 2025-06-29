@@ -3,9 +3,8 @@ use thiserror::Error;
 pub mod buffer_pool;
 pub mod page;
 pub mod pager;
-pub mod schema;
-pub mod wal;
-pub mod database;
+// pub mod schema;
+// pub mod wal;
 
 pub type Oid = u32;
 
