@@ -1,4 +1,4 @@
-use std::cell::UnsafeCell;
+use std::cell::{OnceCell, RefCell, UnsafeCell};
 use std::path::Path;
 
 use std::fs::File;
@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::storage::buffer_pool::BufferPool;
 use crate::storage::page::{DEFAULT_PAGE_SIZE, PageType};
+use crate::utils::buffer::Buffer;
 use crate::utils::io::BlockIO;
 
 use crate::{
@@ -18,43 +19,24 @@ use crate::{
 
 use super::page::Page;
 
-/*
-pub enum MemPageContent {
-    BTree(Page),
-    Overflow(OverflowPage),
-}
-
-impl From<Page> for MemPageContent {
-    fn from(value: Page) -> Self {
-        Self::BTree(value)
-    }
-}
-*/
-
-// impl From<OverflowPage> for MemPageContent {
-//     fn from(value: OverflowPage) -> Self {
-//         Self::Overflow(value)
-//     }
-// }
-
 pub enum MemPageState {
     Loaded,
     Error,
 }
 
-pub struct MemPageInner {
+pub struct MemPageInner<'a> {
     pub id: PageNumber,
     pub flags: AtomicUsize,
-    pub content: Option<Page>,
+    pub content: Option<Page<'a>>,
 }
 
 /// Represents page in memory
-pub struct MemPage {
-    inner: UnsafeCell<MemPageInner>,
+pub struct MemPage<'a> {
+    inner: UnsafeCell<MemPageInner<'a>>,
 }
 
 /// Concurrency will be handled by Pager
-pub type MemPageRef = Arc<MemPage>;
+pub type MemPageRef<'a> = Arc<MemPage<'a>>;
 
 /// Page is up to date.
 const PAGE_UPTODATE: usize = 0b00001;
@@ -67,7 +49,7 @@ const PAGE_DIRTY: usize = 0b01000;
 /// Page is loaded into memory.
 const PAGE_LOADED: usize = 0b10000;
 
-impl MemPage {
+impl<'a> MemPage<'a> {
     pub fn new(id: PageNumber) -> Self {
         Self {
             inner: UnsafeCell::new(MemPageInner {
@@ -79,11 +61,11 @@ impl MemPage {
     }
 
     #[allow(clippy::mut_from_ref)]
-    pub fn get(&self) -> &mut MemPageInner {
+    pub fn get(&self) -> &mut MemPageInner<'a> {
         unsafe { &mut *self.inner.get() }
     }
 
-    pub fn get_content(&self) -> &mut Page {
+    pub fn get_content(&self) -> &mut Page<'a> {
         self.get().content.as_mut().unwrap()
     }
 
@@ -160,44 +142,59 @@ pub struct Pager {
     /// I/O interface
     io: BlockIO<File>,
     buffer_pool: Rc<BufferPool>,
+    page_size: u16,
+    reserved_space: u8,
 }
 
 impl Pager {
-    pub fn begin_open(path: impl AsRef<Path>, buffer_pool_ref: Rc<BufferPool>) -> DatabaseResult<Self> {
-        let file = OpenOptions::default()
-            .create(true)
-            .read(true)
-            .write(true)
-            .sync_on_write(true)
-            .bypass_cache(true)
-            .lock(true)
-            .open(&path)?;
+    pub fn begin_open(
+        io: BlockIO<File>,
+        buffer_pool: Rc<BufferPool>,
+        page_size: u16,
+        reserved_space: u8,
+    ) -> DatabaseResult<Self> {
+        // let file = OpenOptions::default()
+        //     .create(true)
+        //     .read(true)
+        //     .write(true)
+        //     .sync_on_write(true)
+        //     .bypass_cache(true)
+        //     .lock(true)
+        //     .open(&path)?;
 
         Ok(Self {
-            io: BlockIO::new(file, *DEFAULT_PAGE_SIZE),
-            buffer_pool: buffer_pool_ref,
+            io,
+            buffer_pool,
+            page_size,
+            reserved_space,
         })
     }
 
     pub fn read_page(&mut self, page_number: PageNumber) -> DatabaseResult<MemPageRef> {
         let page = Arc::new(MemPage::new(page_number));
-        // page.set_locked();
+        page.set_locked();
 
         // check cache...
 
         // check wall...
 
         // read from disk
-
         let mut buf = self.buffer_pool.get();
 
-        // let page = Sha
+        self.io.read(page_number, &mut buf)?;
 
-        // self.io.read(page_number, buffer.as_slice_mut())?;
+        let buf = Buffer::new(
+            buf,
+            Some(Rc::new(|ptr| {
+                self.buffer_pool.clone().put(ptr);
+            })),
+        );
 
-        // let inner = MemPageContent::
+        let content = Page::new(0, Arc::new(RefCell::new(buf)));
 
-        todo!()
+        page.get().content = Some(content);
+
+        Ok(page)
     }
 
     pub fn write(&mut self, page_number: PageNumber, buffer: &[u8]) -> DatabaseResult<usize> {
@@ -212,4 +209,3 @@ impl Pager {
         Ok(self.io.sync()?)
     }
 }
-
