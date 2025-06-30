@@ -181,7 +181,12 @@ impl Pager {
         // read from disk
         let mut buf = self.buffer_pool.get();
 
-        self.io.read(page_number, &mut buf)?;
+        if let Err(error) = self.io.read(page_number, &mut buf) {
+            page.set_error();
+            page.clear_locked();
+            return Err(error.into());
+        }
+            
 
         let buf = Buffer::new(
             buf,
