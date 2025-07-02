@@ -1,10 +1,10 @@
 use std::fmt::{self, Display, Write};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Token {
     Keyword(Keyword),
     Identifier(String),
-    // Whitespace(Whitespace),
+    Whitespace(Whitespace),
     String(String),
     Number(String),
     Eq,
@@ -25,6 +25,11 @@ pub enum Token {
     Eof,
 }
 
+impl Token {
+    pub fn is_part_keyword_or_identifier(ch: &char) -> bool {
+        ch.is_ascii_lowercase() || ch.is_ascii_uppercase() || ch.is_ascii_digit() || *ch == '_'
+    }
+}
 
 impl From<&Keyword> for Token {
     fn from(value: &Keyword) -> Self {
@@ -35,7 +40,7 @@ impl Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::Eof => f.write_str("EOF"),
-            // Self::Whitespace(whitespace) => write!(f, "{whitespace}"),
+            Self::Whitespace(whitespace) => write!(f, "{whitespace}"),
             Self::Keyword(keyword) => write!(f, "{keyword}"),
             Self::Identifier(identifier) => f.write_str(identifier),
             Self::String(string) => write!(f, "\"{string}\""),
@@ -90,11 +95,13 @@ pub enum Keyword {
     By,
     Index,
     On,
-    Start,
+    Begin,
     Transaction,
     Rollback,
     Commit,
     Explain,
+    /// Not used, only for convinience
+    None,
 }
 
 impl Display for Keyword {
@@ -129,28 +136,29 @@ impl Display for Keyword {
             Self::By => "BY",
             Self::Index => "INDEX",
             Self::On => "ON",
-            Self::Start => "BEGIN",
+            Self::Begin => "BEGIN",
             Self::Transaction => "TRANSACTION",
             Self::Rollback => "ROLLBACK",
             Self::Commit => "COMMIT",
             Self::Explain => "EXPLAIN",
+            Self::None => "NONE"
         })
     }
 }
 
-// #[derive(Debug)]
-// pub enum Whitespace {
-//     Space,
-//     Tab,
-//     Newline,
-// }
+#[derive(Debug, Clone, Copy)]
+pub enum Whitespace {
+    Space,
+    Tab,
+    Newline,
+}
 
-// impl Display for Whitespace {
-//     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-//         f.write_char(match self {
-//             Self::Space => ' ',
-//             Self::Tab => '\t',
-//             Self::Newline => '\n',
-//         })
-//     }
-// }
+impl Display for Whitespace {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_char(match self {
+            Self::Space => ' ',
+            Self::Tab => '\t',
+            Self::Newline => '\n',
+        })
+    }
+}
