@@ -20,6 +20,7 @@ impl<'a> Stream<'a> {
         }
     }
 
+    /// Returns reference to input string.
     pub fn raw(&self) -> &'a str {
         self.input
     }
@@ -36,6 +37,7 @@ impl<'a> Stream<'a> {
         self.chars.peek()
     }
 
+    /// Peeks next character in stream, by skiping current next.
     pub fn peek_next(&mut self) -> Option<&char> {
         self.next();
         self.peek()
@@ -54,12 +56,13 @@ impl<'a> Tokenizer<'a> {
     }
 
     /// Consumes character and returns next `Token`.
-    pub fn consume(&mut self, token: Token) -> SqlResult<Token> {
+    fn consume(&mut self, token: Token) -> SqlResult<Token> {
         self.stream.next();
         Ok(token)
     }
 
-    pub fn consume_number(&mut self) -> SqlResult<Token> {
+    /// Consumes number.
+    fn consume_number(&mut self) -> SqlResult<Token> {
         let mut number = String::new();
 
         while let Some(digit) = self.stream.peek() {
@@ -73,7 +76,8 @@ impl<'a> Tokenizer<'a> {
         Ok(Token::Number(number))
     }
 
-    pub fn consume_string(&mut self) -> SqlResult<Token> {
+    /// Consumes string inside quotes.
+    fn consume_string(&mut self) -> SqlResult<Token> {
         let quote = self.stream.next().unwrap();
         let mut string = String::new();
 
@@ -92,7 +96,8 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    pub fn consume_keyword_or_identifier(&mut self) -> SqlResult<Token> {
+    /// Consumes some characters from stream and returns Keyword or Identifier Token.
+    fn consume_keyword_or_identifier(&mut self) -> SqlResult<Token> {
         let mut to_consume = String::new();
 
         while let Some(ch) = self.stream.peek() {
@@ -148,6 +153,7 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
+    /// Parses part of the stream and returns `SqlResult<Token>`
     pub fn next_token(&mut self) -> SqlResult<Token> {
         let Some(ch) = self.stream.peek() else {
             return Ok(Token::Eof);
@@ -201,26 +207,22 @@ impl<'a> Iterator for Tokenizer<'a> {
                 self.stream.next();
                 Some(Err(err))
             }
-            _ => Some(next_token), 
+            _ => Some(next_token),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::sql::parser::refine;
-
     use super::*;
 
     #[test]
     fn test_tokenize() -> anyhow::Result<()> {
-        let stream = "SELECT col From test;";
+        let stream = "SELECT col + 0 From test;";
 
         let tokenizer = Tokenizer::new(stream);
 
         let tokens: Vec<Token> = tokenizer.into_iter().map(|t| t.unwrap()).collect();
-
-        let tokens = refine(tokens);
 
         println!("{:?}", tokens);
 
