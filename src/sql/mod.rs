@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::sql::token::Token;
+
 pub mod parser;
 pub mod statement;
 pub mod token;
@@ -15,4 +17,15 @@ pub enum Error {
     StringNotClosed,
     #[error("unexpected token: {0}.")]
     UnexpectedToken(char),
+
+    #[error("expected: {expected} but found: {found}.")]
+    Expected {
+        expected: Token,
+        found: Token
+    },
+
+    #[error("number out of range")]
+    NumberOutOfRange,
+    #[error("unexpected eof")]
+    UnexpectedEof,
 }
