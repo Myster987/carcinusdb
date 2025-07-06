@@ -1,6 +1,6 @@
 use std::fmt::{self, Display, Write};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     Keyword(Keyword),
     Identifier(String),
@@ -146,7 +146,7 @@ impl Display for Keyword {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Whitespace {
     Space,
     Tab,
