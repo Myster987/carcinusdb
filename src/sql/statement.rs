@@ -7,9 +7,20 @@ pub enum Statement {
         r#where: Option<Expression>,
         order_by: Option<Vec<Expression>>,
     },
-    Insert,
-    Update,
-    Delete,
+    Insert {
+        into: String,
+        columns: Option<Vec<String>>,
+        values: Vec<Vec<Expression>>
+    },
+    Update {
+        table: String,
+        columns: Vec<Assignment>,
+        r#where: Option<Expression>
+    },
+    Delete {
+        from: String,
+        r#where: Option<Expression>
+    },
 }
 
 /// Used in select, insert, update, delete.
@@ -71,4 +82,25 @@ pub enum DataType {
     BigInt,
     Boolean,
     VarChar(usize),
+}
+
+#[derive(Debug)]
+pub enum Constrains {
+    PrimaryKey,
+    Unique
+}
+
+/// UPDATE helper
+#[derive(Debug)]
+pub struct Assignment {
+    pub identifier: String,
+    pub value: Expression
+}
+
+/// SQL column type
+#[derive(Debug)]
+pub struct Column {
+    pub name: String,
+    data_type: DataType,
+    constrains: Vec<Constrains>
 }
