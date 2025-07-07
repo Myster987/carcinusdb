@@ -1,10 +1,9 @@
 use libc::msghdr;
 
 use crate::sql::{
-    Error, SqlResult,
-    statement::{Assignment, BinaryOperator, Expression, Statement, UnaryOperator, Value},
-    token::{Keyword, Token},
-    tokenizer::Tokenizer,
+    statement::{
+        Assignment, BinaryOperator, Column, Constrains, Create, DataType, Expression, Statement, UnaryOperator, Value
+    }, token::{Keyword, Token}, tokenizer::Tokenizer, Error, SqlResult
 };
 
 pub trait StatementParser {
@@ -104,6 +103,13 @@ impl<'a> Parser<'a> {
         self.next().ok_or(Error::UnexpectedEof)
     }
 
+    fn next_keyword(&mut self) -> SqlResult<Keyword> {
+        match self.next_token()? {
+            Token::Keyword(keyword) => Ok(keyword),
+            _ => Err(Error::InvalidQuery(self.position)),
+        }
+    }
+
     /// Consumes and matches next token if it matches expected one. If next token == expected it returns Ok(token). Otherwise returns error.
     fn expect_token(&mut self, expected: Token) -> SqlResult<Token> {
         match self.next_token() {
@@ -141,6 +147,29 @@ impl<'a> Parser<'a> {
     /// Does the same as `consume_optional_token`, but for keywords.
     fn consume_optional_keyword(&mut self, optional: Keyword) -> bool {
         self.consume_optional_token(Token::Keyword(optional))
+    }
+
+    fn consume_one_of<'k, K>(&mut self, keywords: &'k K) -> Keyword
+    where
+        &'k K: IntoIterator<Item = &'k Keyword>,
+    {
+        *keywords
+            .into_iter()
+            .find(|keyword| self.consume_optional_keyword(**keyword))
+            .unwrap_or(&Keyword::None)
+    }
+
+    fn expect_one_of<'k, K>(&mut self, keywords: &'k K) -> SqlResult<Keyword>
+    where
+        &'k K: IntoIterator<Item = &'k Keyword>,
+    {
+        match self.consume_one_of(keywords) {
+            Keyword::None => Err(Error::ExpectedOneOf {
+                expected: keywords.into_iter().map(|k| Token::Keyword(*k)).collect(),
+                found: Token::Keyword(Keyword::None),
+            }),
+            keyword => Ok(keyword),
+        }
     }
 
     fn get_next_precedence(&mut self) -> u8 {
@@ -294,6 +323,80 @@ impl<'a> Parser<'a> {
         Ok(Assignment { identifier, value })
     }
 
+    fn parse_data_type(&mut self) -> SqlResult<DataType> {
+        match self.next_keyword()? {
+            Keyword::Int => Ok(DataType::Int),
+            Keyword::BigInt => Ok(DataType::BigInt),
+            Keyword::Unsigned => match self.next_keyword()? {
+                Keyword::Int => Ok(DataType::UnsignedInt),
+                Keyword::BigInt => Ok(DataType::UnsignedBig),
+                bad => Err(Error::ExpectedOneOf {
+                    expected: vec![
+                        Token::Keyword(Keyword::Int),
+                        Token::Keyword(Keyword::BigInt),
+                    ],
+                    found: Token::Keyword(bad),
+                }),
+            },
+            Keyword::Bool => Ok(DataType::Boolean),
+            Keyword::Varchar => {
+                self.expect_token(Token::LeftParen)?;
+                let length = match self.parse_expression()? {
+                    Expression::Value(Value::Number(val)) => val as usize,
+                    _ => Err(Error::InvalidQuery(self.position))?,
+                };
+                self.expect_token(Token::RightParen)?;
+
+                Ok(DataType::VarChar(length))
+            }
+            _ => Err(Error::InvalidQuery(self.position)),
+        }
+    }
+
+    fn parse_constrains(&mut self) -> SqlResult<Constrains> {
+        match self.next_keyword()? {
+            Keyword::Primary => {
+                self.expect_keyword(Keyword::Key)?;
+                Ok(Constrains::PrimaryKey)
+            }
+            Keyword::Unique => Ok(Constrains::Unique),
+            bad => Err(Error::ExpectedOneOf {
+                expected: vec![
+                    Token::Keyword(Keyword::Primary),
+                    Token::Keyword(Keyword::Unique),
+                ],
+                found: Token::Keyword(bad),
+            }),
+        }
+    }
+
+    fn parse_column(&mut self) -> SqlResult<Column> {
+        let name = self.parse_identifier()?;
+        let data_type = self.parse_data_type()?;
+        let mut constrains = vec![];
+
+        loop {
+            let constrain = self.consume_one_of(&[Keyword::Primary, Keyword::Unique]);
+            match constrain {
+                Keyword::Primary => {
+                    self.expect_keyword(Keyword::Key)?;
+                    constrains.push(Constrains::PrimaryKey);
+                }
+                Keyword::Unique => {
+                    constrains.push(Constrains::Unique);
+                }
+                Keyword::None => break,
+                _ => unreachable!(),
+            }
+        }
+
+        Ok(Column {
+            name,
+            data_type,
+            constrains,
+        })
+    }
+
     fn parse_where(&mut self) -> SqlResult<Option<Expression>> {
         if self.consume_optional_keyword(Keyword::Where) {
             Ok(Some(self.parse_expression()?))
@@ -312,26 +415,27 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse_statement(&mut self) -> SqlResult<Statement> {
-        let statement = match self.next_token()? {
-            Token::Keyword(k) => match k {
-                Keyword::Select => {
-                    self.prev_token();
-                    self.parse_select()
-                }
-                Keyword::Insert => {
-                    self.prev_token();
-                    self.parse_insert()
-                }
-                Keyword::Update => {
-                    self.prev_token();
-                    self.parse_update()
-                }
-                Keyword::Delete => {
-                    self.prev_token();
-                    self.parse_delete()
-                }
-                _ => todo!(),
-            },
+        let statement = match self.next_keyword()? {
+            Keyword::Select => {
+                self.prev_token();
+                self.parse_select()
+            }
+            Keyword::Insert => {
+                self.prev_token();
+                self.parse_insert()
+            }
+            Keyword::Update => {
+                self.prev_token();
+                self.parse_update()
+            }
+            Keyword::Delete => {
+                self.prev_token();
+                self.parse_delete()
+            }
+            Keyword::Create => {
+                self.prev_token();
+                self.parse_create()
+            }
             _ => todo!(),
         };
 
@@ -352,7 +456,29 @@ impl<'a> StatementParser for Parser<'a> {
         todo!()
     }
     fn parse_create(&mut self) -> SqlResult<Statement> {
-        todo!()
+        self.expect_keyword(Keyword::Create)?;
+
+        match self.next_keyword()? {
+            Keyword::Table => {
+                let name = self.parse_identifier()?;
+
+                let columns = self.parse_comma_separeted(Self::parse_column, true)?;
+
+                let create = Create::Table { name, columns };
+
+                Ok(Statement::Create(create))
+            }
+            Keyword::Index => {
+                todo!()
+            }
+            keyword => Err(Error::ExpectedOneOf {
+                expected: vec![
+                    Token::Keyword(Keyword::Table),
+                    Token::Keyword(Keyword::Table),
+                ],
+                found: Token::Keyword(keyword),
+            })?,
+        }
     }
     fn parse_delete(&mut self) -> SqlResult<Statement> {
         self.expect_keyword(Keyword::Delete)?;
@@ -450,7 +576,9 @@ mod tests {
 
         println!("{:?}", parser.parse_statement());
 
-        
+        let mut parser = Parser::new("CREATE TABLE test (col_1 INT PRIMARY KEY, col_2 VARCHAR(64) UNIQUE, col_3 BOOL);")?;
+
+        println!("{:?}", parser.parse_statement());
 
         Ok(())
     }

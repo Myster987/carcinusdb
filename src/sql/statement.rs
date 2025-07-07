@@ -1,4 +1,4 @@
-/// SQL statement
+/// SQL statement.
 #[derive(Debug)]
 pub enum Statement {
     Select {
@@ -10,17 +10,18 @@ pub enum Statement {
     Insert {
         into: String,
         columns: Option<Vec<String>>,
-        values: Vec<Vec<Expression>>
+        values: Vec<Vec<Expression>>,
     },
     Update {
         table: String,
         columns: Vec<Assignment>,
-        r#where: Option<Expression>
+        r#where: Option<Expression>,
     },
     Delete {
         from: String,
-        r#where: Option<Expression>
+        r#where: Option<Expression>,
     },
+    Create(Create)
 }
 
 /// Used in select, insert, update, delete.
@@ -74,12 +75,13 @@ pub enum UnaryOperator {
     Minus,
 }
 
-/// SQL data types
+/// SQL data types.
 #[derive(Debug)]
 pub enum DataType {
-    SmallInt,
     Int,
+    UnsignedInt,
     BigInt,
+    UnsignedBig,
     Boolean,
     VarChar(usize),
 }
@@ -87,20 +89,61 @@ pub enum DataType {
 #[derive(Debug)]
 pub enum Constrains {
     PrimaryKey,
-    Unique
+    Unique,
 }
 
-/// UPDATE helper
+/// UPDATE helper.
 #[derive(Debug)]
 pub struct Assignment {
     pub identifier: String,
-    pub value: Expression
+    pub value: Expression,
 }
 
-/// SQL column type
+/// SQL column type.
 #[derive(Debug)]
 pub struct Column {
     pub name: String,
-    data_type: DataType,
-    constrains: Vec<Constrains>
+    pub data_type: DataType,
+    pub constrains: Vec<Constrains>,
+}
+
+impl Column {
+    pub fn new(name: &str, data_type: DataType) -> Self {
+        Self {
+            name: name.to_owned(),
+            data_type,
+            constrains: vec![],
+        }
+    }
+
+    // pub fn primary_key(name: &str, data_type: DataType) -> Self {
+    //     Self {
+    //         name: name.to_owned(),
+    //         data_type,
+    //         constrains: vec![Constrains::PrimaryKey],
+    //     }
+    // }
+
+    // pub fn unique(name: &str, data_type: DataType) -> Self {
+    //     Self {
+    //         name: name.to_owned(),
+    //         data_type,
+    //         constrains: vec![Constrains::Unique],
+    //     }
+    // }
+}
+
+#[derive(Debug)]
+pub enum Create {
+    Database(String),
+    Table {
+        name: String,
+        columns: Vec<Column>,
+    },
+    Index {
+        name: String,
+        table: String,
+        column: String,
+        unique: bool,
+    },
 }

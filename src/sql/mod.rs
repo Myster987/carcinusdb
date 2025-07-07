@@ -23,6 +23,11 @@ pub enum Error {
         expected: Token,
         found: Token
     },
+    #[error("expected one of: {expected:?} but found: {found}.")]
+    ExpectedOneOf {
+        expected: Vec<Token>,
+        found: Token
+    },
 
     #[error("number out of range")]
     NumberOutOfRange,
