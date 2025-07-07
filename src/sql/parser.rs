@@ -1,9 +1,13 @@
 use libc::msghdr;
 
 use crate::sql::{
+    Error, SqlResult,
     statement::{
-        Assignment, BinaryOperator, Column, Constrains, Create, DataType, Expression, Statement, UnaryOperator, Value
-    }, token::{Keyword, Token}, tokenizer::Tokenizer, Error, SqlResult
+        Assignment, BinaryOperator, Column, Constrains, Create, DataType, Expression, Statement,
+        UnaryOperator, Value,
+    },
+    token::{Keyword, Token},
+    tokenizer::Tokenizer,
 };
 
 pub trait StatementParser {
@@ -468,8 +472,44 @@ impl<'a> StatementParser for Parser<'a> {
 
                 Ok(Statement::Create(create))
             }
+            Keyword::Unique => {
+                self.expect_keyword(Keyword::Index)?;
+
+                let name = self.parse_identifier()?;
+
+                self.expect_keyword(Keyword::On)?;
+
+                let table = self.parse_identifier()?;
+
+                let column = self.parse_identifier()?;
+
+                Ok(Statement::Create(Create::Index {
+                    name,
+                    table,
+                    column,
+                    unique: true,
+                }))
+            }
             Keyword::Index => {
-                todo!()
+                let name = self.parse_identifier()?;
+
+                self.expect_keyword(Keyword::On)?;
+
+                let table = self.parse_identifier()?;
+
+                let column = self.parse_identifier()?;
+
+                Ok(Statement::Create(Create::Index {
+                    name,
+                    table,
+                    column,
+                    unique: false,
+                }))
+            }
+            Keyword::Database => {
+                let name = self.parse_identifier()?;
+
+                Ok(Statement::Create(Create::Database(name)))
             }
             keyword => Err(Error::ExpectedOneOf {
                 expected: vec![
@@ -576,7 +616,15 @@ mod tests {
 
         println!("{:?}", parser.parse_statement());
 
-        let mut parser = Parser::new("CREATE TABLE test (col_1 INT PRIMARY KEY, col_2 VARCHAR(64) UNIQUE, col_3 BOOL);")?;
+        let mut parser = Parser::new(
+            "CREATE TABLE test (col_1 INT PRIMARY KEY, col_2 VARCHAR(64) UNIQUE, col_3 BOOL);",
+        )?;
+
+        println!("{:?}", parser.parse_statement());
+
+        let mut parser = Parser::new(
+            "CREATE UNIQUE INDEX test_idx ON test col_1;",
+        )?;
 
         println!("{:?}", parser.parse_statement());
 
