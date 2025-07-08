@@ -3,17 +3,19 @@ use libc::msghdr;
 use crate::sql::{
     Error, SqlResult,
     statement::{
-        Assignment, BinaryOperator, Column, Constrains, Create, DataType, Expression, Statement,
-        UnaryOperator, Value,
+        Assignment, BinaryOperator, Column, Constrains, Create, DataType, Drop, Expression,
+        Statement, UnaryOperator, Value,
     },
     token::{Keyword, Token},
     tokenizer::Tokenizer,
 };
 
+/// Trait to implement all esential statements.
 pub trait StatementParser {
     fn parse_explain(&mut self) -> SqlResult<Statement>;
     fn parse_select(&mut self) -> SqlResult<Statement>;
     fn parse_create(&mut self) -> SqlResult<Statement>;
+    fn parse_drop(&mut self) -> SqlResult<Statement>;
     fn parse_delete(&mut self) -> SqlResult<Statement>;
     fn parse_insert(&mut self) -> SqlResult<Statement>;
     fn parse_update(&mut self) -> SqlResult<Statement>;
@@ -440,6 +442,17 @@ impl<'a> Parser<'a> {
                 self.prev_token();
                 self.parse_create()
             }
+            Keyword::Drop => {
+                self.prev_token();
+                self.parse_drop()
+            }
+            Keyword::Begin => {
+                self.expect_keyword(Keyword::Transaction)?;
+                Ok(Statement::BeginTransaction)
+            }
+            Keyword::Rollback => Ok(Statement::Rollback),
+            Keyword::Commit => Ok(Statement::Commit),
+            Keyword::Explain => Ok(Statement::Explain(Box::new(self.parse_statement()?))),
             _ => todo!(),
         };
 
@@ -520,6 +533,29 @@ impl<'a> StatementParser for Parser<'a> {
             })?,
         }
     }
+    fn parse_drop(&mut self) -> SqlResult<Statement> {
+        self.expect_keyword(Keyword::Drop)?;
+
+        match self.next_keyword()? {
+            Keyword::Database => {
+                let name = self.parse_identifier()?;
+
+                Ok(Statement::Drop(Drop::Database(name)))
+            }
+            Keyword::Table => {
+                let name = self.parse_identifier()?;
+
+                Ok(Statement::Drop(Drop::Table(name)))
+            }
+            bad => Err(Error::ExpectedOneOf {
+                expected: vec![
+                    Token::Keyword(Keyword::Database),
+                    Token::Keyword(Keyword::Table),
+                ],
+                found: Token::Keyword(bad),
+            }),
+        }
+    }
     fn parse_delete(&mut self) -> SqlResult<Statement> {
         self.expect_keyword(Keyword::Delete)?;
         self.expect_keyword(Keyword::From)?;
@@ -598,35 +634,34 @@ mod tests {
 
     #[test]
     fn main_test() -> anyhow::Result<()> {
-        let mut parser =
-            Parser::new("SELECT col_1, col_2, col_3 FROM test WHERE col_1 = 10 ORDER BY col_3;")?;
+        let mut parser = Parser::new(
+            "SELECT col_1, col_2, col_3 FROM test WHERE col_1 = (2 + 2 * 2) ORDER BY col_3, col_2;",
+        )?;
 
-        println!("{:?}", parser.parse_statement());
+        println!("{}", parser.parse_statement().unwrap());
 
         let mut parser =
             Parser::new("INSERT INTO test (col_1, col_2, col_3) VALUES (1, 2, 3), (4, 5, 6);")?;
 
-        println!("{:?}", parser.parse_statement());
+        println!("{}", parser.parse_statement().unwrap());
 
         let mut parser = Parser::new("UPDATE test SET name = 'Maciek', age = 20 WHERE age >= 30;")?;
 
-        println!("{:?}", parser.parse_statement());
+        println!("{}", parser.parse_statement().unwrap());
 
         let mut parser = Parser::new("DELETE FROM test WHERE age >= 30;")?;
 
-        println!("{:?}", parser.parse_statement());
+        println!("{}", parser.parse_statement().unwrap());
 
         let mut parser = Parser::new(
             "CREATE TABLE test (col_1 INT PRIMARY KEY, col_2 VARCHAR(64) UNIQUE, col_3 BOOL);",
         )?;
 
-        println!("{:?}", parser.parse_statement());
+        println!("{}", parser.parse_statement().unwrap());
 
-        let mut parser = Parser::new(
-            "CREATE UNIQUE INDEX test_idx ON test col_1;",
-        )?;
+        let mut parser = Parser::new("CREATE UNIQUE INDEX test_idx ON test col_1;")?;
 
-        println!("{:?}", parser.parse_statement());
+        println!("{}", parser.parse_statement().unwrap());
 
         Ok(())
     }
