@@ -2,7 +2,7 @@ use std::{cell::RefCell, pin::Pin};
 
 use crate::utils::buffer::BufferData;
 
-/// Holds free buffers as pointers to memory
+/// Holds free buffers as pointers to memory.
 pub struct BufferPool {
     pub free_buffers: RefCell<Vec<BufferData>>,
     page_size: usize,
@@ -20,7 +20,7 @@ impl BufferPool {
         self.free_buffers.borrow().len()
     }
 
-    /// Returns free pointer to buffer or allocates new one
+    /// Returns free pointer to buffer or allocates new one.
     pub fn get(&self) -> BufferData {
         let mut free_buffers = self.free_buffers.borrow_mut();
         if let Some(buffer) = free_buffers.pop() {
@@ -30,7 +30,7 @@ impl BufferPool {
         }
     }
 
-    /// Adds new free buffer to pool
+    /// Adds new free buffer to pool.
     pub fn put(&self, buffer: BufferData) {
         let mut free_buffers = self.free_buffers.borrow_mut();
         free_buffers.push(buffer);

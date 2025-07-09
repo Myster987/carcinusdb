@@ -23,6 +23,7 @@ pub trait StatementParser {
     fn parse_commit(&mut self) -> SqlResult<Statement>;
 }
 
+/// Parser turns string into raw `Statement` (not yet optimized).
 pub struct Parser<'a> {
     input: &'a str,
     /// Current position of next token.
@@ -30,6 +31,7 @@ pub struct Parser<'a> {
     /// - position - 1 -> current token
     /// - position -> next token
     position: usize,
+    /// Token stream. Created from input by using `Tokenizer`
     tokens: Vec<Token>,
 }
 
@@ -88,6 +90,7 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Returns reference to next non-whitespace `Token`.
     fn peek_token(&mut self) -> SqlResult<&Token> {
         while let Some(token) = self.peek() {
             match token {
@@ -109,6 +112,7 @@ impl<'a> Parser<'a> {
         self.next().ok_or(Error::UnexpectedEof)
     }
 
+    /// Returns next `Keyword`. Skips whitespaces.
     fn next_keyword(&mut self) -> SqlResult<Keyword> {
         match self.next_token()? {
             Token::Keyword(keyword) => Ok(keyword),
@@ -155,6 +159,7 @@ impl<'a> Parser<'a> {
         self.consume_optional_token(Token::Keyword(optional))
     }
 
+    /// Consumes one of given keyword in iterator. Returns `Keyword` that was consumed, if any returns `Keyword::None`.
     fn consume_one_of<'k, K>(&mut self, keywords: &'k K) -> Keyword
     where
         &'k K: IntoIterator<Item = &'k Keyword>,
@@ -165,6 +170,7 @@ impl<'a> Parser<'a> {
             .unwrap_or(&Keyword::None)
     }
 
+    /// Does the same thing as `Self::consume_one_of` but if no `Keyword` was consumed, then it returns error.
     fn expect_one_of<'k, K>(&mut self, keywords: &'k K) -> SqlResult<Keyword>
     where
         &'k K: IntoIterator<Item = &'k Keyword>,
@@ -178,6 +184,7 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Returns precedence of next `Token` in token stream.
     fn get_next_precedence(&mut self) -> u8 {
         let Ok(token) = self.peek_token() else {
             return 0;
@@ -198,6 +205,7 @@ impl<'a> Parser<'a> {
         self.parse_expr(0)
     }
 
+    /// Core function that turs token stream into tree of `Expressions` with correct order.
     fn parse_expr(&mut self, precedence: u8) -> SqlResult<Expression> {
         let mut expr = self.parse_prefix()?;
         let mut next_precedence = self.get_next_precedence();
@@ -210,6 +218,7 @@ impl<'a> Parser<'a> {
         Ok(expr)
     }
 
+    /// Parses identifiers, values, parenthesis, etc.
     fn parse_prefix(&mut self) -> SqlResult<Expression> {
         match self.next_token()? {
             Token::Identifier(identifier) => Ok(Expression::Identifier(identifier)),
@@ -269,7 +278,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Parses identifier (like column name is SELECT or FROM table)
+    /// Parses identifier (like column name is SELECT or FROM table).
     fn parse_identifier(&mut self) -> SqlResult<String> {
         self.next_token().and_then(|token| match token {
             Token::Identifier(value) => Ok(value),
@@ -301,11 +310,12 @@ impl<'a> Parser<'a> {
         Ok(result)
     }
 
-    ///
+    /// Parses expressions that are separed by commas. Doesn't require parenthesis. Used for examples to parse SELECT columns...
     fn parse_comma_separeted_values(&mut self) -> SqlResult<Vec<Expression>> {
         self.parse_comma_separeted(Self::parse_expression, false)
     }
 
+    /// Parses identifiers separed by commas. Requires parenthesis. Used for example to parse INSERT INTO table (columns...)
     fn parse_identifier_list(&mut self) -> SqlResult<Vec<String>> {
         self.parse_comma_separeted(Self::parse_identifier, true)
     }
