@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 pub mod buffer_pool;
+pub mod cache;
 pub mod page;
 pub mod pager;
 // pub mod schema;
