@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, ptr::NonNull};
+use std::{cell::RefCell, collections::HashMap, fmt::Debug, io::Cursor, ptr::NonNull, thread::current};
 
 use thiserror::Error;
 
@@ -14,6 +14,10 @@ pub enum CacheError {
     PageLocked,
     #[error("page {id} is dirty.")]
     Dirty { id: PageNumber },
+    #[error("cache is already full.")]
+    Full,
+    #[error("{0}")]
+    Internal(String),
 }
 
 pub type PageCacheKey = PageNumber;
@@ -31,9 +35,9 @@ pub struct PageCacheEntry<'a> {
 }
 
 impl<'a> PageCacheEntry<'a> {
-    pub fn new(page: MemPageRef<'a>) -> Self {
+    pub fn new(key: PageCacheKey, page: MemPageRef<'a>) -> Self {
         Self {
-            key: page.get().id,
+            key,
             page,
             prev: None,
             next: None,
@@ -65,22 +69,79 @@ impl<'a> LruPageCache<'a> {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.map.borrow().len()
+    }
+
     /// Checks if page is in cache.
     pub fn contains_key(&mut self, key: &PageCacheKey) -> bool {
         self.map.borrow().contains_key(key)
     }
 
-    fn try_insert(&mut self, key: PageCacheKey, page: MemPageRef) -> CacheResult<()> {
+    /// Returns pointer to entry and copies it (coping pointer is cheap). If entry doesn't exist, it returns None.
+    fn get_ptr(&self, key: &PageCacheKey) -> Option<NonNull<PageCacheEntry<'a>>> {
+        let map = self.map.borrow();
+        map.get(key).copied()
+    }
+
+    pub fn peek(&mut self, key: &PageCacheKey, touch: bool) -> Option<MemPageRef<'a>> {
+        let mut ptr = self.get_ptr(key)?;
+        if touch {
+            self.unlink(ptr);
+            self.touch(ptr);
+        }
+        let page = unsafe { ptr.as_mut().page.clone() };
+        Some(page)
+    }
+
+    pub fn get(&mut self, key: &PageCacheKey) -> Option<MemPageRef<'a>> {
+        self.peek(key, true)
+    }
+
+    pub fn insert(&mut self, key: PageCacheKey, page: MemPageRef<'a>) -> CacheResult<()> {
+        self.try_insert(key, page)
+    }
+
+    fn try_insert(&mut self, key: PageCacheKey, page: MemPageRef<'a>) -> CacheResult<()> {
         if self.contains_key(&key) {
             return Err(CacheError::KeyExists);
         }
 
-        
+        self.make_room_for(1)?;
+
+        let entry = Box::new(PageCacheEntry::new(key, page));
+        let entry_ptr = unsafe { NonNull::new_unchecked(Box::into_raw(entry)) }; 
+
+        self.touch(entry_ptr);
+
+        self.map.borrow_mut().insert(key, entry_ptr);
 
         Ok(())
     }
 
-    /// Removes entry from linked list and eventiualy cleans up page from memory (returns `Buffer` to `BufferPool`). 
+    pub fn delete(&mut self, key: PageCacheKey) -> CacheResult<()> {
+        self.try_delete(key, true)
+    }
+
+    fn try_delete(&mut self, key: PageCacheKey, clean_page: bool) -> CacheResult<()> {
+        if !self.contains_key(&key) {
+            return Ok(());
+        }
+
+        let entry = *self.map.borrow_mut().get(&key).unwrap();
+        // Detach before deleting.
+        self.detach(entry, clean_page)?;
+
+        let ptr = self.map.borrow_mut().remove(&key).unwrap();
+        unsafe {
+            // Creates Box that owns entry and is dropped
+            let _ = Box::from_raw(ptr.as_ptr());
+        };
+
+        Ok(())
+    }
+
+    /// Removes entry from linked list and eventiualy cleans up page from memory (returns `Buffer` to `BufferPool`).
     fn detach(
         &mut self,
         mut entry: NonNull<PageCacheEntry<'a>>,
@@ -141,7 +202,127 @@ impl<'a> LruPageCache<'a> {
         }
     }
 
-    fn touch(&mut self, entry: NonNull<PageCacheEntry<'a>>) {
-        todo!()
+    /// Inserts entry before head. To work correctly use `Self::detach` before.
+    fn touch(&mut self, mut entry: NonNull<PageCacheEntry<'a>>) {
+        if let Some(mut head) = *self.head.borrow_mut() {
+            unsafe {
+                entry.as_mut().next.replace(head);
+                head.as_mut().prev = Some(entry);
+            }
+        }
+
+        if self.tail.borrow().is_none() {
+            self.tail.borrow_mut().replace(entry);
+        }
+        self.head.replace(Some(entry));
+    }
+
+    fn make_room_for(&mut self, entries_num: usize) -> CacheResult<()> {
+        if entries_num > self.capacity {
+            return Err(CacheError::Full);
+        }
+
+        let len = self.len();
+        let avalible = self.capacity.saturating_sub(len);
+
+        if entries_num <= avalible {
+            return Ok(());
+        }
+
+        // Now we need to handle case when there are too many entires, so we need to delete oldest ones (closest to the tail)
+        let tail = self.tail.borrow().ok_or(CacheError::Internal(format!(
+            "Page cache of length {} exprected to have a tail",
+            self.len()
+        )))?;
+
+        let mut to_delete = entries_num - avalible;
+        let mut current_entry = Some(tail);
+
+        while to_delete > 0 && current_entry.is_some() {
+            let current = current_entry.unwrap();
+            let entry = unsafe { current.as_ref() };
+            let key_to_delete = entry.key;
+            current_entry = entry.prev;
+
+            self.delete(key_to_delete).inspect(|_| to_delete -= 1)?;
+        }
+
+        if to_delete > 0 {
+            return Err(CacheError::Full);
+        }
+
+        Ok(())
+    }
+
+    /// TODO: Implement proper delete (handle dirty page case)
+    pub fn clear(&mut self) -> CacheResult<()> {
+        // let mut current = *self.head.borrow_mut();
+
+        // while let Some(mut c) = current {
+        //     let entry = unsafe {
+        //         c.as_mut()
+        //     };
+
+        //     current = entry.next;
+        // }
+
+        self.make_room_for(self.capacity)?;
+
+        Ok(())
+    }
+}
+
+impl<'a> Debug for LruPageCache<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug_vec = vec![];
+        let mut current = *self.head.borrow();
+
+        while let Some(c) = current {
+            let entry = unsafe { c.as_ref() };
+            debug_vec.push(entry.key.to_string());
+
+            current = entry.next;
+        }
+        f.write_str(&format!("LruPageCache({})", debug_vec.join(" -> ")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::storage::pager::MemPage;
+
+    use super::*;
+
+    #[test]
+    fn main_test() -> anyhow::Result<()> {
+        let mut lry_cache = LruPageCache::new(5);
+
+        for i in 1..=5 {
+            let page = Arc::new(MemPage::new(i));
+            lry_cache.insert(i, page)?;
+        }
+
+        let _ = lry_cache.get(&3);
+        
+        let i = 6;
+        let page = Arc::new(MemPage::new(i));
+        lry_cache.insert(i, page)?;
+        
+        
+        println!("{:?}", lry_cache);
+
+        lry_cache.delete(5)?;
+        let _ = lry_cache.get(&2);
+        
+        println!("{:?}", lry_cache);
+        
+        lry_cache.clear()?;
+        
+        println!("{:?}", lry_cache);
+        
+
+        Ok(())
     }
 }
