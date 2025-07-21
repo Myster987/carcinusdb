@@ -1,5 +1,4 @@
-use std::cell::{OnceCell, RefCell, UnsafeCell};
-use std::path::Path;
+use std::cell::{RefCell, UnsafeCell};
 
 use std::fs::File;
 use std::rc::Rc;
@@ -78,7 +77,7 @@ impl<'a> MemPage<'a> {
     }
 
     pub fn clear_uptodate(&self) {
-        self.get().flags.fetch_or(!PAGE_UPTODATE, Ordering::SeqCst);
+        self.get().flags.fetch_and(!PAGE_UPTODATE, Ordering::SeqCst);
     }
 
     pub fn is_locked(&self) -> bool {
@@ -90,7 +89,7 @@ impl<'a> MemPage<'a> {
     }
 
     pub fn clear_locked(&self) {
-        self.get().flags.fetch_or(!PAGE_LOCKED, Ordering::SeqCst);
+        self.get().flags.fetch_and(!PAGE_LOCKED, Ordering::SeqCst);
     }
 
     pub fn is_error(&self) -> bool {
@@ -102,7 +101,7 @@ impl<'a> MemPage<'a> {
     }
 
     pub fn clear_error(&self) {
-        self.get().flags.fetch_or(!PAGE_ERROR, Ordering::SeqCst);
+        self.get().flags.fetch_and(!PAGE_ERROR, Ordering::SeqCst);
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -114,7 +113,7 @@ impl<'a> MemPage<'a> {
     }
 
     pub fn clear_dirty(&self) {
-        self.get().flags.fetch_or(!PAGE_DIRTY, Ordering::SeqCst);
+        self.get().flags.fetch_and(!PAGE_DIRTY, Ordering::SeqCst);
     }
 
     pub fn is_loaded(&self) -> bool {
@@ -126,7 +125,7 @@ impl<'a> MemPage<'a> {
     }
 
     pub fn clear_loaded(&self) {
-        self.get().flags.fetch_or(!PAGE_LOADED, Ordering::SeqCst);
+        self.get().flags.fetch_and(!PAGE_LOADED, Ordering::SeqCst);
     }
 
     pub fn is_index(&self) -> bool {
@@ -186,7 +185,6 @@ impl Pager {
             page.clear_locked();
             return Err(error.into());
         }
-            
 
         let buf = Buffer::new(
             buf,
