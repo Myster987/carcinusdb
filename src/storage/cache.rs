@@ -1,4 +1,7 @@
-use std::{cell::RefCell, collections::HashMap, fmt::Debug, io::Cursor, ptr::NonNull, thread::current};
+use std::{
+    cell::RefCell, collections::HashMap, fmt::Debug, io::Cursor, ptr::NonNull, sync::Arc,
+    thread::current,
+};
 
 use thiserror::Error;
 
@@ -110,7 +113,7 @@ impl<'a> LruPageCache<'a> {
         self.make_room_for(1)?;
 
         let entry = Box::new(PageCacheEntry::new(key, page));
-        let entry_ptr = unsafe { NonNull::new_unchecked(Box::into_raw(entry)) }; 
+        let entry_ptr = unsafe { NonNull::new_unchecked(Box::into_raw(entry)) };
 
         self.touch(entry_ptr);
 
@@ -254,19 +257,33 @@ impl<'a> LruPageCache<'a> {
         Ok(())
     }
 
-    /// TODO: Implement proper delete (handle dirty page case)
+    /// Deletes all entries. Sets head and tail to `None`.
     pub fn clear(&mut self) -> CacheResult<()> {
-        // let mut current = *self.head.borrow_mut();
+        let mut current = *self.head.borrow();
 
-        // while let Some(mut c) = current {
-        //     let entry = unsafe {
-        //         c.as_mut()
-        //     };
+        while let Some(mut c) = current {
+            let entry = unsafe { c.as_mut() };
+            let next = entry.next;
 
-        //     current = entry.next;
-        // }
+            self.map.borrow_mut().remove(&entry.key);
 
-        self.make_room_for(self.capacity)?;
+            self.detach(c, true)?;
+
+            assert!(!entry.page.is_dirty());
+
+            unsafe {
+                let _ = Box::from_raw(c.as_ptr());
+            }
+
+            current = next;
+        }
+
+        let _ = self.head.take();
+        let _ = self.tail.take();
+
+        assert!(self.head.borrow().is_none());
+        assert!(self.tail.borrow().is_none());
+        assert!(self.map.borrow().is_empty());
 
         Ok(())
     }
@@ -305,23 +322,25 @@ mod tests {
         }
 
         let _ = lry_cache.get(&3);
-        
+
         let i = 6;
         let page = Arc::new(MemPage::new(i));
         lry_cache.insert(i, page)?;
-        
-        
+
         println!("{:?}", lry_cache);
 
         lry_cache.delete(5)?;
-        let _ = lry_cache.get(&2);
-        
+        let entry = lry_cache.get(&2);
+
+        if let Some(e) = entry {
+            println!("{:?}", e.get().flags);
+            println!("{:?}", Arc::strong_count(&e));
+        }
+
         println!("{:?}", lry_cache);
-        
+
         lry_cache.clear()?;
-        
         println!("{:?}", lry_cache);
-        
 
         Ok(())
     }
