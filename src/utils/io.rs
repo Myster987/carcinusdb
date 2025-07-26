@@ -1,8 +1,11 @@
 use std::{
     fs::{self, File},
     io::{self, Read, Seek, SeekFrom, Write},
+    os::fd::AsRawFd,
     path::Path,
 };
+
+use libc::{c_void, pread, pwrite};
 
 use crate::{os::DISK_BLOCK_SIZE, storage::PageNumber};
 
@@ -67,60 +70,95 @@ impl FileOps for File {
     }
 }
 
+pub trait IO {
+    fn pread(&self, offset: usize, buf: &mut [u8]) -> io::Result<usize>;
+    fn pwrite(&self, offset: usize, buf: &[u8]) -> io::Result<usize>;
+}
+
+impl IO for File {
+    fn pread(&self, offset: usize, buf: &mut [u8]) -> io::Result<usize> {
+        let read = unsafe {
+            pread(
+                self.as_raw_fd(),
+                buf.as_mut_ptr() as *mut c_void,
+                buf.len(),
+                offset as i64,
+            )
+        };
+        if read == -1 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(read as usize)
+        }
+    }
+
+    fn pwrite(&self, offset: usize, buf: &[u8]) -> io::Result<usize> {
+        let written = unsafe {
+            pwrite(
+                self.as_raw_fd(),
+                buf.as_ptr() as *const c_void,
+                buf.len(),
+                offset as i64,
+            )
+        };
+        if written == -1 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(written as usize)
+        }
+    }
+}
+
 /// Wrapper to simplify working with page like structures on disk
 #[derive(Debug)]
 pub struct BlockIO<I> {
     io: I,
     pub page_size: usize,
+    header_size: usize,
 }
 
 impl<I> BlockIO<I> {
-    pub fn new(io: I, page_size: usize) -> Self {
-        Self { io, page_size }
+    pub fn new(io: I, page_size: usize, header_size: usize) -> Self {
+        Self {
+            io,
+            page_size,
+            header_size,
+        }
     }
 }
 
-impl<I: Seek + Read> BlockIO<I> {
+impl<I: IO> BlockIO<I> {
+    pub fn raw_read(&mut self, offset: usize, buffer: &mut [u8]) -> io::Result<usize> {
+        self.io.pread(offset, buffer)
+    }
+
+    /// Reads page with given number. Includes header offset.
     pub fn read(&mut self, page_number: PageNumber, buffer: &mut [u8]) -> io::Result<usize> {
-        let offset;
-        let capacity;
-        let inner_offset;
-
-        let Self { page_size, .. } = *self;
         let page_number = page_number as usize;
+        let offset = self.header_size + page_number * self.page_size;
+        self.raw_read(offset, buffer)
+    }
 
-        if page_size >= *DISK_BLOCK_SIZE {
-            capacity = page_size;
-            offset = page_size * page_number;
-            inner_offset = 0;
-        } else {
-            capacity = *DISK_BLOCK_SIZE;
-            offset = (page_size * page_number) & !(*DISK_BLOCK_SIZE - 1);
-            inner_offset = page_number * page_size - offset;
-        }
-
-        self.io.seek(SeekFrom::Start(offset as u64))?;
-
-        if page_size >= *DISK_BLOCK_SIZE {
-            return self.io.read(buffer);
-        }
-
-        let mut block = vec![0; capacity];
-        let _ = self.io.read(&mut block);
-
-        buffer.copy_from_slice(&block[inner_offset..inner_offset + page_size]);
-
-        Ok(self.page_size)
+    /// Reads header from beginning of a file. Note that buffer size must match header size.
+    pub fn read_header(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.raw_read(0, buffer)
     }
 }
 
-impl<I: Seek + Write> BlockIO<I> {
+impl<I: IO> BlockIO<I> {
+    pub fn raw_write(&mut self, offset: usize, buffer: &[u8]) -> io::Result<usize> {
+        self.io.pwrite(offset, buffer)
+    }
+
+    /// Writes page at given number. Includes header offset.
     pub fn write(&mut self, page_number: PageNumber, buffer: &[u8]) -> io::Result<usize> {
-        let offset = page_number * self.page_size as u32;
+        let offset = self.header_size + page_number as usize * self.page_size;
+        self.raw_write(offset, buffer)
+    }
 
-        self.io.seek(SeekFrom::Start(offset as u64))?;
-
-        self.io.write(buffer)
+    /// Writes header at the beginning of a file. Note that buffer size must match header size.
+    pub fn write_header(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.raw_write(0, buffer)
     }
 }
 

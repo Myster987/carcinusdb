@@ -5,18 +5,23 @@ pub mod cache;
 pub mod page;
 pub mod pager;
 // pub mod schema;
-// pub mod wal;
+pub mod wal;
 
 pub type Oid = u32;
 
+/// Used for pages.
 pub type PageNumber = u32;
-pub type TransactionId = u32;
+/// Used for indexing inside page.
 pub type SlotNumber = u16;
+/// Used for transactions.
+pub type TransactionId = u32;
+/// Used for WAL frames.
+pub type FrameNumber = u32;
 
 pub const PAGE_NUMBER_SIZE: usize = std::mem::size_of::<PageNumber>();
 pub const SLOT_SIZE: usize = std::mem::size_of::<SlotNumber>();
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type StorageResult<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Error)]
 pub enum Error {

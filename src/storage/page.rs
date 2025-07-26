@@ -1,7 +1,12 @@
-use std::{cell::RefCell, collections::{BinaryHeap, HashMap}, io::Cursor, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::{BinaryHeap, HashMap},
+    io::Cursor,
+    sync::Arc,
+};
 
 use crate::{
-    storage::{Error, PageNumber, Result as StorageResult, SlotNumber},
+    storage::{Error, PageNumber, SlotNumber, StorageResult},
     utils::{
         buffer::{Buffer, BufferDropFn},
         bytes,
@@ -149,14 +154,14 @@ impl TryFrom<u8> for PageType {
 /// If `Page` contains `Cells` that overflow, it maintains hashmap of slots pointing to overflowing `Cells`.
 /// Only chunk of `Cell` is stored in `Page` and it needs to be reassembled by going over
 ///
-pub struct Page<'a> {
+pub struct Page {
     offset: usize,
-    buffer: Arc<RefCell<Buffer<'a>>>,
+    buffer: Arc<RefCell<Buffer>>,
     overflow: HashMap<SlotNumber, bool>,
 }
 
-impl<'a> Page<'a> {
-    pub fn new(offset: usize, buffer: Arc<RefCell<Buffer<'a>>>) -> Self {
+impl Page {
+    pub fn new(offset: usize, buffer: Arc<RefCell<Buffer>>) -> Self {
         Self {
             offset,
             buffer,
@@ -164,12 +169,12 @@ impl<'a> Page<'a> {
         }
     }
 
-    pub fn alloc(offset: usize, size: usize, drop: Option<BufferDropFn<'a>>) -> Self {
+    pub fn alloc(offset: usize, size: usize, drop: Option<BufferDropFn>) -> Self {
         let buf = Buffer::alloc_page(size, drop);
         Self::new(offset, Arc::new(RefCell::new(buf)))
     }
 
-    pub fn as_ptr(&self) -> &'a mut [u8] {
+    pub fn as_ptr(&self) -> &mut [u8] {
         let buf = self.buffer.as_ptr();
         unsafe { buf.as_mut().unwrap().as_mut_slice() }
     }
@@ -290,7 +295,7 @@ impl<'a> Page<'a> {
         min_cell_size: usize,
         max_cell_size: usize,
         usable_space: usize,
-    ) -> StorageResult<BTreeCell<'a>> {
+    ) -> StorageResult<BTreeCell> {
         let buf = self.as_ptr();
 
         let offset_to_cell = self.slot_at(idx);
@@ -309,7 +314,6 @@ impl<'a> Page<'a> {
             usable_space,
         )
     }
-
 }
 
 /// Wraps possible types of cell stored in `Page`. On disk each variable is stored in little endian except varints.
@@ -319,7 +323,6 @@ pub enum BTreeCell<'a> {
     TableInternalCell(TableInternalCell),
     TableLeafCell(TableLeafCell<'a>),
 }
-
 
 pub struct IndexInternalCell<'a> {
     /// Left child of BTree Page

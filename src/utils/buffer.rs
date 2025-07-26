@@ -3,20 +3,20 @@ use std::{fmt::Debug, mem::ManuallyDrop, pin::Pin, rc::Rc};
 use crate::storage::page::{MAX_PAGE_SIZE, MIN_PAGE_SIZE};
 
 pub type BufferData = Pin<Vec<u8>>;
-pub type BufferDropFn<'a> = Rc<dyn Fn(BufferData) + 'a>;
+pub type BufferDropFn = Rc<dyn Fn(BufferData)>;
 
-pub struct Buffer<'a> {
+pub struct Buffer {
     data: ManuallyDrop<BufferData>,
-    drop: Option<BufferDropFn<'a>>,
+    drop: Option<BufferDropFn>,
 }
 
-impl<'a> Buffer<'a> {
-    pub fn alloc(size: usize, drop: Option<BufferDropFn<'a>>) -> Self {
+impl Buffer {
+    pub fn alloc(size: usize, drop: Option<BufferDropFn>) -> Self {
         let data = ManuallyDrop::new(Pin::new(vec![0; size]));
         Self { data, drop }
     }
 
-    pub fn alloc_page(size: usize, drop: Option<BufferDropFn<'a>>) -> Self {
+    pub fn alloc_page(size: usize, drop: Option<BufferDropFn>) -> Self {
         assert!(
             (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
             "\"Page\" of size {size} is not between [{}; {}] range",
@@ -26,7 +26,7 @@ impl<'a> Buffer<'a> {
         Self::alloc(size, drop)
     }
 
-    pub fn new(data: BufferData, drop: Option<BufferDropFn<'a>>) -> Self {
+    pub fn new(data: BufferData, drop: Option<BufferDropFn>) -> Self {
         Self {
             data: ManuallyDrop::new(data),
             drop,
@@ -62,25 +62,25 @@ impl<'a> Buffer<'a> {
     }
 }
 
-impl<'a> AsRef<[u8]> for Buffer<'a> {
+impl AsRef<[u8]> for Buffer {
     fn as_ref(&self) -> &[u8] {
         self.as_slice()
     }
 }
 
-impl<'a> AsMut<[u8]> for Buffer<'a> {
+impl AsMut<[u8]> for Buffer {
     fn as_mut(&mut self) -> &mut [u8] {
         self.as_mut_slice()
     }
 }
 
-impl<'a> Debug for Buffer<'a> {
+impl Debug for Buffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self.data)
     }
 }
 
-impl<'a> Drop for Buffer<'a> {
+impl Drop for Buffer {
     fn drop(&mut self) {
         let data = unsafe { ManuallyDrop::take(&mut self.data) };
         if let Some(f) = &self.drop {

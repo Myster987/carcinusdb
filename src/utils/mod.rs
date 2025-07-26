@@ -5,7 +5,6 @@ pub mod bytes;
 pub mod cast;
 pub mod io;
 pub mod traits;
-pub mod lock;
 
 /// Utilities `Result` type.
 pub type Result<T> = std::result::Result<T, Error>;
