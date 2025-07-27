@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
 
+use crate::storage::StorageResult;
 use crate::storage::buffer_pool::BufferPool;
 use crate::storage::cache::LruPageCache;
 use crate::storage::page::{DEFAULT_PAGE_SIZE, PageType};
@@ -14,26 +15,25 @@ use crate::utils::buffer::Buffer;
 use crate::utils::io::BlockIO;
 
 use crate::{
-    error::DatabaseResult,
     os::{Open, OpenOptions},
     storage::PageNumber,
 };
 
 use super::page::Page;
 
-pub struct MemPageInner<'a> {
+pub struct MemPageInner {
     pub id: PageNumber,
     pub flags: AtomicUsize,
     pub content: Option<Page>,
 }
 
 /// Represents page in memory
-pub struct MemPage<'a> {
-    inner: UnsafeCell<MemPageInner<'a>>,
+pub struct MemPage {
+    inner: UnsafeCell<MemPageInner>,
 }
 
 /// Concurrency will be handled by Pager
-pub type MemPageRef<'a> = Arc<MemPage<'a>>;
+pub type MemPageRef = Arc<MemPage>;
 
 /// Page is up to date.
 const PAGE_UPTODATE: usize = 0b00001;
@@ -46,7 +46,7 @@ const PAGE_DIRTY: usize = 0b01000;
 /// Page is loaded into memory.
 const PAGE_LOADED: usize = 0b10000;
 
-impl<'a> MemPage<'a> {
+impl MemPage {
     pub fn new(id: PageNumber) -> Self {
         Self {
             inner: UnsafeCell::new(MemPageInner {
@@ -58,11 +58,11 @@ impl<'a> MemPage<'a> {
     }
 
     #[allow(clippy::mut_from_ref)]
-    pub fn get(&self) -> &mut MemPageInner<'a> {
+    pub fn get(&self) -> &mut MemPageInner {
         unsafe { &mut *self.inner.get() }
     }
 
-    pub fn get_content(&self) -> &mut Page<'a> {
+    pub fn get_content(&self) -> &mut Page {
         self.get().content.as_mut().unwrap()
     }
 
@@ -135,22 +135,22 @@ impl<'a> MemPage<'a> {
 }
 
 /// Is responsive for reading and writing to file
-pub struct Pager<'a> {
+pub struct Pager {
     /// I/O interface
     io: BlockIO<File>,
     buffer_pool: Arc<BufferPool>,
-    page_cache: Arc<Mutex<LruPageCache<'a>>>,
+    page_cache: Arc<Mutex<LruPageCache>>,
     page_size: u16,
     reserved_space: u8,
 }
 
-impl<'a> Pager<'a> {
+impl Pager {
     pub fn begin_open(
         io: BlockIO<File>,
         buffer_pool: Arc<BufferPool>,
         page_size: u16,
         reserved_space: u8,
-    ) -> DatabaseResult<Self> {
+    ) -> StorageResult<Self> {
         // let file = OpenOptions::default()
         //     .create(true)
         //     .read(true)
@@ -169,20 +169,30 @@ impl<'a> Pager<'a> {
         })
     }
 
-    pub fn read_page(&mut self, page_number: PageNumber) -> DatabaseResult<MemPageRef<'a>> {
-        let mut page_cache = self.page_cache.lock();
+    pub fn read_page(&mut self, page_number: PageNumber) -> StorageResult<MemPageRef> {
         // check cache...
-        if let Some(cached_page) = page_cache.get(&page_number) {
-            return Ok(cached_page.clone())
+        if let Some(cached_page) = self.page_cache.lock().get(&page_number) {
+            return Ok(cached_page.clone());
         }
-
-        let page = Arc::new(MemPage::new(page_number));
-        page.set_locked();
 
         // check wall...
 
         // read from disk
+        let page_wrapper = Arc::new(MemPage::new(page_number));
+        let page = self.read_page_from_disk(page_number, page_wrapper)?;
+
+        self.page_cache.lock().insert(page_number, page.clone())?;
+
+        Ok(page)
+    }
+
+    fn read_page_from_disk(
+        &mut self,
+        page_number: PageNumber,
+        page: MemPageRef,
+    ) -> StorageResult<MemPageRef> {
         let mut buf = self.buffer_pool.get();
+        page.set_locked();
 
         if let Err(error) = self.io.read(page_number, &mut buf) {
             page.set_error();
@@ -190,12 +200,12 @@ impl<'a> Pager<'a> {
             return Err(error.into());
         }
 
-        let buf = Buffer::new(
-            buf,
-            Some(Rc::new(|ptr| {
-                self.buffer_pool.clone().put(ptr);
-            })),
-        );
+        let buffer_pool = self.buffer_pool.clone();
+        let drop_fn = Rc::new(move |ptr| {
+            buffer_pool.put(ptr);
+        });
+
+        let buf = Buffer::new(buf, Some(drop_fn));
 
         let content = Page::new(0, Arc::new(RefCell::new(buf)));
 
@@ -203,20 +213,18 @@ impl<'a> Pager<'a> {
         page.set_loaded();
         page.clear_locked();
 
-        page_cache.insert(page_number, page.clone());
-
-        Ok(unsafe { std::mem::transmute::<Arc<MemPage<'_>>, Arc<MemPage<'a>>>(page) })
+        Ok(page)
     }
 
-    pub fn write(&mut self, page_number: PageNumber, buffer: &[u8]) -> DatabaseResult<usize> {
+    pub fn write(&mut self, page_number: PageNumber, buffer: &[u8]) -> StorageResult<usize> {
         Ok(self.io.write(page_number, buffer)?)
     }
 
-    pub fn flush(&mut self) -> DatabaseResult<()> {
+    pub fn flush(&mut self) -> StorageResult<()> {
         Ok(self.io.flush()?)
     }
 
-    pub fn sync(&self) -> DatabaseResult<()> {
+    pub fn sync(&self) -> StorageResult<()> {
         Ok(self.io.sync()?)
     }
 }

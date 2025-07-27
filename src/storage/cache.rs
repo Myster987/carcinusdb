@@ -23,19 +23,19 @@ pub enum CacheError {
 pub type PageCacheKey = PageNumber;
 
 /// LRU cache entry that stores reference to a `MemPage`.
-pub struct PageCacheEntry<'a> {
+pub struct PageCacheEntry {
     /// Page number of entry
     key: PageCacheKey,
     /// Shared reference to `MemPage`
-    page: MemPageRef<'a>,
+    page: MemPageRef,
     /// Pointer to previous node.
-    prev: Option<NonNull<PageCacheEntry<'a>>>,
+    prev: Option<NonNull<PageCacheEntry>>,
     /// Pointer to next node.
-    next: Option<NonNull<PageCacheEntry<'a>>>,
+    next: Option<NonNull<PageCacheEntry>>,
 }
 
-impl<'a> PageCacheEntry<'a> {
-    pub fn new(key: PageCacheKey, page: MemPageRef<'a>) -> Self {
+impl PageCacheEntry {
+    pub fn new(key: PageCacheKey, page: MemPageRef) -> Self {
         Self {
             key,
             page,
@@ -46,18 +46,18 @@ impl<'a> PageCacheEntry<'a> {
 }
 
 /// Simple LRU cache implementation using hashmap and doubly linked list.
-pub struct LruPageCache<'a> {
+pub struct LruPageCache {
     /// Total capacity of cache (in pages)
     capacity: usize,
     /// Hashmap of cache entries.
-    map: RefCell<HashMap<PageCacheKey, NonNull<PageCacheEntry<'a>>>>,
+    map: RefCell<HashMap<PageCacheKey, NonNull<PageCacheEntry>>>,
     /// Head of doubly linked list.
-    head: RefCell<Option<NonNull<PageCacheEntry<'a>>>>,
+    head: RefCell<Option<NonNull<PageCacheEntry>>>,
     /// Tail of doubly ll.
-    tail: RefCell<Option<NonNull<PageCacheEntry<'a>>>>,
+    tail: RefCell<Option<NonNull<PageCacheEntry>>>,
 }
 
-impl<'a> LruPageCache<'a> {
+impl LruPageCache {
     pub fn new(capacity: usize) -> Self {
         assert!(capacity > 0, "Cache capacity must be grater than 0.");
 
@@ -79,12 +79,12 @@ impl<'a> LruPageCache<'a> {
     }
 
     /// Returns pointer to entry and copies it (coping pointer is cheap). If entry doesn't exist, it returns None.
-    fn get_ptr(&self, key: &PageCacheKey) -> Option<NonNull<PageCacheEntry<'a>>> {
+    fn get_ptr(&self, key: &PageCacheKey) -> Option<NonNull<PageCacheEntry>> {
         let map = self.map.borrow();
         map.get(key).copied()
     }
 
-    pub fn peek(&mut self, key: &PageCacheKey, touch: bool) -> Option<MemPageRef<'a>> {
+    pub fn peek(&mut self, key: &PageCacheKey, touch: bool) -> Option<MemPageRef> {
         let mut ptr = self.get_ptr(key)?;
         if touch {
             self.unlink(ptr);
@@ -94,15 +94,15 @@ impl<'a> LruPageCache<'a> {
         Some(page)
     }
 
-    pub fn get(&mut self, key: &PageCacheKey) -> Option<MemPageRef<'a>> {
+    pub fn get(&mut self, key: &PageCacheKey) -> Option<MemPageRef> {
         self.peek(key, true)
     }
 
-    pub fn insert(&mut self, key: PageCacheKey, page: MemPageRef<'a>) -> CacheResult<()> {
+    pub fn insert(&mut self, key: PageCacheKey, page: MemPageRef) -> CacheResult<()> {
         self.try_insert(key, page)
     }
 
-    fn try_insert(&mut self, key: PageCacheKey, page: MemPageRef<'a>) -> CacheResult<()> {
+    fn try_insert(&mut self, key: PageCacheKey, page: MemPageRef) -> CacheResult<()> {
         if self.contains_key(&key) {
             return Err(CacheError::KeyExists);
         }
@@ -144,7 +144,7 @@ impl<'a> LruPageCache<'a> {
     /// Removes entry from linked list and eventiualy cleans up page from memory (returns `Buffer` to `BufferPool`).
     fn detach(
         &mut self,
-        mut entry: NonNull<PageCacheEntry<'a>>,
+        mut entry: NonNull<PageCacheEntry>,
         clean_page: bool,
     ) -> CacheResult<()> {
         let entry_mut = unsafe { entry.as_mut() };
@@ -170,7 +170,7 @@ impl<'a> LruPageCache<'a> {
     }
 
     /// Disconnects entry from linked list.
-    fn unlink(&mut self, mut entry: NonNull<PageCacheEntry<'a>>) {
+    fn unlink(&mut self, mut entry: NonNull<PageCacheEntry>) {
         let (next, prev) = unsafe {
             let entry_mut = entry.as_mut();
             let next = entry_mut.next;
@@ -203,7 +203,7 @@ impl<'a> LruPageCache<'a> {
     }
 
     /// Inserts entry before head. To work correctly use `Self::detach` before.
-    fn touch(&mut self, mut entry: NonNull<PageCacheEntry<'a>>) {
+    fn touch(&mut self, mut entry: NonNull<PageCacheEntry>) {
         if let Some(mut head) = *self.head.borrow_mut() {
             unsafe {
                 entry.as_mut().next.replace(head);
@@ -286,7 +286,7 @@ impl<'a> LruPageCache<'a> {
     }
 }
 
-impl<'a> Debug for LruPageCache<'a> {
+impl Debug for LruPageCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut debug_vec = vec![];
         let mut current = *self.head.borrow();

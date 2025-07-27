@@ -300,10 +300,10 @@ impl Page {
 
         let offset_to_cell = self.slot_at(idx);
 
-        // // buf lifetime is change to 'a.
-        // let buf = unsafe {
-        //     std::mem::transmute::<&[u8], &'a [u8]>(buf)
-        // };
+        // buf lifetime is change to 'static to avoid later headache. But we need to be carefull with this reference.
+        let buf = unsafe {
+            std::mem::transmute::<&[u8], &'static [u8]>(buf)
+        };
 
         read_btree_cell(
             buf,
@@ -317,29 +317,29 @@ impl Page {
 }
 
 /// Wraps possible types of cell stored in `Page`. On disk each variable is stored in little endian except varints.
-pub enum BTreeCell<'a> {
-    IndexInternalCell(IndexInternalCell<'a>),
-    IndexLeafCell(IndexLeafCell<'a>),
+pub enum BTreeCell {
+    IndexInternalCell(IndexInternalCell),
+    IndexLeafCell(IndexLeafCell),
     TableInternalCell(TableInternalCell),
-    TableLeafCell(TableLeafCell<'a>),
+    TableLeafCell(TableLeafCell),
 }
 
-pub struct IndexInternalCell<'a> {
+pub struct IndexInternalCell {
     /// Left child of BTree Page
     pub left_child: PageNumber,
     /// Total size of Cell including overflow Pages
     payload_size: u64,
     /// Pointer to content of cell living in Page. It doesn't include overflowing payload
-    payload: &'a [u8],
+    payload: &'static [u8],
     /// If cell is overflowing then it points to first overflowing page
     first_overflow: Option<PageNumber>,
 }
 
-pub struct IndexLeafCell<'a> {
+pub struct IndexLeafCell {
     /// Total size of Cell including overflow Pages
     payload_size: u64,
     /// Pointer to content of cell living in Page. It doesn't include overflowing payload
-    payload: &'a [u8],
+    payload: &'static [u8],
     /// If cell is overflowing then it points to first overflowing page
     first_overflow: Option<PageNumber>,
 }
@@ -351,26 +351,26 @@ pub struct TableInternalCell {
     pub left_child: PageNumber,
 }
 
-pub struct TableLeafCell<'a> {
+pub struct TableLeafCell {
     /// Unique ID of row
     row_id: i64,
     /// Total size of Cell including overflow Pages
     payload_size: u64,
     /// Pointer to content of cell living in Page. It doesn't include overflowing payload
-    payload: &'a [u8],
+    payload: &'static [u8],
     /// If cell is overflowing then it points to first overflowing page
     first_overflow: Option<PageNumber>,
 }
 
 /// Creates `BTreeCell` based on provided `PageType`.
-pub fn read_btree_cell<'a>(
-    buf: &'a [u8],
+pub fn read_btree_cell(
+    buf: &'static [u8],
     page_type: PageType,
     pos: u64,
     min_cell_size: usize,
     max_cell_size: usize,
     usable_space: usize,
-) -> StorageResult<BTreeCell<'a>> {
+) -> StorageResult<BTreeCell> {
     let mut cursor = Cursor::new(buf);
     cursor.set_position(pos as u64);
 
