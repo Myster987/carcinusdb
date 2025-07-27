@@ -31,6 +31,10 @@ pub enum Error {
     #[error("invalid page type")]
     InvalidPageType,
 
+    // cache
+    #[error(transparent)]
+    Cache(#[from] cache::CacheError),
+
     // utils
     #[error(transparent)]
     Utils(#[from] crate::utils::Error),
