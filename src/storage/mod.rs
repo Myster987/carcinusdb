@@ -15,8 +15,8 @@ pub type PageNumber = u32;
 pub type SlotNumber = u16;
 /// Used for transactions.
 pub type TransactionId = u32;
-/// Used for WAL frames.
-pub type FrameNumber = u32;
+/// Used for WAL frames. Represents offset to frame in bytes and also id.
+pub type FrameNumber = u64;
 
 pub const PAGE_NUMBER_SIZE: usize = std::mem::size_of::<PageNumber>();
 pub const SLOT_SIZE: usize = std::mem::size_of::<SlotNumber>();
