@@ -1,4 +1,5 @@
 use std::{
+    cell::UnsafeCell,
     fs::{self, File},
     io::{self, Read, Seek, SeekFrom, Write},
     os::fd::AsRawFd,
@@ -112,7 +113,7 @@ impl IO for File {
 /// Wrapper to simplify working with page like structures on disk
 #[derive(Debug)]
 pub struct BlockIO<I> {
-    io: I,
+    io: UnsafeCell<I>,
     pub page_size: usize,
     header_size: usize,
 }
@@ -120,44 +121,48 @@ pub struct BlockIO<I> {
 impl<I> BlockIO<I> {
     pub fn new(io: I, page_size: usize, header_size: usize) -> Self {
         Self {
-            io,
+            io: UnsafeCell::new(io),
             page_size,
             header_size,
         }
     }
+
+    pub fn get_io(&self) -> &mut I {
+        unsafe { self.io.get().as_mut().unwrap() }
+    }
 }
 
 impl<I: IO> BlockIO<I> {
-    pub fn raw_read(&mut self, offset: usize, buffer: &mut [u8]) -> io::Result<usize> {
-        self.io.pread(offset, buffer)
+    pub fn raw_read(&self, offset: usize, buffer: &mut [u8]) -> io::Result<usize> {
+        self.get_io().pread(offset, buffer)
     }
 
     /// Reads page with given number. Includes header offset.
-    pub fn read(&mut self, page_number: PageNumber, buffer: &mut [u8]) -> io::Result<usize> {
+    pub fn read(&self, page_number: PageNumber, buffer: &mut [u8]) -> io::Result<usize> {
         let page_number = page_number as usize;
         let offset = self.header_size + page_number * self.page_size;
         self.raw_read(offset, buffer)
     }
 
     /// Reads header from beginning of a file. Note that buffer size must match header size.
-    pub fn read_header(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+    pub fn read_header(&self, buffer: &mut [u8]) -> io::Result<usize> {
         self.raw_read(0, buffer)
     }
 }
 
 impl<I: IO> BlockIO<I> {
-    pub fn raw_write(&mut self, offset: usize, buffer: &[u8]) -> io::Result<usize> {
-        self.io.pwrite(offset, buffer)
+    pub fn raw_write(&self, offset: usize, buffer: &[u8]) -> io::Result<usize> {
+        self.get_io().pwrite(offset, buffer)
     }
 
     /// Writes page at given number. Includes header offset.
-    pub fn write(&mut self, page_number: PageNumber, buffer: &[u8]) -> io::Result<usize> {
+    pub fn write(&self, page_number: PageNumber, buffer: &[u8]) -> io::Result<usize> {
         let offset = self.header_size + page_number as usize * self.page_size;
         self.raw_write(offset, buffer)
     }
 
     /// Writes header at the beginning of a file. Note that buffer size must match header size.
-    pub fn write_header(&mut self, buffer: &[u8]) -> io::Result<usize> {
+    pub fn write_header(&self, buffer: &[u8]) -> io::Result<usize> {
         self.raw_write(0, buffer)
     }
 }
@@ -167,14 +172,14 @@ impl<I: Write> BlockIO<I> {
     ///
     /// This does not guarantee that the contents reach the filesystem. Use
     /// [`Self::sync`] after flushing.
-    pub fn flush(&mut self) -> io::Result<()> {
-        self.io.flush()
+    pub fn flush(&self) -> io::Result<()> {
+        self.get_io().flush()
     }
 }
 
 impl<I: FileOps> BlockIO<I> {
     /// See [`Sync`] for details.
     pub fn sync(&self) -> io::Result<()> {
-        self.io.sync()
+        self.get_io().sync()
     }
 }
