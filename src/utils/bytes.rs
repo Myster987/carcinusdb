@@ -1,5 +1,7 @@
 use bytes::Buf;
 
+use crate::utils::cast::cast_slice;
+
 use super::{Error, Result};
 
 /// Takes `src` that implements [Buf] and advances current position by 1. Returns u8.
@@ -105,6 +107,25 @@ pub fn zigzag_decode(value: u64) -> i64 {
     (value >> 1) as i64 ^ -((value & 1) as i64)
 }
 
+/// Standard implementation of reflected CRC32. 
+pub fn checksum_crc32(bytes: &[u8]) -> u32 {
+    const POLY: u32 = 0xEDB88320; // reflected 0x04C11DB7
+    let mut crc: u32 = 0xFFFFFFFF;
+
+    for &byte in bytes {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ POLY;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+
+    !crc // final XOR
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -128,6 +149,35 @@ mod tests {
         let encoded = zigzag_encode(num);
 
         assert!(num == zigzag_decode(encoded));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_crc() -> anyhow::Result<()> {
+        let n: u32 = 0;
+
+        println!("{:X}", checksum_crc32("123456789".as_bytes()));
+
+        // println!("{}", crc32(&0x0_u32.to_be_bytes()));
+
+        // for i in 0..4 {
+        //     let mask = (n >> i) & 1;
+        //     println!("Bit {i}: {}", mask);
+        // }
+
+        // let num: u8 = 10;
+
+        // let mut b = 0b_10;
+        // for i in 0..size_of_val(&num) * 8 {
+        //     let bit = (num >> i) & 1;
+        //     b = (b << 1) + bit;
+        //     println!("bit: {bit}");
+        //     println!("{b:08b}");
+        // }
+
+        // println!("{:08b}", 10);
+        // println!("{:08b}", 10);
 
         Ok(())
     }
