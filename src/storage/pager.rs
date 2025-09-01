@@ -11,7 +11,7 @@ use crate::storage::StorageResult;
 use crate::storage::buffer_pool::BufferPool;
 use crate::storage::cache::LruPageCache;
 use crate::storage::page::{DEFAULT_PAGE_SIZE, PageType};
-use crate::utils::buffer::Buffer;
+use crate::utils::buffer::{Buffer, BufferData};
 use crate::utils::io::BlockIO;
 
 use crate::{
@@ -194,26 +194,9 @@ impl Pager {
         let mut buf = self.buffer_pool.get();
         page.set_locked();
 
-        if let Err(error) = self.io.read(page_number, &mut buf) {
-            page.set_error();
-            page.clear_locked();
-            return Err(error.into());
-        }
+        let read_result = self.io.read(page_number, &mut buf);
 
-        let buffer_pool = self.buffer_pool.clone();
-        let drop_fn = Rc::new(move |ptr| {
-            buffer_pool.put(ptr);
-        });
-
-        let buf = Buffer::new(buf, Some(drop_fn));
-
-        let content = Page::new(0, Arc::new(RefCell::new(buf)));
-
-        page.get().content = Some(content);
-        page.set_loaded();
-        page.clear_locked();
-
-        Ok(page)
+        complete_read_page(read_result, page, buf, self.buffer_pool.clone())
     }
 
     pub fn write(&mut self, page_number: PageNumber, buffer: &[u8]) -> StorageResult<usize> {
@@ -227,4 +210,37 @@ impl Pager {
     pub fn sync(&self) -> StorageResult<()> {
         Ok(self.io.sync()?)
     }
+}
+
+/// Should be universal to both disk and wal reads. Takes io::Result and if it
+/// is an error it will set proper flags on page. Otherwise it will set
+/// correct state and value for page.
+/// ### Note that `page` should be locked before calling this function
+pub fn complete_read_page(
+    read_result: std::io::Result<usize>,
+    page: MemPageRef,
+    buf: BufferData,
+    buffer_pool: Arc<BufferPool>,
+) -> StorageResult<MemPageRef> {
+    if let Err(error) = read_result {
+        // if read fails buffer is returned to pool to be used again
+        buffer_pool.put(buf);
+        page.set_error();
+        page.clear_locked();
+        return Err(error.into());
+    }
+
+    let drop_fn = Rc::new(move |ptr| {
+        buffer_pool.put(ptr);
+    });
+
+    let buf = Buffer::new(buf, Some(drop_fn));
+
+    let content = Page::new(0, Arc::new(RefCell::new(buf)));
+
+    page.get().content = Some(content);
+    page.set_loaded();
+    page.clear_locked();
+
+    Ok(page)
 }
