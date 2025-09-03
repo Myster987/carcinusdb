@@ -107,7 +107,7 @@ pub fn zigzag_decode(value: u64) -> i64 {
     (value >> 1) as i64 ^ -((value & 1) as i64)
 }
 
-/// Standard implementation of reflected CRC32. 
+/// Standard implementation of reflected CRC32.
 pub fn checksum_crc32(bytes: &[u8]) -> u32 {
     const POLY: u32 = 0xEDB88320; // reflected 0x04C11DB7
     let mut crc: u32 = 0xFFFFFFFF;
@@ -123,7 +123,26 @@ pub fn checksum_crc32(bytes: &[u8]) -> u32 {
         }
     }
 
-    !crc // final XOR
+    !crc // final NOT
+}
+
+/// Flips `n` bits in number to 1 and returns positions that were flipped.
+/// # Safety
+/// This function assumes that there are `n` 0 bits in number.
+pub fn flip_n_bits(value: &mut usize, mut n: usize) -> Vec<usize> {
+    let mut positions = Vec::with_capacity(n);
+
+    let mut i = 0;
+    while n > 0 {
+        if (*value >> i) & 1 == 0 {
+            *value ^= 1 << i;
+            positions.push(i);
+            n -= 1;
+        }
+        i += 1;
+    }
+
+    positions
 }
 
 #[cfg(test)]
@@ -178,6 +197,19 @@ mod tests {
 
         // println!("{:08b}", 10);
         // println!("{:08b}", 10);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_flip_bits() -> anyhow::Result<()> {
+        let mut n = 100;
+
+        println!("{:08b}", n);
+
+        println!("{:?}", flip_n_bits(&mut n, 2));
+
+        println!("{:08b}", n);
 
         Ok(())
     }
