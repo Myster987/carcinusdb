@@ -126,23 +126,20 @@ pub fn checksum_crc32(bytes: &[u8]) -> u32 {
     !crc // final NOT
 }
 
-/// Flips `n` bits in number to 1 and returns positions that were flipped.
+/// Flips `n` bits in number to 1 and takes vector of positions with offset so that we get precise offset in bits.
 /// # Safety
 /// This function assumes that there are `n` 0 bits in number.
-pub fn flip_n_bits(value: &mut usize, mut n: usize) -> Vec<usize> {
-    let mut positions = Vec::with_capacity(n);
-
+pub fn flip_n_bits(value: &mut u64, mut n: usize, positions: &mut Vec<usize>, offset: usize) {
     let mut i = 0;
+
     while n > 0 {
         if (*value >> i) & 1 == 0 {
             *value ^= 1 << i;
-            positions.push(i);
+            positions.push(offset + i);
             n -= 1;
         }
         i += 1;
     }
-
-    positions
 }
 
 #[cfg(test)]
@@ -207,7 +204,7 @@ mod tests {
 
         println!("{:08b}", n);
 
-        println!("{:?}", flip_n_bits(&mut n, 2));
+        // println!("{:?}", flip_n_bits(&mut n, 2));
 
         println!("{:08b}", n);
 
