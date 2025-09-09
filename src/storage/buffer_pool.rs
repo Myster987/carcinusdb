@@ -103,7 +103,7 @@ impl BitMap {
             Self::BLOCK_SIZE_IN_BITS
         );
 
-        let height = Self::find_tree_height(1, size, Self::WORD_SIZE_IN_BITS);
+        let height = Self::find_tree_height(size);
 
         // each node contains 64 u64 ints so we need to increase this size as well
         let blocks_size = Self::sum_internal_nodes(height) * Self::BLOCK_SIZE * Self::WORD_SIZE;
@@ -134,11 +134,11 @@ impl BitMap {
     }
 
     /// Finds tree height so all bits are covered.
-    fn find_tree_height(a1: usize, a_n: usize, q: usize) -> usize {
+    fn find_tree_height(size: usize) -> usize {
         let mut n = 1;
 
         // normal formula is n-1 but we want to find next one so we keep only n
-        while a1 * q.pow(n) * Self::BLOCK_SIZE < a_n {
+        while geometric_sequence_nth(Self::BLOCK_SIZE_IN_BITS, n + 1, Self::WORD_SIZE) < size {
             n += 1;
         }
 
@@ -282,12 +282,12 @@ impl BitMap {
     }
 
     /// Flips one bit and returns it's id.
-    pub fn flip_one(&mut self) -> Option<usize> {
-        self.flip_many(1).map(|mut vec| vec.pop().unwrap())
+    pub fn set_one(&mut self) -> Option<usize> {
+        self.set_many(1).map(|mut vec| vec.pop().unwrap())
     }
 
     /// Flips given number of bits and returns their ids.
-    pub fn flip_many(&mut self, to_flip: usize) -> Option<Vec<usize>> {
+    pub fn set_many(&mut self, to_flip: usize) -> Option<Vec<usize>> {
         assert!(
             to_flip <= Self::WORD_SIZE_IN_BITS,
             "Can't flip more than {} at once",
@@ -359,6 +359,21 @@ impl BitMap {
         }
     }
 
+    fn create_backtrace_path(&self, beginning: usize) {
+
+    }
+
+    pub fn reset_many(&mut self, ids: &[u64]) {
+        assert!(ids.len() > 0, "You must provide ids to reset.");
+
+        // rounds up to multiple of BLOCK_SIZE_IN_BYTES to find in which block ids are located, 
+        // because by design they must be in the same block to remove them
+        let block_offset = (*ids.first().unwrap() as usize) / Self::BLOCK_SIZE_IN_BITS * Self::BLOCK_SIZE_IN_BYTES;
+
+        
+        println!("{block_offset}");
+    }
+
     /// Used in debugging.
     #[cfg(debug_assertions)]
     fn get_mem(&self) -> &[u64] {
@@ -427,29 +442,35 @@ mod tests {
 
     #[test]
     fn test_bitmap() -> anyhow::Result<()> {
-        let mut bitmap = BitMap::new(1024 * 5);
+        let mut bitmap = BitMap::new(512_000 + 512);
+
+        println!("{:?}", bitmap);
+
+        println!("level sum: {}, offset: {}", BitMap::level_nodes_count(1), (bitmap.calculate_block_offset(1, 1) - bitmap.size_in_bytes() - BitMap::level_nodes_count(0) * BitMap::BLOCK_SIZE_IN_BYTES) / BitMap::BLOCK_SIZE_IN_BYTES);
+        println!("level sum: {}, offset: {}", BitMap::level_nodes_count(2), (bitmap.calculate_block_offset(2, 15) - bitmap.size_in_bytes() - BitMap::level_nodes_count(1) * BitMap::BLOCK_SIZE_IN_BYTES) / BitMap::BLOCK_SIZE_IN_BYTES);
+        println!("level sum: {}, offset: {}", BitMap::level_nodes_count(3), (bitmap.calculate_block_offset(3, 1000) - bitmap.size_in_bytes() - BitMap::level_nodes_count(2) * BitMap::BLOCK_SIZE_IN_BYTES) / BitMap::BLOCK_SIZE_IN_BYTES);
+
+
+
+        // bitmap.reset_many(&[1024 - 64]);
         // bitmap.print_leafs();
 
         // println!("bitmap: {:?}", bitmap);
         // bitmap.print_tree();
 
-        println!("flipped: {:?}", bitmap.flip_one());
-        println!("flipped: {:?}", bitmap.flip_many(60));
-        println!("flipped: {:?}", bitmap.flip_many(60));
+        // println!("flipped: {:?}", bitmap.flip_one());
+        // println!("flipped: {:?}", bitmap.flip_many(60));
+        // println!("flipped: {:?}", bitmap.flip_many(60));
 
-        for _ in 0..10 {
-            println!("flipped: {:?}", bitmap.flip_many(64));
-        }
+        // for _ in 0..10 {
+        //     println!("flipped: {:?}", bitmap.flip_many(64));
+        // }
 
-        println!("flipped: {:?}", bitmap.flip_many(60));
-        println!("flipped: {:?}", bitmap.flip_one());
+        // println!("flipped: {:?}", bitmap.flip_many(60));
+        // println!("flipped: {:?}", bitmap.flip_one());
 
+        // bitmap.print_leafs();
         // bitmap.print_tree();
-        bitmap.print_leafs();
-        bitmap.print_tree();
-
-        println!("{:064b}", bitmap.get_block_mut_at_offset(0)[0]);
-        println!("{:064b}", bitmap.get_block_mut_at_offset(0)[1]);
 
         Ok(())
     }
