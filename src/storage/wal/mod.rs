@@ -204,9 +204,9 @@ impl Wal for WalFile {
         let mut buf = buffer_pool.get();
         page.set_locked();
 
-        let read_result = self.io.raw_read(offset, &mut buf);
+        let read_result = self.io.raw_read(offset, &mut buf[..]);
 
-        pager::complete_read_page(read_result, page, buf, buffer_pool)
+        pager::complete_read_page(read_result, page, buf)
     }
 
     fn write_frame_raw(
