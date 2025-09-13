@@ -1,45 +1,48 @@
 use std::{
     alloc::{Layout, alloc_zeroed},
-    pin::Pin,
     ptr::NonNull,
+    rc::Rc,
 };
 
 use parking_lot::Mutex;
 
-use crate::utils::{buffer::BufferData, bytes::flip_n_bits};
+use crate::utils::{
+    buffer::{BUFFER_ALIGNMENT, Buffer, BufferData, dealloc_heap},
+    bytes::flip_n_bits,
+};
 
 /// Holds free buffers as pointers to memory.
 pub struct BufferPool {
-    pub free_buffers: Mutex<Vec<BufferData>>,
+    pool: Mutex<PoolInner>,
+    size: usize,
     page_size: usize,
 }
 
 impl BufferPool {
-    pub fn new(page_size: usize) -> Self {
+    pub fn new(size: usize, page_size: usize) -> Self {
         Self {
-            free_buffers: Mutex::new(Vec::new()),
+            size,
             page_size,
+            pool: Mutex::new(PoolInner::new(size, page_size)),
         }
     }
 
+    /// Returns total number of allocated buffers.
     pub fn len(&self) -> usize {
-        self.free_buffers.lock().len()
+        self.pool.lock().len()
     }
 
-    /// Returns free pointer to buffer or allocates new one.
-    pub fn get(&self) -> BufferData {
-        let mut free_buffers = self.free_buffers.lock();
-        if let Some(buffer) = free_buffers.pop() {
-            buffer
-        } else {
-            Pin::new(vec![0; self.page_size])
-        }
+    /// Returns free buffer
+    pub fn get(self: &std::sync::Arc<Self>) -> Buffer {
+        let (id, ptr) = self.pool.lock().alloc_one();
+        let pool = self.clone();
+        let drop_fn = Rc::new(move |id| pool.put(id));
+        Buffer::from_pool(id, self.page_size, ptr, drop_fn)
     }
 
     /// Adds new free buffer to pool.
-    pub fn put(&self, buffer: BufferData) {
-        let mut free_buffers = self.free_buffers.lock();
-        free_buffers.push(buffer);
+    pub fn put(&self, buffer_id: usize) {
+        self.pool.lock().dealloc_one(buffer_id);
     }
 }
 
@@ -106,9 +109,10 @@ impl BitMap {
         let height = Self::find_tree_height(size);
 
         // each node contains 64 u64 ints so we need to increase this size as well
-        let blocks_size = Self::sum_internal_nodes(height) * Self::BLOCK_SIZE * Self::WORD_SIZE;
+        let blocks_size = Self::sum_internal_nodes(height) * Self::BLOCK_SIZE_IN_BYTES;
 
-        let layout = Layout::from_size_align(size + blocks_size, Self::WORD_SIZE).unwrap();
+        let layout =
+            Layout::from_size_align(size / Self::WORD_SIZE + blocks_size, Self::WORD_SIZE).unwrap();
         let mem_ptr = unsafe { NonNull::new_unchecked(alloc_zeroed(layout)).cast() };
 
         Self {
@@ -131,6 +135,10 @@ impl BitMap {
     /// Returns `Bitmap` index tree height.
     pub fn height(&self) -> usize {
         self.height
+    }
+
+    pub fn len(&self) -> usize {
+        self.get_root_block().iter().map(|&v| v as usize).sum()
     }
 
     /// Finds tree height so all bits are covered.
@@ -315,7 +323,7 @@ impl BitMap {
         let (leaf_tree_block_number, _) = path_stack.last().unwrap();
         let block_offset = *leaf_tree_block_number * Self::BLOCK_SIZE_IN_BYTES;
 
-        self.backtrace_update(path_stack, to_flip);
+        self.backtrace_update(path_stack, to_flip as isize);
 
         Some(self.flip_block_bits(block_offset, to_flip))
     }
@@ -352,26 +360,68 @@ impl BitMap {
     }
 
     /// Backtraces update on tree using stack that contains index and byte offset to internal blocks to update.
-    fn backtrace_update(&mut self, mut stack: Vec<(usize, usize)>, to_add: usize) {
+    fn backtrace_update(&mut self, mut stack: Vec<(usize, usize)>, value: isize) {
         while let Some((index, block_offset_in_bytes)) = stack.pop() {
             let block = self.get_block_mut_at_offset(block_offset_in_bytes);
-            block[index] += to_add as u64;
+            if value >= 0 {
+                block[index] += value as u64;
+            } else {
+                block[index] -= value.abs() as u64;
+            }
         }
     }
 
-    fn create_backtrace_path(&self, beginning: usize) {
+    /// Takes beginning of leaf block in bits and then creates index update path.
+    fn create_backtrace_path(&self, beginning: usize) -> Vec<(usize, usize)> {
+        let mut height = self.height;
+        let mut path_stack = vec![];
 
+        let mut block_idx = beginning / Self::BLOCK_SIZE_IN_BITS;
+
+        while height > 0 {
+            let index = block_idx % Self::BLOCK_SIZE;
+            let block_number = block_idx / Self::BLOCK_SIZE;
+
+            let offset = self.calculate_block_offset(height, block_number);
+
+            path_stack.push((index, offset));
+            block_idx = block_number;
+            height -= 1;
+        }
+
+        path_stack
     }
 
-    pub fn reset_many(&mut self, ids: &[u64]) {
+    /// Takes id and flips it's value to 0 and updates index.
+    pub fn reset_one(&mut self, id: usize) {
+        self.reset_many(&[id]);
+    }
+
+    /// Takes slice of ids (bit offsets) and flips all of them to 0 and updates index.
+    /// # Safety
+    /// In order for this function to work correctly ids needs to be from the **same block**, \
+    /// if they are many given. Otherwise this function will panic when trying to reset bits out of range
+    pub fn reset_many(&mut self, ids: &[usize]) {
         assert!(ids.len() > 0, "You must provide ids to reset.");
 
-        // rounds up to multiple of BLOCK_SIZE_IN_BYTES to find in which block ids are located, 
+        // rounds up to multiple of BLOCK_SIZE_IN_BITS to find in which block ids are located,
         // because by design they must be in the same block to remove them
-        let block_offset = (*ids.first().unwrap() as usize) / Self::BLOCK_SIZE_IN_BITS * Self::BLOCK_SIZE_IN_BYTES;
+        let leaf_offset_in_bits =
+            *ids.first().unwrap() / Self::BLOCK_SIZE_IN_BITS * Self::BLOCK_SIZE_IN_BITS;
 
-        
-        println!("{block_offset}");
+        let to_flip = -(ids.len() as isize);
+
+        let path_stack = self.create_backtrace_path(leaf_offset_in_bits);
+        let leaf_block = self.get_block_mut_at_offset(leaf_offset_in_bits / Self::WORD_SIZE);
+
+        for offset in ids.iter().map(|&id| id - leaf_offset_in_bits) {
+            let index = offset / Self::WORD_SIZE_IN_BITS;
+            let bit_number = offset % Self::WORD_SIZE_IN_BITS;
+
+            leaf_block[index] ^= 1 << bit_number;
+        }
+
+        self.backtrace_update(path_stack, to_flip);
     }
 
     /// Used in debugging.
@@ -416,23 +466,91 @@ impl BitMap {
     }
 }
 
-pub struct Arena {
-    size: usize,
-    mem_ptr: NonNull<u8>,
+impl Drop for BitMap {
+    fn drop(&mut self) {
+        let blocks_size = Self::sum_internal_nodes(self.height) * Self::BLOCK_SIZE_IN_BYTES;
+        unsafe {
+            dealloc_heap(
+                self.ptr.cast(),
+                self.size_in_bytes() + blocks_size,
+                Self::WORD_SIZE,
+            )
+        };
+    }
 }
 
-impl Arena {
-    pub fn new(size: usize, buffer_size: usize) -> Self {
-        assert!(
-            size % buffer_size == 0,
-            "{} size must be aligned to buffer size",
-            std::any::type_name::<Self>()
-        );
+/// Fixed size memory pool that allocates big chunk of memory at once to speed up allocation.  
+pub struct PoolInner {
+    /// Size in memory blocks
+    size: usize,
+    /// Size of invidual block
+    block_size: usize,
+    /// Pointer to beginning of pool memory
+    mem_ptr: NonNull<u8>,
+    /// Bitmap index to speed up free bits lookup
+    bitmap_index: BitMap,
+}
 
-        let layout = Layout::from_size_align(size, buffer_size).unwrap();
+impl PoolInner {
+    // Creates new pool instance. Keep in mind that size is in blocks. So if `block_size` is 4KB and `size` is 100 it will allocate 400KB.
+    pub fn new(size: usize, block_size: usize) -> Self {
+        let layout = Layout::from_size_align(size * block_size, BUFFER_ALIGNMENT).unwrap();
         let mem_ptr = unsafe { NonNull::new_unchecked(alloc_zeroed(layout)) };
 
-        Self { size, mem_ptr }
+        Self {
+            size,
+            block_size,
+            mem_ptr,
+            bitmap_index: BitMap::new(size),
+        }
+    }
+
+    /// Returns total allocated blocks.
+    pub fn len(&self) -> usize {
+        self.bitmap_index.len()
+    }
+
+    /// Returns pointer to memory at given **byte** offset.
+    fn get_block(&mut self, offset: usize) -> BufferData {
+        unsafe { self.mem_ptr.byte_add(offset) }
+    }
+
+    /// Allocates single blocks and returns id and pointer to memory.
+    pub fn alloc_one(&mut self) -> (usize, BufferData) {
+        self.alloc_many(1).pop().unwrap()
+    }
+
+    /// Allocates many blocks and returns vector of ids with memory pointers.
+    pub fn alloc_many(&mut self, to_alloc: usize) -> Vec<(usize, BufferData)> {
+        let ids = self.bitmap_index.set_many(to_alloc).expect("Pool is full");
+
+        ids.into_iter()
+            .map(|id| (id, self.get_block(id * self.block_size)))
+            .collect()
+    }
+
+    /// Deallocates single block with given id. Keep in mind that it also cleans up memory.
+    pub fn dealloc_one(&mut self, id: usize) {
+        self.dealloc_many(&[id]);
+    }
+
+    /// Deallocates many block with given ids. Keep in mind that it also cleans up memory.
+    pub fn dealloc_many(&mut self, ids: &[usize]) {
+        for &id in ids {
+            let offset = id * self.block_size;
+            unsafe {
+                self.mem_ptr
+                    .byte_add(offset)
+                    .write_bytes(0, self.block_size)
+            };
+        }
+        self.bitmap_index.reset_many(ids);
+    }
+}
+
+impl Drop for PoolInner {
+    fn drop(&mut self) {
+        unsafe { dealloc_heap(self.mem_ptr, self.size, BUFFER_ALIGNMENT) };
     }
 }
 
@@ -441,16 +559,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_pool() -> anyhow::Result<()> {
+        let mut pool = PoolInner::new(512, 16);
+
+        println!("buf: {:?}", pool.alloc_one());
+        println!("buf: {:?}", pool.alloc_one());
+
+        Ok(())
+    }
+
+    #[test]
     fn test_bitmap() -> anyhow::Result<()> {
-        let mut bitmap = BitMap::new(512_000 + 512);
+        // let mut bitmap = BitMap::new(512_000 + 512);
 
-        println!("{:?}", bitmap);
+        // println!("{:?}", bitmap);
 
-        println!("level sum: {}, offset: {}", BitMap::level_nodes_count(1), (bitmap.calculate_block_offset(1, 1) - bitmap.size_in_bytes() - BitMap::level_nodes_count(0) * BitMap::BLOCK_SIZE_IN_BYTES) / BitMap::BLOCK_SIZE_IN_BYTES);
-        println!("level sum: {}, offset: {}", BitMap::level_nodes_count(2), (bitmap.calculate_block_offset(2, 15) - bitmap.size_in_bytes() - BitMap::level_nodes_count(1) * BitMap::BLOCK_SIZE_IN_BYTES) / BitMap::BLOCK_SIZE_IN_BYTES);
-        println!("level sum: {}, offset: {}", BitMap::level_nodes_count(3), (bitmap.calculate_block_offset(3, 1000) - bitmap.size_in_bytes() - BitMap::level_nodes_count(2) * BitMap::BLOCK_SIZE_IN_BYTES) / BitMap::BLOCK_SIZE_IN_BYTES);
-
-
+        // println!("level sum: {}, offset: {}", BitMap::level_nodes_count(1), (bitmap.calculate_block_offset(1, 1) - bitmap.size_in_bytes() - BitMap::level_nodes_count(0) * BitMap::BLOCK_SIZE_IN_BYTES) / BitMap::BLOCK_SIZE_IN_BYTES);
+        // println!("level sum: {}, offset: {}", BitMap::level_nodes_count(2), (bitmap.calculate_block_offset(2, 15) - bitmap.size_in_bytes() - BitMap::level_nodes_count(1) * BitMap::BLOCK_SIZE_IN_BYTES) / BitMap::BLOCK_SIZE_IN_BYTES);
+        // println!("level sum: {}, offset: {}", BitMap::level_nodes_count(3), (bitmap.calculate_block_offset(3, 1000) - bitmap.size_in_bytes() - BitMap::level_nodes_count(2) * BitMap::BLOCK_SIZE_IN_BYTES) / BitMap::BLOCK_SIZE_IN_BYTES);
 
         // bitmap.reset_many(&[1024 - 64]);
         // bitmap.print_leafs();
@@ -458,8 +584,27 @@ mod tests {
         // println!("bitmap: {:?}", bitmap);
         // bitmap.print_tree();
 
-        // println!("flipped: {:?}", bitmap.flip_one());
-        // println!("flipped: {:?}", bitmap.flip_many(60));
+        let mut bitmap = BitMap::new(4096 + 512);
+
+        for _ in 0..10 {
+            bitmap.set_many(64);
+        }
+
+        bitmap.print_tree();
+        let flipped = bitmap.set_one();
+        bitmap.print_tree();
+        println!("flipped: {:?}", flipped);
+
+        bitmap.reset_one(flipped.unwrap());
+
+        bitmap.print_leafs();
+        bitmap.print_tree();
+
+        // println!("flipped: {:?}", bitmap.set_many(60));
+        // println!("flipped: {:?}", bitmap.set_one());
+
+        // println!("stack: {:?}", bitmap.reset_many(&[4000]));
+
         // println!("flipped: {:?}", bitmap.flip_many(60));
 
         // for _ in 0..10 {
@@ -468,9 +613,6 @@ mod tests {
 
         // println!("flipped: {:?}", bitmap.flip_many(60));
         // println!("flipped: {:?}", bitmap.flip_one());
-
-        // bitmap.print_leafs();
-        // bitmap.print_tree();
 
         Ok(())
     }
