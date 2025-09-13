@@ -8,7 +8,7 @@ use std::{
 use crate::{
     storage::{Error, PageNumber, SlotNumber, StorageResult},
     utils::{
-        buffer::{Buffer, BufferDropFn},
+        buffer::{Buffer, HeapDropFn},
         bytes,
     },
 };
@@ -169,7 +169,7 @@ impl Page {
         }
     }
 
-    pub fn alloc(offset: usize, size: usize, drop: Option<BufferDropFn>) -> Self {
+    pub fn alloc(offset: usize, size: usize, drop: Option<HeapDropFn>) -> Self {
         let buf = Buffer::alloc_page(size, drop);
         Self::new(offset, Arc::new(RefCell::new(buf)))
     }
@@ -301,9 +301,7 @@ impl Page {
         let offset_to_cell = self.slot_at(idx);
 
         // buf lifetime is change to 'static to avoid later headache. But we need to be carefull with this reference.
-        let buf = unsafe {
-            std::mem::transmute::<&[u8], &'static [u8]>(buf)
-        };
+        let buf = unsafe { std::mem::transmute::<&[u8], &'static [u8]>(buf) };
 
         read_btree_cell(
             buf,

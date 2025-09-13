@@ -194,9 +194,9 @@ impl Pager {
         let mut buf = self.buffer_pool.get();
         page.set_locked();
 
-        let read_result = self.io.read(page_number, &mut buf);
+        let read_result = self.io.read(page_number, &mut buf[..]);
 
-        complete_read_page(read_result, page, buf, self.buffer_pool.clone())
+        complete_read_page(read_result, page, buf)
     }
 
     pub fn write(&mut self, page_number: PageNumber, buffer: &[u8]) -> StorageResult<usize> {
@@ -219,22 +219,13 @@ impl Pager {
 pub fn complete_read_page(
     read_result: std::io::Result<usize>,
     page: MemPageRef,
-    buf: BufferData,
-    buffer_pool: Arc<BufferPool>,
+    buf: Buffer,
 ) -> StorageResult<MemPageRef> {
     if let Err(error) = read_result {
-        // if read fails buffer is returned to pool to be used again
-        buffer_pool.put(buf);
         page.set_error();
         page.clear_locked();
         return Err(error.into());
     }
-
-    let drop_fn = Rc::new(move |ptr| {
-        buffer_pool.put(ptr);
-    });
-
-    let buf = Buffer::new(buf, Some(drop_fn));
 
     let content = Page::new(0, Arc::new(RefCell::new(buf)));
 
