@@ -1,7 +1,5 @@
 use bytes::Buf;
 
-use crate::utils::cast::cast_slice;
-
 use super::{Error, Result};
 
 /// Takes `src` that implements [Buf] and advances current position by 1. Returns u8.
