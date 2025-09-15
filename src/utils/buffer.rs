@@ -48,6 +48,14 @@ impl Buffer {
         }
     }
 
+    pub fn from_heap(size: usize, ptr: NonNull<u8>, drop: Option<HeapDropFn>) -> Self {
+        Self {
+            size,
+            ptr,
+            r#type: BufferType::Heap { drop },
+        }
+    }
+
     pub fn size(&self) -> usize {
         self.size
     }

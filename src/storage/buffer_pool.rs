@@ -4,11 +4,13 @@ use std::{
     rc::Rc,
 };
 
+use bytes::Buf;
 use parking_lot::Mutex;
+// use smallvec::SmallVec;
 
 use crate::utils::{
-    buffer::{BUFFER_ALIGNMENT, Buffer, BufferData, dealloc_heap},
-    bytes::flip_n_bits,
+    buffer::{BUFFER_ALIGNMENT, Buffer, BufferData, alloc_heap, dealloc_heap},
+    bytes::{flip_n_bits, get_u32},
 };
 
 /// Holds free buffers as pointers to memory.
@@ -32,12 +34,15 @@ impl BufferPool {
         self.pool.lock().len()
     }
 
-    /// Returns free buffer
+    /// Returns free buffer in pool or allocates new one on heap. By default pool buffer drop function will return them back to pool.
     pub fn get(self: &std::sync::Arc<Self>) -> Buffer {
-        let (id, ptr) = self.pool.lock().alloc_one();
-        let pool = self.clone();
-        let drop_fn = Rc::new(move |id| pool.put(id));
-        Buffer::from_pool(id, self.page_size, ptr, drop_fn)
+        if let Some((id, ptr)) = self.pool.lock().try_alloc_one() {
+            let pool = self.clone();
+            let drop_fn = Rc::new(move |id| pool.put(id));
+            Buffer::from_pool(id, self.page_size, ptr, drop_fn)
+        } else {
+            Buffer::alloc_page(self.page_size, None)
+        }
     }
 
     /// Adds new free buffer to pool.
@@ -87,6 +92,7 @@ struct BitMap {
     height: usize,
     /// pointer to beginning of bitmap memory
     ptr: NonNull<u64>,
+    path_stack: Vec<(usize, usize)>,
 }
 
 impl BitMap {
@@ -119,6 +125,7 @@ impl BitMap {
             size,
             height,
             ptr: mem_ptr,
+            path_stack: Vec::with_capacity(height),
         }
     }
 
@@ -302,8 +309,6 @@ impl BitMap {
             Self::WORD_SIZE_IN_BITS
         );
         // this stack will be later used to remember words that need to be updated when walking up
-        let mut path_stack = vec![];
-
         let mut height = self.height;
         let mut block_level = 2;
         let mut block_offset = self.size_in_bytes();
@@ -312,7 +317,7 @@ impl BitMap {
         while height > 0 {
             let free_index = Self::find_next_free_block_index(height, block, to_flip)?;
 
-            path_stack.push((free_index, block_offset));
+            self.path_stack.push((free_index, block_offset));
             block = self.get_block(block_level, free_index);
             block_offset = self.calculate_block_offset(block_level, free_index);
 
@@ -320,10 +325,10 @@ impl BitMap {
             block_level += 1;
         }
 
-        let (leaf_tree_block_number, _) = path_stack.last().unwrap();
+        let (leaf_tree_block_number, _) = self.path_stack.last().unwrap();
         let block_offset = *leaf_tree_block_number * Self::BLOCK_SIZE_IN_BYTES;
 
-        self.backtrace_update(path_stack, to_flip as isize);
+        self.backtrace_update(to_flip as isize);
 
         Some(self.flip_block_bits(block_offset, to_flip))
     }
@@ -360,8 +365,8 @@ impl BitMap {
     }
 
     /// Backtraces update on tree using stack that contains index and byte offset to internal blocks to update.
-    fn backtrace_update(&mut self, mut stack: Vec<(usize, usize)>, value: isize) {
-        while let Some((index, block_offset_in_bytes)) = stack.pop() {
+    fn backtrace_update(&mut self, value: isize) {
+        while let Some((index, block_offset_in_bytes)) = self.path_stack.pop() {
             let block = self.get_block_mut_at_offset(block_offset_in_bytes);
             if value >= 0 {
                 block[index] += value as u64;
@@ -372,9 +377,8 @@ impl BitMap {
     }
 
     /// Takes beginning of leaf block in bits and then creates index update path.
-    fn create_backtrace_path(&self, beginning: usize) -> Vec<(usize, usize)> {
+    fn create_backtrace_path(&mut self, beginning: usize) {
         let mut height = self.height;
-        let mut path_stack = vec![];
 
         let mut block_idx = beginning / Self::BLOCK_SIZE_IN_BITS;
 
@@ -384,12 +388,10 @@ impl BitMap {
 
             let offset = self.calculate_block_offset(height, block_number);
 
-            path_stack.push((index, offset));
+            self.path_stack.push((index, offset));
             block_idx = block_number;
             height -= 1;
         }
-
-        path_stack
     }
 
     /// Takes id and flips it's value to 0 and updates index.
@@ -411,7 +413,7 @@ impl BitMap {
 
         let to_flip = -(ids.len() as isize);
 
-        let path_stack = self.create_backtrace_path(leaf_offset_in_bits);
+        self.create_backtrace_path(leaf_offset_in_bits);
         let leaf_block = self.get_block_mut_at_offset(leaf_offset_in_bits / Self::WORD_SIZE);
 
         for offset in ids.iter().map(|&id| id - leaf_offset_in_bits) {
@@ -421,7 +423,7 @@ impl BitMap {
             leaf_block[index] ^= 1 << bit_number;
         }
 
-        self.backtrace_update(path_stack, to_flip);
+        self.backtrace_update(to_flip);
     }
 
     /// Used in debugging.
@@ -491,6 +493,154 @@ pub struct PoolInner {
     bitmap_index: BitMap,
 }
 
+unsafe impl Send for PoolInner {}
+unsafe impl Sync for PoolInner {}
+
+/// Each free block has 4 or 8 byte header that points to next free block (free list).
+/// If header is usize::MAX, then it doesn't point to any next block (block is allocated)
+pub struct FreeListPool {
+    /// Size of pool in memory block (not total memory)
+    size: usize,
+    /// Size in bytes of invidual memory block
+    block_size: usize,
+    /// Number of allocated blocks
+    len: usize,
+    /// Pointer to beginning of pool
+    ptr: NonNull<u8>,
+    /// Head of freelist
+    head: Option<usize>,
+}
+
+impl FreeListPool {
+    const HEADER_SIZE: usize = size_of::<usize>();
+    const BLOCK_ALLOCATED: usize = usize::MAX;
+    const LIST_END: usize = usize::MAX - 1;
+
+    pub fn new(size: usize, block_size: usize) -> Self {
+        let total_size = size * (Self::HEADER_SIZE + block_size);
+        let ptr = unsafe { alloc_heap(total_size, BUFFER_ALIGNMENT) };
+
+        Self {
+            size,
+            block_size,
+            len: block_size,
+            ptr,
+            head: Some(0),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    fn calculate_offset(&self, id: usize) -> usize {
+        id * (Self::HEADER_SIZE + self.block_size)
+    }
+
+    fn get_header(&self, id: usize) -> usize {
+        let offset = self.calculate_offset(id);
+        let header_ptr = unsafe { self.ptr.byte_add(offset) };
+
+        usize::from_le_bytes(unsafe {
+            std::slice::from_raw_parts(header_ptr.as_ptr(), Self::HEADER_SIZE)
+                .try_into()
+                .unwrap()
+        })
+    }
+
+    fn set_header(&self, id: usize, value: usize) {
+        let offset = self.calculate_offset(id);
+        let header_ptr = unsafe { self.ptr.byte_add(offset) };
+
+        unsafe { header_ptr.cast().write(value) };
+    }
+
+    /// Returns id to next free block based on block id.  
+    fn get_next(&self, id: usize) -> Option<usize> {
+        let current = self.get_header(id);
+
+        if current == Self::BLOCK_ALLOCATED || current == Self::LIST_END {
+            None
+        } else {
+            Some(current)
+        }
+    }
+
+    /// Return pointer to beginning of block. Skips header
+    fn get_block(&self, id: usize) -> BufferData {
+        let offset = self.calculate_offset(id) + Self::HEADER_SIZE;
+
+        unsafe { self.ptr.byte_add(offset) }
+    }
+
+    pub fn try_alloc_one(&mut self) -> Option<(usize, BufferData)> {
+        self.try_alloc_many(1).map(|mut vec| vec.pop().unwrap())
+    }
+
+    pub fn try_alloc_many(&mut self, to_alloc: usize) -> Option<Vec<(usize, BufferData)>> {
+        let mut ids = Vec::with_capacity(to_alloc);
+
+        let mut count = to_alloc;
+        let mut current = self.head?;
+
+        while count > 0 {
+            ids.push((current, self.get_block(current)));
+            current = self.get_next(current)?;
+
+            count -= 1;
+        }
+
+        self.head = Some(current);
+        self.len -= to_alloc;
+
+        Some(ids)
+    }
+
+    pub fn dealloc(&mut self, id: usize) {
+        if let Some(head) = self.head {
+            self.set_header(id, head);
+        } else {
+            self.set_header(id, Self::LIST_END);
+        }
+        unsafe { self.get_block(id).write_bytes(0, self.block_size) };
+        self.head = Some(id);
+        self.len += 1;
+    }
+}
+
+unsafe impl Send for FreeListPool {}
+unsafe impl Sync for FreeListPool {}
+
+pub struct FreeListBufferPool {
+    pool: Mutex<FreeListPool>,
+    size: usize,
+    page_size: usize,
+}
+
+impl FreeListBufferPool {
+    pub fn new(size: usize, page_size: usize) -> Self {
+        Self {
+            pool: Mutex::new(FreeListPool::new(size, page_size)),
+            size,
+            page_size,
+        }
+    }
+
+    pub fn get(self: &std::sync::Arc<Self>) -> Buffer {
+        if let Some((id, ptr)) = self.pool.lock().try_alloc_one() {
+            let pool = self.clone();
+            let drop_fn = Rc::new(move |id| pool.put(id));
+            Buffer::from_pool(id, self.page_size, ptr, drop_fn)
+        } else {
+            Buffer::alloc_page(self.page_size, None)
+        }
+    }
+
+    pub fn put(&self, id: usize) {
+        self.pool.lock().dealloc(id);
+    }
+}
+
 impl PoolInner {
     // Creates new pool instance. Keep in mind that size is in blocks. So if `block_size` is 4KB and `size` is 100 it will allocate 400KB.
     pub fn new(size: usize, block_size: usize) -> Self {
@@ -517,16 +667,28 @@ impl PoolInner {
 
     /// Allocates single blocks and returns id and pointer to memory.
     pub fn alloc_one(&mut self) -> (usize, BufferData) {
-        self.alloc_many(1).pop().unwrap()
+        self.try_alloc_one().unwrap()
+    }
+
+    /// Allocates single blocks and returns id and pointer to memory. Returns `None` if not successfull.
+    pub fn try_alloc_one(&mut self) -> Option<(usize, BufferData)> {
+        self.try_alloc_many(1).map(|mut val| val.pop().unwrap())
     }
 
     /// Allocates many blocks and returns vector of ids with memory pointers.
     pub fn alloc_many(&mut self, to_alloc: usize) -> Vec<(usize, BufferData)> {
-        let ids = self.bitmap_index.set_many(to_alloc).expect("Pool is full");
+        self.try_alloc_many(to_alloc).unwrap()
+    }
 
-        ids.into_iter()
-            .map(|id| (id, self.get_block(id * self.block_size)))
-            .collect()
+    /// Allocates many blocks and returns vector of ids with memory pointers. Returns `None` if not successfull.
+    pub fn try_alloc_many(&mut self, to_alloc: usize) -> Option<Vec<(usize, BufferData)>> {
+        let ids = self.bitmap_index.set_many(to_alloc)?;
+
+        Some(
+            ids.into_iter()
+                .map(|id| (id, self.get_block(id * self.block_size)))
+                .collect(),
+        )
     }
 
     /// Deallocates single block with given id. Keep in mind that it also cleans up memory.
@@ -556,7 +718,116 @@ impl Drop for PoolInner {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::Arc,
+        time::{Instant},
+    };
+
+    use parking_lot::Mutex;
+
     use super::*;
+
+    struct SimpleBufferPool {
+        buffers: Mutex<Vec<BufferData>>,
+        page_size: usize,
+    }
+
+    unsafe impl Send for SimpleBufferPool {}
+    unsafe impl Sync for SimpleBufferPool {}
+
+    impl SimpleBufferPool {
+        fn new(page_size: usize) -> Self {
+            Self {
+                buffers: Mutex::new(Vec::new()),
+                page_size,
+            }
+        }
+
+        fn get(self: &std::sync::Arc<Self>) -> Buffer {
+            if let Some(ptr) = self.buffers.lock().pop() {
+                let pool = self.clone();
+                let drop_fn = Rc::new(move |ptr| pool.put(ptr));
+                Buffer::from_heap(self.page_size, ptr, Some(drop_fn))
+            } else {
+                Buffer::alloc_page(self.page_size, None)
+            }
+        }
+
+        fn put(&self, ptr: BufferData) {
+            unsafe { ptr.write_bytes(0, self.page_size) };
+            self.buffers.lock().push(ptr);
+        }
+    }
+
+    #[test]
+    fn test_buffer_pool() -> anyhow::Result<()> {
+        let pool = Arc::new(BufferPool::new(512, 4096));
+        let mut threads = vec![];
+
+        let start = Instant::now();
+
+        for _ in 0..10 {
+            let pool_clone = pool.clone();
+            threads.push(std::thread::spawn(move || {
+                for _ in 0..100 {
+                    let mut buf = pool_clone.get();
+                    buf[..6].copy_from_slice(b"Maciek");
+                }
+            }));
+        }
+
+        for t in threads {
+            t.join().unwrap();
+        }
+
+        println!("Bitmap index buffer pool took: {:?}", start.elapsed());
+
+        let vec_pool = Arc::new(SimpleBufferPool::new(4096));
+        let mut threads = vec![];
+
+        let start = Instant::now();
+
+        for _ in 0..10 {
+            let vec_pool_clone = vec_pool.clone();
+            threads.push(std::thread::spawn(move || {
+                for _ in 0..100 {
+                    let mut buf = vec_pool_clone.get();
+                    buf[..6].copy_from_slice(b"Maciek");
+                }
+            }));
+        }
+
+        for t in threads {
+            t.join().unwrap();
+        }
+
+        println!("Simple buffer pool took: {:?}", start.elapsed());
+
+        let freelist_pool = Arc::new(FreeListBufferPool::new(512, 4096));
+
+        let mut threads = vec![];
+
+        let start = Instant::now();
+
+        for _ in 0..10 {
+            let freelist_pool_clone = freelist_pool.clone();
+            threads.push(std::thread::spawn(move || {
+                for _ in 0..100 {
+                    let mut buf = freelist_pool_clone.get();
+                    buf[..6].copy_from_slice(b"Maciek");
+                }
+            }));
+        }
+
+        for t in threads {
+            t.join().unwrap();
+        }
+
+        println!("Free list buffer pool took: {:?}", start.elapsed());
+
+
+        Ok(())
+    }
 
     #[test]
     fn test_pool() -> anyhow::Result<()> {
@@ -568,52 +839,24 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_bitmap() -> anyhow::Result<()> {
-        // let mut bitmap = BitMap::new(512_000 + 512);
+    // #[test]
+    // fn test_bitmap() -> anyhow::Result<()> {
+    //     let mut bitmap = BitMap::new(4096 + 512);
 
-        // println!("{:?}", bitmap);
+    //     for _ in 0..10 {
+    //         bitmap.set_many(64);
+    //     }
 
-        // println!("level sum: {}, offset: {}", BitMap::level_nodes_count(1), (bitmap.calculate_block_offset(1, 1) - bitmap.size_in_bytes() - BitMap::level_nodes_count(0) * BitMap::BLOCK_SIZE_IN_BYTES) / BitMap::BLOCK_SIZE_IN_BYTES);
-        // println!("level sum: {}, offset: {}", BitMap::level_nodes_count(2), (bitmap.calculate_block_offset(2, 15) - bitmap.size_in_bytes() - BitMap::level_nodes_count(1) * BitMap::BLOCK_SIZE_IN_BYTES) / BitMap::BLOCK_SIZE_IN_BYTES);
-        // println!("level sum: {}, offset: {}", BitMap::level_nodes_count(3), (bitmap.calculate_block_offset(3, 1000) - bitmap.size_in_bytes() - BitMap::level_nodes_count(2) * BitMap::BLOCK_SIZE_IN_BYTES) / BitMap::BLOCK_SIZE_IN_BYTES);
+    //     bitmap.print_tree();
+    //     let flipped = bitmap.set_one();
+    //     bitmap.print_tree();
+    //     println!("flipped: {:?}", flipped);
 
-        // bitmap.reset_many(&[1024 - 64]);
-        // bitmap.print_leafs();
+    //     bitmap.reset_one(flipped.unwrap());
 
-        // println!("bitmap: {:?}", bitmap);
-        // bitmap.print_tree();
+    //     bitmap.print_leafs();
+    //     bitmap.print_tree();
 
-        let mut bitmap = BitMap::new(4096 + 512);
-
-        for _ in 0..10 {
-            bitmap.set_many(64);
-        }
-
-        bitmap.print_tree();
-        let flipped = bitmap.set_one();
-        bitmap.print_tree();
-        println!("flipped: {:?}", flipped);
-
-        bitmap.reset_one(flipped.unwrap());
-
-        bitmap.print_leafs();
-        bitmap.print_tree();
-
-        // println!("flipped: {:?}", bitmap.set_many(60));
-        // println!("flipped: {:?}", bitmap.set_one());
-
-        // println!("stack: {:?}", bitmap.reset_many(&[4000]));
-
-        // println!("flipped: {:?}", bitmap.flip_many(60));
-
-        // for _ in 0..10 {
-        //     println!("flipped: {:?}", bitmap.flip_many(64));
-        // }
-
-        // println!("flipped: {:?}", bitmap.flip_many(60));
-        // println!("flipped: {:?}", bitmap.flip_one());
-
-        Ok(())
-    }
+    //     Ok(())
+    // }
 }
