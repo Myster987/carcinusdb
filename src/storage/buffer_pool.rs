@@ -574,7 +574,13 @@ impl FreeListPool {
     }
 
     pub fn try_alloc_one(&mut self) -> Option<(usize, BufferData)> {
-        self.try_alloc_many(1).map(|mut vec| vec.pop().unwrap())
+        let current = self.head?;
+        let id = (current, self.get_block(current));
+
+        self.head = self.get_next(current);
+        self.len -= 1;
+
+        Some(id)
     }
 
     pub fn try_alloc_many(&mut self, to_alloc: usize) -> Option<Vec<(usize, BufferData)>> {
@@ -718,10 +724,7 @@ impl Drop for PoolInner {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::Arc,
-        time::{Instant},
-    };
+    use std::{sync::Arc, time::Instant};
 
     use parking_lot::Mutex;
 
@@ -824,7 +827,6 @@ mod tests {
         }
 
         println!("Free list buffer pool took: {:?}", start.elapsed());
-
 
         Ok(())
     }

@@ -4,6 +4,7 @@ pub mod buffer_pool;
 pub mod cache;
 pub mod page;
 pub mod pager;
+pub mod allocator;
 // pub mod schema;
 pub mod wal;
 
