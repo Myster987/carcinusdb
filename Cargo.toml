@@ -19,3 +19,6 @@ libc = "0.2.171"
 
 dashmap = "6.1.0"
 parking_lot = "0.12.3"
+
+[dev-dependencies]
+criterion = "0.5"
