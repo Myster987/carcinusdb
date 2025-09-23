@@ -8,29 +8,24 @@ use std::{
 use crate::storage::page::{MAX_PAGE_SIZE, MIN_PAGE_SIZE};
 
 pub type BufferData = NonNull<u8>;
-pub type HeapDropFn = Rc<dyn Fn(BufferData)>;
-pub type PoolDropFn = Rc<dyn Fn(usize)>;
+pub type DropFn = Rc<dyn Fn(BufferData)>;
 
 pub const BUFFER_ALIGNMENT: usize = align_of::<u8>();
 
 pub struct Buffer {
     size: usize,
     ptr: BufferData,
-    r#type: BufferType,
+    drop: Option<DropFn>,
 }
 
 impl Buffer {
-    pub fn alloc(size: usize, drop: Option<HeapDropFn>) -> Self {
+    pub fn alloc(size: usize, drop: Option<DropFn>) -> Self {
         let ptr = unsafe { alloc_heap(size, BUFFER_ALIGNMENT) };
-        Self {
-            size,
-            ptr,
-            r#type: BufferType::Heap { drop },
-        }
+        Self { size, ptr, drop }
     }
 
     /// Allocates buffer on heap
-    pub fn alloc_page(size: usize, drop: Option<HeapDropFn>) -> Self {
+    pub fn alloc_page(size: usize, drop: Option<DropFn>) -> Self {
         assert!(
             (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
             "\"Page\" of size {size} is not between [{}; {}] range",
@@ -40,20 +35,8 @@ impl Buffer {
         Self::alloc(size, drop)
     }
 
-    pub fn from_pool(id: usize, size: usize, ptr: NonNull<u8>, drop: PoolDropFn) -> Self {
-        Self {
-            size,
-            ptr,
-            r#type: BufferType::Pool { id, drop },
-        }
-    }
-
-    pub fn from_heap(size: usize, ptr: NonNull<u8>, drop: Option<HeapDropFn>) -> Self {
-        Self {
-            size,
-            ptr,
-            r#type: BufferType::Heap { drop },
-        }
+    pub fn from_ptr(size: usize, ptr: NonNull<u8>, drop: Option<DropFn>) -> Self {
+        Self { size, ptr, drop }
     }
 
     pub fn size(&self) -> usize {
@@ -125,27 +108,19 @@ impl Debug for Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        match &self.r#type {
-            BufferType::Heap { drop } => {
-                if let Some(f) = drop {
-                    f(self.ptr)
-                } else {
-                    unsafe { dealloc_heap(self.ptr, self.size, BUFFER_ALIGNMENT) };
-                }
+        if let Some(f) = &self.drop {
+            f(self.ptr)
+        } else {
+            unsafe {
+                dealloc_heap(self.ptr, self.size, BUFFER_ALIGNMENT);
             }
-            BufferType::Pool { id, drop } => drop(*id),
         }
     }
 }
 
-pub enum BufferType {
-    Heap { drop: Option<HeapDropFn> },
-    Pool { id: usize, drop: PoolDropFn },
-}
-
 pub unsafe fn alloc_heap(size: usize, align: usize) -> NonNull<u8> {
     let layout = Layout::from_size_align(size, align).unwrap();
-    unsafe { NonNull::new_unchecked(alloc_zeroed(layout)) }
+    unsafe { NonNull::new(alloc_zeroed(layout)).unwrap() }
 }
 
 pub unsafe fn dealloc_heap(ptr: NonNull<u8>, size: usize, align: usize) {
