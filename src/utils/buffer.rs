@@ -35,7 +35,7 @@ impl Buffer {
         Self::alloc(size, drop)
     }
 
-    pub fn from_ptr(size: usize, ptr: NonNull<u8>, drop: Option<DropFn>) -> Self {
+    pub fn from_ptr(ptr: NonNull<u8>, size: usize, drop: Option<DropFn>) -> Self {
         Self { size, ptr, drop }
     }
 

@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, fmt::Debug, ptr::NonNull};
+use std::{collections::HashMap, fmt::Debug, ptr::NonNull};
 
 use thiserror::Error;
 
@@ -50,11 +50,11 @@ pub struct LruPageCache {
     /// Total capacity of cache (in pages)
     capacity: usize,
     /// Hashmap of cache entries.
-    map: RefCell<HashMap<PageCacheKey, NonNull<PageCacheEntry>>>,
+    map: HashMap<PageCacheKey, NonNull<PageCacheEntry>>,
     /// Head of doubly linked list.
-    head: RefCell<Option<NonNull<PageCacheEntry>>>,
+    head: Option<NonNull<PageCacheEntry>>,
     /// Tail of doubly ll.
-    tail: RefCell<Option<NonNull<PageCacheEntry>>>,
+    tail: Option<NonNull<PageCacheEntry>>,
 }
 
 impl LruPageCache {
@@ -63,25 +63,24 @@ impl LruPageCache {
 
         Self {
             capacity,
-            map: RefCell::new(HashMap::with_capacity(capacity)),
-            head: RefCell::new(None),
-            tail: RefCell::new(None),
+            map: HashMap::with_capacity(capacity),
+            head: None,
+            tail: None,
         }
     }
 
     pub fn len(&self) -> usize {
-        self.map.borrow().len()
+        self.map.len()
     }
 
     /// Checks if page is in cache.
-    pub fn contains_key(&mut self, key: &PageCacheKey) -> bool {
-        self.map.borrow().contains_key(key)
+    pub fn contains_key(&self, key: &PageCacheKey) -> bool {
+        self.map.contains_key(key)
     }
 
     /// Returns pointer to entry and copies it (coping pointer is cheap). If entry doesn't exist, it returns None.
     fn get_ptr(&self, key: &PageCacheKey) -> Option<NonNull<PageCacheEntry>> {
-        let map = self.map.borrow();
-        map.get(key).copied()
+        self.map.get(key).copied()
     }
 
     pub fn peek(&mut self, key: &PageCacheKey, touch: bool) -> Option<MemPageRef> {
@@ -114,7 +113,7 @@ impl LruPageCache {
 
         self.touch(entry_ptr);
 
-        self.map.borrow_mut().insert(key, entry_ptr);
+        self.map.insert(key, entry_ptr);
 
         Ok(())
     }
@@ -128,11 +127,11 @@ impl LruPageCache {
             return Ok(());
         }
 
-        let entry = *self.map.borrow_mut().get(&key).unwrap();
+        let entry = *self.map.get(&key).unwrap();
         // Detach before deleting.
         self.detach(entry, clean_page)?;
 
-        let ptr = self.map.borrow_mut().remove(&key).unwrap();
+        let ptr = self.map.remove(&key).unwrap();
         unsafe {
             // Creates Box that owns entry and is dropped
             let _ = Box::from_raw(ptr.as_ptr());
@@ -142,11 +141,7 @@ impl LruPageCache {
     }
 
     /// Removes entry from linked list and eventiualy cleans up page from memory (returns `Buffer` to `BufferPool`).
-    fn detach(
-        &mut self,
-        mut entry: NonNull<PageCacheEntry>,
-        clean_page: bool,
-    ) -> CacheResult<()> {
+    fn detach(&mut self, mut entry: NonNull<PageCacheEntry>, clean_page: bool) -> CacheResult<()> {
         let entry_mut = unsafe { entry.as_mut() };
 
         if entry_mut.page.is_locked() {
@@ -184,16 +179,16 @@ impl LruPageCache {
 
         match (prev, next) {
             (None, None) => {
-                self.head.replace(None);
-                self.tail.replace(None);
+                self.head = None;
+                self.tail = None;
             }
             (None, Some(mut n)) => {
                 unsafe { n.as_mut().prev = None };
-                self.head.borrow_mut().replace(n);
+                self.head.replace(n);
             }
             (Some(mut p), None) => {
                 unsafe { p.as_mut().next = None };
-                self.tail.borrow_mut().replace(p);
+                self.tail.replace(p);
             }
             (Some(mut p), Some(mut n)) => unsafe {
                 p.as_mut().next = Some(n);
@@ -204,17 +199,17 @@ impl LruPageCache {
 
     /// Inserts entry before head. To work correctly use `Self::detach` before.
     fn touch(&mut self, mut entry: NonNull<PageCacheEntry>) {
-        if let Some(mut head) = *self.head.borrow_mut() {
+        if let Some(mut head) = self.head {
             unsafe {
                 entry.as_mut().next.replace(head);
                 head.as_mut().prev = Some(entry);
             }
         }
 
-        if self.tail.borrow().is_none() {
-            self.tail.borrow_mut().replace(entry);
+        if self.tail.is_none() {
+            self.tail.replace(entry);
         }
-        self.head.replace(Some(entry));
+        self.head.replace(entry);
     }
 
     fn make_room_for(&mut self, entries_num: usize) -> CacheResult<()> {
@@ -230,7 +225,7 @@ impl LruPageCache {
         }
 
         // Now we need to handle case when there are too many entires, so we need to delete oldest ones (closest to the tail)
-        let tail = self.tail.borrow().ok_or(CacheError::Internal(format!(
+        let tail = self.tail.ok_or(CacheError::Internal(format!(
             "Page cache of length {} exprected to have a tail",
             self.len()
         )))?;
@@ -256,13 +251,13 @@ impl LruPageCache {
 
     /// Deletes all entries. Sets head and tail to `None`.
     pub fn clear(&mut self) -> CacheResult<()> {
-        let mut current = *self.head.borrow();
+        let mut current = self.head;
 
         while let Some(mut c) = current {
             let entry = unsafe { c.as_mut() };
             let next = entry.next;
 
-            self.map.borrow_mut().remove(&entry.key);
+            self.map.remove(&entry.key);
 
             self.detach(c, true)?;
 
@@ -278,9 +273,9 @@ impl LruPageCache {
         let _ = self.head.take();
         let _ = self.tail.take();
 
-        assert!(self.head.borrow().is_none());
-        assert!(self.tail.borrow().is_none());
-        assert!(self.map.borrow().is_empty());
+        assert!(self.head.is_none());
+        assert!(self.tail.is_none());
+        assert!(self.map.is_empty());
 
         Ok(())
     }
@@ -289,7 +284,7 @@ impl LruPageCache {
 impl Debug for LruPageCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut debug_vec = vec![];
-        let mut current = *self.head.borrow();
+        let mut current = self.head;
 
         while let Some(c) = current {
             let entry = unsafe { c.as_ref() };
