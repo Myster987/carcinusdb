@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use parking_lot::Mutex;
 
 use crate::storage::StorageResult;
-use crate::storage::buffer_pool::BufferPool;
+use crate::storage::buffer_pool::{GlobalBufferPool, LocalBufferPool};
 use crate::storage::cache::LruPageCache;
 use crate::storage::page::{DEFAULT_PAGE_SIZE, PageType};
 use crate::utils::buffer::{Buffer, BufferData};
@@ -138,7 +138,9 @@ impl MemPage {
 pub struct Pager {
     /// I/O interface
     io: BlockIO<File>,
-    buffer_pool: Arc<BufferPool>,
+    /// Each pager gets it's dedicated local pool
+    buffer_pool: LocalBufferPool,
+    /// Reference to global LRU cache
     page_cache: Arc<Mutex<LruPageCache>>,
     page_size: u16,
     reserved_space: u8,
@@ -147,7 +149,8 @@ pub struct Pager {
 impl Pager {
     pub fn begin_open(
         io: BlockIO<File>,
-        buffer_pool: Arc<BufferPool>,
+        buffer_pool: LocalBufferPool,
+        page_cache: Arc<Mutex<LruPageCache>>,
         page_size: u16,
         reserved_space: u8,
     ) -> StorageResult<Self> {
@@ -163,7 +166,7 @@ impl Pager {
         Ok(Self {
             io,
             buffer_pool,
-            page_cache: Arc::new(Mutex::new(LruPageCache::new(2000))),
+            page_cache,
             page_size,
             reserved_space,
         })

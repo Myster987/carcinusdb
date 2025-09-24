@@ -1,12 +1,14 @@
-use std::sync::Arc;
+use std::{cell::RefCell, ptr::NonNull, rc::Rc, sync::Arc};
 
 use crate::{
     storage::allocator::{GlobalPageAllocator, LocalPageAllocator},
     utils::buffer::Buffer,
 };
 
-/// Global buffer pool that manages local pools and works as a fallback in case
-/// when local pool runs out of memory. All the config is stored in allocator field
+/// Global buffer pool that manages local pools and acts as a fallback in case
+/// when local pool runs out of memory. All the config is stored in allocator field.
+/// This struct shouldn't be used to allocate memory, because it only works as a manager.
+#[derive(Debug)]
 pub struct GlobalBufferPool {
     allocator: Arc<GlobalPageAllocator>,
 }
@@ -40,9 +42,9 @@ impl GlobalBufferPool {
         }
     }
 
-    pub fn default(page_size: usize) -> Self {
+    pub fn default(page_size: usize, init_size: usize) -> Self {
         Self {
-            allocator: Arc::new(GlobalPageAllocator::default(page_size)),
+            allocator: Arc::new(GlobalPageAllocator::default(page_size, init_size)),
         }
     }
 
@@ -54,31 +56,68 @@ impl GlobalBufferPool {
     pub fn len(&self) -> usize {
         self.allocator.len()
     }
-
-    /// Returns free buffer in pool or allocates new one on heap. By default pool buffer drop function will return them back to pool.
-    pub fn get(self: &std::sync::Arc<Self>) -> Buffer {
-        // self.allocator.
-        todo!()
-    }
-
-    /// Adds new free buffer to pool.
-    pub fn put(&self, buffer_id: usize) {
-        // self.pool.lock().dealloc_one(buffer_id);
-        todo!()
-    }
 }
 
+#[derive(Debug)]
 pub struct LocalBufferPool {
-    allocator: LocalPageAllocator,
+    allocator: Rc<RefCell<LocalPageAllocator>>,
 }
 
 impl LocalBufferPool {
     pub fn new(global_allocator: Arc<GlobalPageAllocator>, init_size: usize) -> Self {
         Self {
-            allocator: LocalPageAllocator::new(global_allocator, init_size),
+            allocator: Rc::new(RefCell::new(LocalPageAllocator::new(
+                global_allocator,
+                init_size,
+            ))),
         }
+    }
+
+    pub fn len(&self) -> usize {
+        self.allocator.borrow().len()
+    }
+
+    /// Returns free buffer or allocates new one on heap. By default pool buffer drop function will return them back to pool.
+    pub fn get(&self) -> Buffer {
+        let (mem, page_size) = {
+            let mut allocator = self.allocator.borrow_mut();
+
+            (allocator.alloc(), allocator.global_allocator.page_size)
+        };
+        let pool = self.allocator.clone();
+
+        let drop_fn = Rc::new(move |ptr| {
+            pool.borrow_mut().dealloc(ptr);
+        });
+
+        Buffer::from_ptr(mem, page_size, Some(drop_fn))
+    }
+
+    fn put(&mut self, mem: NonNull<u8>) {
+        self.allocator.borrow_mut().dealloc(mem);
     }
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_main() -> anyhow::Result<()> {
+        let global_pool = GlobalBufferPool::default(128, 0);
+
+        let local_pool = global_pool.local_pool(1);
+        let buffer = local_pool.get();
+
+        println!("buffer: {:?}", buffer);
+
+        println!("len: {}", local_pool.len());
+
+        println!("global len: {}", global_pool.len());
+        drop(buffer);
+        drop(local_pool);
+        println!("global len: {}", global_pool.len());
+
+        Ok(())
+    }
+}

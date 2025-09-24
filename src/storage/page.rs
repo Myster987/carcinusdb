@@ -1,14 +1,9 @@
-use std::{
-    cell::RefCell,
-    collections::{BinaryHeap, HashMap},
-    io::Cursor,
-    sync::Arc,
-};
+use std::{cell::RefCell, collections::HashMap, io::Cursor, sync::Arc};
 
 use crate::{
     storage::{Error, PageNumber, SlotNumber, StorageResult},
     utils::{
-        buffer::{Buffer, HeapDropFn},
+        buffer::{Buffer, DropFn},
         bytes,
     },
 };
@@ -169,7 +164,7 @@ impl Page {
         }
     }
 
-    pub fn alloc(offset: usize, size: usize, drop: Option<HeapDropFn>) -> Self {
+    pub fn alloc(offset: usize, size: usize, drop: Option<DropFn>) -> Self {
         let buf = Buffer::alloc_page(size, drop);
         Self::new(offset, Arc::new(RefCell::new(buf)))
     }
