@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use crate::{
     storage::{
         FrameNumber, PageNumber, StorageResult,
-        buffer_pool::{self, BufferPool},
+        buffer_pool::{self},
         page::Page,
         pager::{self, MemPageRef, Pager},
     },
