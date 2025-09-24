@@ -2,10 +2,9 @@ use std::{
     fmt::Debug,
     ptr::NonNull,
     sync::Arc,
-    time::{Duration, Instant},
 };
 
-use parking_lot::Mutex;
+use crossbeam::queue::SegQueue;
 
 use crate::utils::buffer::{BUFFER_ALIGNMENT, alloc_heap, dealloc_heap};
 
@@ -61,8 +60,8 @@ const DEFAULT_LOCAL_MIN_PAGES: usize = 8;
 const DEFAULT_LOCAL_MAX_PAGES: usize = 64;
 
 pub struct GlobalPageAllocator {
-    freelist: Mutex<LocalStack<NonNull<u8>>>,
-    page_size: usize,
+    freelist: SegQueue<NonNull<u8>>,
+    pub page_size: usize,
 
     /// Size of global batch allocation
     global_batch_size: usize,
@@ -83,7 +82,7 @@ impl GlobalPageAllocator {
         local_min_pages: usize,
         local_max_pages: usize,
     ) -> Self {
-        let mut freelist = LocalStack::new();
+        let freelist = SegQueue::new();
 
         for _ in 0..page_count {
             let heap_ptr = unsafe { alloc_heap(page_size, BUFFER_ALIGNMENT) };
@@ -91,7 +90,7 @@ impl GlobalPageAllocator {
         }
 
         Self {
-            freelist: Mutex::new(freelist),
+            freelist,
             page_size,
             global_batch_size,
             local_batch_size,
@@ -100,10 +99,10 @@ impl GlobalPageAllocator {
         }
     }
 
-    pub fn default(page_size: usize) -> Self {
+    pub fn default(page_size: usize, page_count: usize) -> Self {
         Self::new(
             page_size,
-            0,
+            page_count,
             DEFAULT_GLOBAL_BATCH_SIZE,
             DEFAULT_LOCAL_BATCH_SIZE,
             DEFAULT_LOCAL_MIN_PAGES,
@@ -120,19 +119,18 @@ impl GlobalPageAllocator {
     }
 
     pub fn len(&self) -> usize {
-        self.freelist.lock().len()
+        self.freelist.len()
     }
 
     pub fn try_alloc(&self) -> Option<NonNull<u8>> {
-        self.freelist.lock().pop()
+        self.freelist.pop()
     }
 
     pub fn alloc_batch(&self, to_alloc: usize) -> Vec<NonNull<u8>> {
         let mut mem_vec = Vec::with_capacity(to_alloc);
-        let mut freelist = self.freelist.lock();
 
         while mem_vec.len() < to_alloc {
-            if let Some(mem) = freelist.pop() {
+            if let Some(mem) = self.freelist.pop() {
                 mem_vec.push(mem);
             } else {
                 break;
@@ -144,7 +142,8 @@ impl GlobalPageAllocator {
                 mem_vec.push(unsafe { alloc_heap(self.page_size, BUFFER_ALIGNMENT) });
             }
             for _ in 0..self.global_batch_size {
-                freelist.push(unsafe { alloc_heap(self.page_size, BUFFER_ALIGNMENT) });
+                self.freelist
+                    .push(unsafe { alloc_heap(self.page_size, BUFFER_ALIGNMENT) });
             }
         }
 
@@ -153,10 +152,9 @@ impl GlobalPageAllocator {
 
     /// Return what is possible to freelist and deallocate rest.
     pub fn dealloc_batch(&self, mut mem: Vec<NonNull<u8>>) {
-        let mut freelist = self.freelist.lock();
-        while freelist.len() < self.max_size() {
+        while self.len() < self.max_size() {
             if let Some(m) = mem.pop() {
-                freelist.push(m);
+                self.freelist.push(m);
             } else {
                 return;
             }
@@ -169,19 +167,17 @@ impl GlobalPageAllocator {
     }
 
     pub fn dealloc(&self, mem: NonNull<u8>) {
-        let mut freelist = self.freelist.lock();
-        if freelist.len + 1 > self.max_size() {
+        if self.len() + 1 > self.max_size() {
             unsafe { dealloc_heap(mem, self.page_size, BUFFER_ALIGNMENT) };
         } else {
-            freelist.push(mem);
+            self.freelist.push(mem);
         }
     }
 }
 
 impl Drop for GlobalPageAllocator {
     fn drop(&mut self) {
-        let mut freelist = self.freelist.lock();
-        while let Some(mem) = freelist.pop() {
+        while let Some(mem) = self.freelist.pop() {
             unsafe { dealloc_heap(mem, self.page_size, BUFFER_ALIGNMENT) };
         }
     }
@@ -189,18 +185,14 @@ impl Drop for GlobalPageAllocator {
 
 impl Debug for GlobalPageAllocator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&format!(
-            "{} {{ len: {} }}",
-            std::any::type_name::<Self>(),
-            self.freelist.lock().len()
-        ))
+        f.write_str(&format!("GlobalPageAllocator {{ len: {} }}", self.len()))
     }
 }
 
 /// Local page allocator for fixed size memory pages. This struct shouldn't be shared accross threads.
 pub struct LocalPageAllocator {
     /// Atomic reference to global allocator that will be used as fallback if local freelist is empty.
-    global_allocator: Arc<GlobalPageAllocator>,
+    pub(super) global_allocator: Arc<GlobalPageAllocator>,
     freelist: LocalStack<NonNull<u8>>,
 }
 
@@ -221,6 +213,10 @@ impl LocalPageAllocator {
 
     pub fn default(global_allocator: Arc<GlobalPageAllocator>) -> Self {
         Self::new(global_allocator, 0)
+    }
+
+    pub fn len(&self) -> usize {
+        self.freelist.len()
     }
 
     pub fn alloc(&mut self) -> NonNull<u8> {
@@ -269,8 +265,7 @@ impl Drop for LocalPageAllocator {
 impl Debug for LocalPageAllocator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&format!(
-            "{} {{ len: {} }}",
-            std::any::type_name::<Self>(),
+            "LocalPageAllocator {{ len: {} }}",
             self.freelist.len()
         ))
     }
@@ -283,20 +278,20 @@ mod tests {
 
     #[test]
     fn test_main() {
-        // let global_allocator = Arc::new(GlobalPageAllocator::new(128, 0));
+        let global_allocator = Arc::new(GlobalPageAllocator::default(128, 0));
 
-        // println!("{:?}", global_allocator);
+        println!("{:?}", global_allocator);
 
-        // let mut local_allocator = LocalPageAllocator::new(global_allocator.clone(), 0);
+        let mut local_allocator = LocalPageAllocator::new(global_allocator.clone(), 0);
 
-        // println!("{:?}", local_allocator);
+        println!("{:?}", local_allocator);
 
-        // local_allocator.alloc();
+        local_allocator.alloc();
 
-        // println!("{:?}", local_allocator);
+        println!("{:?}", local_allocator);
 
-        // drop(local_allocator);
+        drop(local_allocator);
 
-        // println!("{:?}", global_allocator);
+        println!("{:?}", global_allocator);
     }
 }
