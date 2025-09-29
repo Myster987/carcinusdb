@@ -140,6 +140,11 @@ pub fn flip_n_bits(value: &mut u64, mut n: usize, positions: &mut Vec<usize>, of
     }
 }
 
+/// Reverse byte order in u32.
+pub fn byte_swap_u32(value: u32) -> u32 {
+    value.swap_bytes()
+}
+
 #[cfg(test)]
 mod tests {
 
