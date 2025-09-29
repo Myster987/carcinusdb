@@ -58,7 +58,7 @@ impl GlobalBufferPool {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LocalBufferPool {
     allocator: Rc<RefCell<LocalPageAllocator>>,
 }
