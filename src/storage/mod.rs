@@ -1,12 +1,12 @@
 use thiserror::Error;
 
+pub mod allocator;
 pub mod buffer_pool;
 pub mod cache;
 pub mod page;
 pub mod pager;
-pub mod allocator;
 // pub mod schema;
-// pub mod wal;
+pub mod wal;
 
 pub type Oid = u32;
 
@@ -16,8 +16,8 @@ pub type PageNumber = u32;
 pub type SlotNumber = u16;
 /// Used for transactions.
 pub type TransactionId = u32;
-/// Used for WAL frames. Represents offset to frame in bytes and also id.
-pub type FrameNumber = u64;
+/// Used for WAL frames.
+pub type FrameNumber = u32;
 
 pub const PAGE_NUMBER_SIZE: usize = std::mem::size_of::<PageNumber>();
 pub const SLOT_SIZE: usize = std::mem::size_of::<SlotNumber>();
@@ -31,6 +31,10 @@ pub enum Error {
     PageNotFound(PageNumber),
     #[error("invalid page type")]
     InvalidPageType,
+
+    // wal
+    #[error("invalid checksum. data is corrupted")]
+    InvalidChecksum,
 
     // cache
     #[error(transparent)]
