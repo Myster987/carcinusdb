@@ -1,14 +1,14 @@
 use std::{
     cell::UnsafeCell,
     fs::{self, File},
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, Write},
     os::fd::AsRawFd,
     path::Path,
 };
 
 use libc::{c_void, pread, pwrite};
 
-use crate::{os::DISK_BLOCK_SIZE, storage::PageNumber};
+use crate::storage::PageNumber;
 
 pub trait FileOps {
     /// Creates file in filesystem at the given path.
@@ -137,14 +137,14 @@ impl<I: IO> BlockIO<I> {
         self.get_io().pread(offset, buffer)
     }
 
-    /// Reads page with given number. Includes header offset.
+    /// Reads page with given number. Includes header offset. This operation is atomic.
     pub fn read(&self, page_number: PageNumber, buffer: &mut [u8]) -> io::Result<usize> {
         let page_number = page_number as usize;
         let offset = self.header_size + page_number * self.page_size;
         self.raw_read(offset, buffer)
     }
 
-    /// Reads header from beginning of a file. Note that buffer size must match header size.
+    /// Reads header from beginning of a file. Note that buffer size must match header size. This operation is atomic.
     pub fn read_header(&self, buffer: &mut [u8]) -> io::Result<usize> {
         self.raw_read(0, buffer)
     }
@@ -155,13 +155,13 @@ impl<I: IO> BlockIO<I> {
         self.get_io().pwrite(offset, buffer)
     }
 
-    /// Writes page at given number. Includes header offset.
+    /// Writes page at given number. Includes header offset. This operation is atomic.
     pub fn write(&self, page_number: PageNumber, buffer: &[u8]) -> io::Result<usize> {
         let offset = self.header_size + page_number as usize * self.page_size;
         self.raw_write(offset, buffer)
     }
 
-    /// Writes header at the beginning of a file. Note that buffer size must match header size.
+    /// Writes header at the beginning of a file. Note that buffer size must match header size. This operation is atomic.
     pub fn write_header(&self, buffer: &[u8]) -> io::Result<usize> {
         self.raw_write(0, buffer)
     }
@@ -181,5 +181,12 @@ impl<I: FileOps> BlockIO<I> {
     /// See [`Sync`] for details.
     pub fn sync(&self) -> io::Result<()> {
         self.get_io().sync()
+    }
+}
+
+impl BlockIO<File> {
+    pub fn size(&self) -> io::Result<usize> {
+        let meta = self.get_io().metadata()?;
+        Ok(meta.len() as usize)
     }
 }

@@ -62,6 +62,7 @@ impl MemPage {
         unsafe { &mut *self.inner.get() }
     }
 
+    /// Returns mutable reference to `Page` inside, but panics if it is None.
     pub fn get_content(&self) -> &mut Page {
         self.get().content.as_mut().unwrap()
     }
@@ -238,3 +239,18 @@ pub fn complete_read_page(
 
     Ok(page)
 }
+
+// pub fn complete_write_page(
+//     write_result: std::io::Result<usize>,
+//     page: MemPageRef,
+//     buf: Buffer
+// ) -> StorageResult<MemPageRef> {
+//     if let Err(error) = write_result {
+//         page.set_error();;
+//         page.clear_locked();
+//         return Err(error.into());
+//     }
+
+//     let content = Page::new(0, Arc::new(RefCell::new(buf)));
+//
+// }
