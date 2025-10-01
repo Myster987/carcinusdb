@@ -185,8 +185,14 @@ impl<I: FileOps> BlockIO<I> {
 }
 
 impl BlockIO<File> {
+    /// Returns size of file inside wrapper in **bytes**.
     pub fn size(&self) -> io::Result<usize> {
         let meta = self.get_io().metadata()?;
         Ok(meta.len() as usize)
+    }
+
+    /// Returns size of file inside wrapper in **pages**.
+    pub fn size_in_pages(&self) -> io::Result<usize> {
+        Ok((self.size()? - self.header_size) / self.page_size)
     }
 }
