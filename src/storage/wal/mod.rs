@@ -2,17 +2,32 @@ use std::{
     collections::VecDeque,
     fs::File,
     path::PathBuf,
-    sync::{Arc, atomic::AtomicU32},
+    sync::{
+        Arc,
+        atomic::{AtomicU32, AtomicU64, Ordering},
+    },
 };
 
 use dashmap::DashMap;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 
 use crate::{
     os::{Open, OpenOptions},
-    storage::{FrameNumber, PageNumber, StorageResult, page::MAX_PAGE_SIZE},
-    utils::{self, bytes::byte_swap_u32, io::BlockIO},
+    storage::{
+        Error, FrameNumber, PageNumber, StorageResult,
+        buffer_pool::LocalBufferPool,
+        page::MAX_PAGE_SIZE,
+        pager::{self, MemPageRef},
+        wal::locks::{PackedU64, ReadGuard, ReadersPool},
+    },
+    utils::{
+        self,
+        bytes::{byte_swap_u32, pack_u64},
+        io::BlockIO,
+    },
 };
+
+mod locks;
 
 const WAL_HEADER_SIZE: usize = size_of::<WalHeader>();
 const WAL_HEADER_SIZE_NO_CHECKSUM: usize = WAL_HEADER_SIZE - size_of::<[u32; 2]>();
@@ -23,9 +38,11 @@ const READERS_NUM: usize = 5;
 #[derive(Debug)]
 pub struct WalHeader {
     /// Size of invidual page in wal (not frame)
-    page_size: u16,
+    page_size: u32,
     /// Incremented with each checkpoint
     checkpoint_seq_num: u32,
+    /// Frame number of last checkpointed entry (if WAL is empty, then it is set to 0)
+    last_checkpointed: u32,
     /// Database size in pages (updated after each checkpoint)
     db_size: u32,
     /// Checksum of header
@@ -35,13 +52,14 @@ pub struct WalHeader {
 impl WalHeader {
     /// Recalculates checksum of all fields except `checksum`.
     pub fn update_checksum(&mut self) {
-        self.checksum = self.checksum();
+        self.checksum = self.checksum_self(None);
     }
 
-    pub fn default(page_size: u16, db_size: u32) -> Self {
+    pub fn default(page_size: u32, db_size: u32) -> Self {
         let mut wal_hedaer = Self {
             page_size,
             checkpoint_seq_num: 0,
+            last_checkpointed: 0,
             db_size,
             checksum: [0; 2],
         };
@@ -50,27 +68,27 @@ impl WalHeader {
     }
 
     pub fn from_bytes(buffer: &[u8]) -> Self {
-        let page_size = u16::from_le_bytes(buffer[0..2].try_into().unwrap());
-        let checkpoint_seq_num = u32::from_le_bytes(buffer[2..6].try_into().unwrap());
-        let db_size = u32::from_le_bytes(buffer[6..10].try_into().unwrap());
+        let page_size = u32::from_le_bytes(buffer[0..4].try_into().unwrap());
+        let checkpoint_seq_num = u32::from_le_bytes(buffer[4..8].try_into().unwrap());
+        let last_checkpointed = u32::from_le_bytes(buffer[8..12].try_into().unwrap());
+        let db_size = u32::from_le_bytes(buffer[12..16].try_into().unwrap());
         let checksum = [
-            u32::from_le_bytes(buffer[10..14].try_into().unwrap()),
-            u32::from_le_bytes(buffer[14..18].try_into().unwrap()),
+            u32::from_le_bytes(buffer[16..20].try_into().unwrap()),
+            u32::from_le_bytes(buffer[20..24].try_into().unwrap()),
         ];
 
         Self {
             page_size,
             checkpoint_seq_num,
+            last_checkpointed,
             db_size,
             checksum,
         }
     }
-}
 
-impl Checksum for WalHeader {
-    fn checksum(&self) -> [u32; 2] {
+    fn checksum_self(&self, seed: Option<[u32; 2]>) -> [u32; 2] {
         let header_bytes = &utils::cast::bytes_of(self)[..WAL_HEADER_SIZE_NO_CHECKSUM];
-        checksum_bytes(header_bytes, None)
+        checksum_bytes(header_bytes, seed)
     }
 }
 
@@ -82,31 +100,24 @@ pub struct FrameHeader {
     /// Size of database in pages. Only for commit records.
     /// For all other records is 0.
     db_size: u32,
-    /// Checksum of header (copied from `WalHeader`)
-    checksum_header: u32,
-    /// Checksum of page
-    checksum_page: u32,
+    /// Checksum of page (calculated by using previouse frames)
+    checksum: [u32; 2],
 }
 
 impl FrameHeader {
     pub fn from_bytes(buffer: &[u8]) -> Self {
         let page_number = u32::from_le_bytes(buffer[0..4].try_into().unwrap());
         let db_size = u32::from_le_bytes(buffer[4..8].try_into().unwrap());
-        let checksum_header = u32::from_le_bytes(buffer[8..12].try_into().unwrap());
-        let checksum_page = u32::from_le_bytes(buffer[12..16].try_into().unwrap());
+        let checksum = [
+            u32::from_le_bytes(buffer[8..12].try_into().unwrap()),
+            u32::from_le_bytes(buffer[12..16].try_into().unwrap()),
+        ];
 
         Self {
             page_number,
             db_size,
-            checksum_header,
-            checksum_page,
+            checksum,
         }
-    }
-}
-
-impl Checksum for FrameHeader {
-    fn checksum(&self) -> [u32; 2] {
-        
     }
 }
 
@@ -118,14 +129,14 @@ impl WalManager {
     pub fn new(
         wal_file_path: PathBuf,
         db_file: Arc<BlockIO<File>>,
-        page_size: u16,
+        page_size: u32,
     ) -> StorageResult<Self> {
         // If WAL doesn't exist, then it creates header with default parameters
         let mut header = (!wal_file_path.exists()).then(|| {
             WalHeader::default(
                 page_size,
                 db_file
-                    .size_in_pages()
+                    .size_in_blocks()
                     .expect("Database file size must be known") as u32,
             )
         });
@@ -140,7 +151,14 @@ impl WalManager {
         if header.is_none() {
             let buf = &mut [0; WAL_HEADER_SIZE];
             wal_file.read_header(buf)?;
-            header = Some(WalHeader::from_bytes(buf));
+            let h = WalHeader::from_bytes(buf);
+
+            // validate header checksum
+            if h.checksum != h.checksum_self(None) {
+                return Err(Error::InvalidChecksum);
+            }
+
+            header = Some(h);
         }
 
         let global_wal = GlobalWal::new(wal_file, db_file, header.unwrap())?;
@@ -159,15 +177,18 @@ pub struct GlobalWal {
     wal_file: Arc<BlockIO<File>>,
     db_file: Arc<BlockIO<File>>,
 
+    frame_size: usize,
     /// WAL header loaded to memory.
     header: Arc<Mutex<WalHeader>>,
     /// WAL index that sppeds up searching for frame.
     index: Arc<WalIndex>,
-    /// Last commited entry in WAL (if WAL size is 0, then it is set to u32::MAX)
-    max_frame: AtomicU32,
+    /// Stores two u32 inside one variable. First one is last checkpointed entry in WAL and second is last commited frame in transaction.
+    min_max_frame: AtomicU64,
 
     /// Array of read locks. Each locks is atomic u32 which represents minimal frame number this transaction can see.
-    readers: [AtomicU32; READERS_NUM],
+    readers: ReadersPool,
+
+    writer: Mutex<()>,
 }
 
 impl GlobalWal {
@@ -176,28 +197,120 @@ impl GlobalWal {
         db_file: Arc<BlockIO<File>>,
         header: WalHeader,
     ) -> StorageResult<Self> {
+        let frame_size = header.page_size as usize + FRAME_HEADER_SIZE;
+        let index = Arc::new(WalIndex::new());
+
+        let min_frame = header.last_checkpointed;
         let mut max_frame = 0;
-        let mut checkpoint_size = 0;
+        let mut transaction_frames = vec![];
+
+        let mut running_checksum = header.checksum_self(None);
+        let mut buffer = vec![0; frame_size];
+
+        for frame_number in 0..u32::MAX {
+            let (valid, is_commit, page_number) =
+                validate_frame(&wal_file, frame_number, &mut running_checksum, &mut buffer)?;
+            if !valid {
+                break;
+            }
+
+            transaction_frames.push((page_number, frame_number));
+
+            if is_commit {
+                for (pn, f) in transaction_frames.drain(..) {
+                    index.insert_latest(pn, f);
+                }
+                max_frame = frame_number;
+            }
+        }
 
         Ok(Self {
             wal_file,
             db_file,
+            frame_size,
             header: Arc::new(Mutex::new(header)),
-            index: Arc::new(WalIndex::new()),
-            max_frame: AtomicU32::new(max_frame),
+            index,
+            min_max_frame: AtomicU64::new(pack_u64(min_frame, max_frame)),
             // by default it is set to u32::MAX to indicate that it is free and it is quite not possible for WAL to outgrow 17 TB of 4KB pages.
-            readers: std::array::from_fn(|_| AtomicU32::new(u32::MAX)),
+            readers: ReadersPool::new(READERS_NUM),
+            writer: Mutex::new(()),
         })
     }
 }
 
 pub struct LocalWal {
     global_wal: Arc<GlobalWal>,
+    min_frame: u32,
+    max_frame: u32,
+    temp_buffer: Vec<u8>,
 }
 
 impl LocalWal {
     pub fn new(global_wal: Arc<GlobalWal>) -> Self {
-        Self { global_wal }
+        let frame_size = global_wal.frame_size;
+        Self {
+            global_wal,
+            min_frame: 0,
+            max_frame: 0,
+            temp_buffer: vec![0; frame_size],
+        }
+    }
+
+    pub fn begin_read_tx(&mut self) -> StorageResult<ReadGuard> {
+        let guard = self.global_wal.readers.get_permit();
+
+        // takes snapshot of both min and max frame that this transaction will be able to see in WAL
+        let (min_frame, max_frame) = self.global_wal.min_max_frame.load_packed(Ordering::Acquire);
+        self.min_frame = min_frame;
+        self.max_frame = max_frame;
+
+        Ok(guard)
+    }
+
+    pub fn begin_write_tx(&mut self) -> StorageResult<MutexGuard<()>> {
+        Ok(self.global_wal.writer.lock())
+    }
+
+    pub fn end_read_tx(&mut self, guard: ReadGuard) {
+        self.min_frame = 0;
+        self.max_frame = 0;
+
+        drop(guard);
+    }
+
+    pub fn end_write_tx(&mut self, guard: MutexGuard<()>) {
+        drop(guard);
+    }
+
+    /// Reads only page from WAL (skips header).
+    fn read_raw(&mut self, frame_number: FrameNumber, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let offset = WAL_HEADER_SIZE
+            + (self.global_wal.frame_size * frame_number as usize)
+            + FRAME_HEADER_SIZE;
+        self.global_wal.wal_file.raw_read(offset, buffer)
+    }
+
+    /// Reads given `page_number` from WAL. This operation doesn't interrupt
+    /// other readers, because each reader is bounded to it's min and max frame.
+    pub fn read_frame(
+        &mut self,
+        page_number: PageNumber,
+        page: MemPageRef,
+        buffer_pool: LocalBufferPool,
+    ) -> StorageResult<MemPageRef> {
+        let page = pager::begin_read_page(page)?;
+
+        let mut buffer = buffer_pool.get();
+
+        let visible_frame_number = self
+            .global_wal
+            .index
+            .get(&page_number, self.max_frame)
+            .ok_or(Error::PageNotFoundInWal(page_number))?;
+
+        let read_result = self.read_raw(visible_frame_number, &mut buffer[..]);
+
+        pager::complete_read_page(read_result, page, buffer)
     }
 }
 
@@ -211,6 +324,18 @@ impl WalIndex {
         Self {
             map: DashMap::new(),
         }
+    }
+
+    /// Inserts `page_number` with `frame_number` and if they are
+    /// already existing frame numbers it removes all of them.
+    ///
+    /// # Note
+    ///
+    /// This function should only be used when initializing WAL index.
+    fn insert_latest(&self, page_number: PageNumber, frame_number: FrameNumber) {
+        let mut entry = self.map.entry(page_number).or_default();
+        entry.clear();
+        entry.push_back(frame_number);
     }
 
     /// Inserts new frame of given `page_number`.
@@ -237,25 +362,48 @@ impl WalIndex {
 
         vec
     }
+
+    pub fn get(&self, page_number: &PageNumber, max_frame: FrameNumber) -> Option<FrameNumber> {
+        self.map
+            .get(page_number)
+            .and_then(|vec| vec.iter().rev().find(|&&frame| frame < max_frame).copied())
+    }
 }
 
-trait Checksum {
-    /// Computes checksum of self.
-    fn checksum(&self) -> [u32; 2];
+/// Validates if given frame is valid and WAL is not corrupted.
+/// Returns two boolean variables and page number. First bool is true if frame checksum is valid
+/// and second bool is true if this frame was commit frame.
+///
+/// # Note
+///
+/// Use this function only when scanning WAL from beginning. \
+/// Otherwise checksum will not be calculated correctly
+fn validate_frame(
+    wal_file: &Arc<BlockIO<File>>,
+    frame_number: FrameNumber,
+    running_checksum: &mut [u32; 2],
+    buffer: &mut [u8],
+) -> StorageResult<(bool, bool, PageNumber)> {
+    if wal_file.read(frame_number, buffer).is_err() {
+        return Ok((false, false, 0));
+    }
+
+    let frame_header = FrameHeader::from_bytes(buffer);
+
+    // calculates checksum of given frame's page content with previous frame checksum as seed.
+    *running_checksum = checksum_bytes(&buffer[FRAME_HEADER_SIZE..], Some(*running_checksum));
+
+    let valid = frame_header.checksum == *running_checksum;
+    let is_commit = frame_header.db_size != 0;
+
+    Ok((valid, is_commit, frame_header.page_number))
 }
 
-fn validate_frame(wal_file: Arc<BlockIO<File>>, frame_number: FrameNumber) -> StorageResult<bool> {
-    let frame_header_buffer = &mut [0; FRAME_HEADER_SIZE];
-    wal_file.read(frame_number, frame_header_buffer)?;
-    // let frame_header = FrameHeader::
-    todo!()
-}
-
-pub fn checksum_bytes(data: &[u8], initial_checksum: Option<[u32; 2]>) -> [u32; 2] {
+pub fn checksum_bytes(data: &[u8], seed: Option<[u32; 2]>) -> [u32; 2] {
     let mut s1 = 0;
     let mut s2 = 0;
 
-    if let Some(i) = initial_checksum {
+    if let Some(i) = seed {
         s1 = i[0];
         s2 = i[1];
     }
@@ -280,4 +428,9 @@ pub fn checksum_bytes(data: &[u8], initial_checksum: Option<[u32; 2]>) -> [u32; 
     }
 
     [s1, s2]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 }
