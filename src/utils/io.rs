@@ -10,6 +10,8 @@ use libc::{c_void, pread, pwrite};
 
 use crate::storage::PageNumber;
 
+pub type BlockNumber = u32;
+
 pub trait FileOps {
     /// Creates file in filesystem at the given path.
     ///
@@ -110,19 +112,19 @@ impl IO for File {
     }
 }
 
-/// Wrapper to simplify working with page like structures on disk
+/// Wrapper to simplify working with page like structures on disk.
 #[derive(Debug)]
 pub struct BlockIO<I> {
     io: UnsafeCell<I>,
-    pub page_size: usize,
+    block_size: usize,
     header_size: usize,
 }
 
 impl<I> BlockIO<I> {
-    pub fn new(io: I, page_size: usize, header_size: usize) -> Self {
+    pub fn new(io: I, block_size: usize, header_size: usize) -> Self {
         Self {
             io: UnsafeCell::new(io),
-            page_size,
+            block_size,
             header_size,
         }
     }
@@ -137,10 +139,11 @@ impl<I: IO> BlockIO<I> {
         self.get_io().pread(offset, buffer)
     }
 
-    /// Reads page with given number. Includes header offset. This operation is atomic.
-    pub fn read(&self, page_number: PageNumber, buffer: &mut [u8]) -> io::Result<usize> {
-        let page_number = page_number as usize;
-        let offset = self.header_size + page_number * self.page_size;
+    /// Reads block with given number. Includes header offset. This operation is atomic. `block_number starts at 1`.
+    pub fn read(&self, block_number: BlockNumber, buffer: &mut [u8]) -> io::Result<usize> {
+        assert!(block_number > 0, "block number must be grater than 0.");
+        let block_number = (block_number - 1) as usize;
+        let offset = self.header_size + block_number * self.block_size;
         self.raw_read(offset, buffer)
     }
 
@@ -155,9 +158,11 @@ impl<I: IO> BlockIO<I> {
         self.get_io().pwrite(offset, buffer)
     }
 
-    /// Writes page at given number. Includes header offset. This operation is atomic.
-    pub fn write(&self, page_number: PageNumber, buffer: &[u8]) -> io::Result<usize> {
-        let offset = self.header_size + page_number as usize * self.page_size;
+    /// Writes block at given number. Includes header offset. This operation is atomic. `page_number starts at 1`.
+    pub fn write(&self, block_number: BlockNumber, buffer: &[u8]) -> io::Result<usize> {
+        assert!(block_number > 0, "block number must be grater than 0.");
+        let block_number = (block_number - 1) as usize;
+        let offset = self.header_size + block_number as usize * self.block_size;
         self.raw_write(offset, buffer)
     }
 
@@ -191,8 +196,8 @@ impl BlockIO<File> {
         Ok(meta.len() as usize)
     }
 
-    /// Returns size of file inside wrapper in **pages**.
-    pub fn size_in_pages(&self) -> io::Result<usize> {
-        Ok((self.size()? - self.header_size) / self.page_size)
+    /// Returns size of file inside wrapper in **blocks**.
+    pub fn size_in_blocks(&self) -> io::Result<usize> {
+        Ok((self.size()? - self.header_size) / self.block_size)
     }
 }
