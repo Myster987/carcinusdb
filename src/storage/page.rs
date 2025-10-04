@@ -150,15 +150,13 @@ impl TryFrom<u8> for PageType {
 /// Only chunk of `Cell` is stored in `Page` and it needs to be reassembled by going over
 ///
 pub struct Page {
-    offset: usize,
     buffer: Arc<RefCell<Buffer>>,
     overflow: HashMap<SlotNumber, bool>,
 }
 
 impl Page {
-    pub fn new(offset: usize, buffer: Arc<RefCell<Buffer>>) -> Self {
+    pub fn new(buffer: Arc<RefCell<Buffer>>) -> Self {
         Self {
-            offset,
             buffer,
             overflow: HashMap::new(),
         }
@@ -166,7 +164,7 @@ impl Page {
 
     pub fn alloc(offset: usize, size: usize, drop: Option<DropFn>) -> Self {
         let buf = Buffer::alloc_page(size, drop);
-        Self::new(offset, Arc::new(RefCell::new(buf)))
+        Self::new(Arc::new(RefCell::new(buf)))
     }
 
     pub fn as_ptr(&self) -> &mut [u8] {
@@ -175,7 +173,7 @@ impl Page {
     }
 
     fn read_u8(&self, pos: usize) -> u8 {
-        self.as_ptr()[self.offset + pos]
+        self.as_ptr()[pos]
     }
 
     fn read_u16_no_offset(&self, pos: usize) -> u16 {
@@ -184,7 +182,7 @@ impl Page {
     }
 
     fn read_u16(&self, pos: usize) -> u16 {
-        self.read_u16_no_offset(self.offset + pos)
+        self.read_u16_no_offset(pos)
     }
 
     fn read_u32_no_offset(&self, pos: usize) -> u32 {
@@ -193,12 +191,12 @@ impl Page {
     }
 
     fn read_u32(&self, pos: usize) -> u32 {
-        self.read_u32_no_offset(self.offset + pos)
+        self.read_u32_no_offset(pos)
     }
 
     fn write_u8(&self, pos: usize, value: u8) {
         let buf = self.as_ptr();
-        buf[self.offset + pos] = value;
+        buf[pos] = value;
     }
 
     fn write_u16_no_offset(&self, pos: usize, value: u16) {
@@ -207,7 +205,7 @@ impl Page {
     }
 
     fn write_u16(&self, pos: usize, value: u16) {
-        self.write_u16_no_offset(self.offset + pos, value);
+        self.write_u16_no_offset(pos, value);
     }
 
     fn write_u32_no_offset(&self, pos: usize, value: u32) {
@@ -216,7 +214,7 @@ impl Page {
     }
 
     fn write_u32(&self, pos: usize, value: u32) {
-        self.write_u32_no_offset(self.offset + pos, value);
+        self.write_u32_no_offset(pos, value);
     }
 
     pub fn try_page_type(&self) -> Option<PageType> {
@@ -275,7 +273,7 @@ impl Page {
 
     /// Free space between slot array and last cell.
     pub fn free_space(&self) -> u16 {
-        self.last_used_offset() - ((self.offset + self.header_size()) as u16 + self.len() * 2)
+        self.last_used_offset() - ((self.header_size()) as u16 + self.len() * 2)
     }
 
     /// Returns offset to Cell at given slot index. Note that in order to work correctly, valid index is needed otherwise it will return weird number.
