@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::utils::io::BlockNumber;
+
 pub mod allocator;
 pub mod buffer_pool;
 pub mod cache;
@@ -11,13 +13,13 @@ pub mod wal;
 pub type Oid = u32;
 
 /// Used for pages.
-pub type PageNumber = u32;
+pub type PageNumber = BlockNumber;
 /// Used for indexing inside page.
 pub type SlotNumber = u16;
 /// Used for transactions.
 pub type TransactionId = u32;
 /// Used for WAL frames.
-pub type FrameNumber = u32;
+pub type FrameNumber = BlockNumber;
 
 pub const PAGE_NUMBER_SIZE: usize = std::mem::size_of::<PageNumber>();
 pub const SLOT_SIZE: usize = std::mem::size_of::<SlotNumber>();
@@ -35,6 +37,8 @@ pub enum Error {
     // wal
     #[error("invalid checksum. data is corrupted")]
     InvalidChecksum,
+    #[error("page {0} not found in WAL")]
+    PageNotFoundInWal(PageNumber),
 
     // cache
     #[error(transparent)]
@@ -45,6 +49,10 @@ pub enum Error {
     Utils(#[from] crate::utils::Error),
 
     // io
+    #[error(
+        "read operation didn't completed successfully. Expected to read: {expected}, but got: {read}"
+    )]
+    PartialRead { expected: usize, read: usize },
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
