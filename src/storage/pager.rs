@@ -1,23 +1,19 @@
 use std::cell::{RefCell, UnsafeCell};
 
 use std::fs::File;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
 
-use crate::storage::StorageResult;
-use crate::storage::buffer_pool::{GlobalBufferPool, LocalBufferPool};
+use crate::storage::buffer_pool::LocalBufferPool;
 use crate::storage::cache::LruPageCache;
-use crate::storage::page::{DEFAULT_PAGE_SIZE, PageType};
-use crate::utils::buffer::{Buffer, BufferData};
+use crate::storage::page::PageType;
+use crate::storage::{Error, StorageResult};
+use crate::utils::buffer::Buffer;
 use crate::utils::io::BlockIO;
 
-use crate::{
-    os::{Open, OpenOptions},
-    storage::PageNumber,
-};
+use crate::storage::PageNumber;
 
 use super::page::Page;
 
@@ -216,22 +212,38 @@ impl Pager {
     }
 }
 
+/// Prepares page for read operation
+pub fn begin_read_page(page: MemPageRef) -> StorageResult<MemPageRef> {
+    page.set_locked();
+    Ok(page)
+}
+
 /// Should be universal to both disk and wal reads. Takes io::Result and if it
 /// is an error it will set proper flags on page. Otherwise it will set
 /// correct state and value for page.
-/// ### Note that `page` should be locked before calling this function
+/// ### Note that `page` should be locked before calling this function (use `begin_read_page` to setup page for read)
 pub fn complete_read_page(
     read_result: std::io::Result<usize>,
     page: MemPageRef,
-    buf: Buffer,
+    buffer: Buffer,
 ) -> StorageResult<MemPageRef> {
+    if let Ok(bytes_read) = read_result {
+        if bytes_read != buffer.size() {
+            page.set_error();
+            page.clear_loaded();
+            return Err(Error::PartialRead {
+                expected: buffer.size(),
+                read: bytes_read,
+            });
+        }
+    }
     if let Err(error) = read_result {
         page.set_error();
         page.clear_locked();
         return Err(error.into());
     }
 
-    let content = Page::new(0, Arc::new(RefCell::new(buf)));
+    let content = Page::new(Arc::new(RefCell::new(buffer)));
 
     page.get().content = Some(content);
     page.set_loaded();
