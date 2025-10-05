@@ -218,6 +218,11 @@ pub fn begin_read_page(page: MemPageRef) -> StorageResult<MemPageRef> {
     Ok(page)
 }
 
+pub fn begin_write_page(page: MemPageRef) -> StorageResult<MemPageRef> {
+    page.set_locked();
+    Ok(page)
+}
+
 /// Should be universal to both disk and wal reads. Takes io::Result and if it
 /// is an error it will set proper flags on page. Otherwise it will set
 /// correct state and value for page.
@@ -252,17 +257,20 @@ pub fn complete_read_page(
     Ok(page)
 }
 
-// pub fn complete_write_page(
-//     write_result: std::io::Result<usize>,
-//     page: MemPageRef,
-//     buf: Buffer
-// ) -> StorageResult<MemPageRef> {
-//     if let Err(error) = write_result {
-//         page.set_error();;
-//         page.clear_locked();
-//         return Err(error.into());
-//     }
+pub fn complete_write_page(
+    write_result: std::io::Result<usize>,
+    page: MemPageRef,
+) -> StorageResult<MemPageRef> {
+    if let Err(error) = write_result {
+        page.set_error();
+        page.clear_locked();
+        return Err(error.into());
+    }
 
-//     let content = Page::new(0, Arc::new(RefCell::new(buf)));
-//
-// }
+    let _ = page.get().content.take();
+
+    page.clear_loaded();
+    page.clear_loaded();
+
+    Ok(page)
+}
