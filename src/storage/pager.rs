@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 use crate::storage::buffer_pool::LocalBufferPool;
 use crate::storage::cache::LruPageCache;
 use crate::storage::page::PageType;
+use crate::storage::wal::LocalWal;
 use crate::storage::{Error, StorageResult};
 use crate::utils::buffer::Buffer;
 use crate::utils::io::BlockIO;
@@ -137,6 +138,8 @@ pub struct Pager {
     io: BlockIO<File>,
     /// Each pager gets it's dedicated local pool
     buffer_pool: LocalBufferPool,
+    /// Each pager gets local wal to sync with other pagers
+    wal: LocalWal,
     /// Reference to global LRU cache
     page_cache: Arc<Mutex<LruPageCache>>,
     page_size: u16,
@@ -147,6 +150,7 @@ impl Pager {
     pub fn begin_open(
         io: BlockIO<File>,
         buffer_pool: LocalBufferPool,
+        wal: LocalWal,
         page_cache: Arc<Mutex<LruPageCache>>,
         page_size: u16,
         reserved_space: u8,
@@ -163,6 +167,7 @@ impl Pager {
         Ok(Self {
             io,
             buffer_pool,
+            wal,
             page_cache,
             page_size,
             reserved_space,
@@ -175,10 +180,17 @@ impl Pager {
             return Ok(cached_page.clone());
         }
 
+        let page_wrapper = Arc::new(MemPage::new(page_number));
+
         // check wall...
+        if let Ok(Some(page)) =
+            self.wal
+                .read_frame(page_number, page_wrapper.clone(), self.buffer_pool.clone())
+        {
+            return Ok(page);
+        }
 
         // read from disk
-        let page_wrapper = Arc::new(MemPage::new(page_number));
         let page = self.read_page_from_disk(page_number, page_wrapper)?;
 
         self.page_cache.lock().insert(page_number, page.clone())?;
@@ -269,6 +281,7 @@ pub fn complete_write_page(
 
     let _ = page.get().content.take();
 
+    page.clear_dirty();
     page.clear_loaded();
     page.clear_loaded();
 

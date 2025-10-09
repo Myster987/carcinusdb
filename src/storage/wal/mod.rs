@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     fs::File,
+    io::IoSlice,
     path::PathBuf,
     sync::{
         Arc,
@@ -39,14 +40,18 @@ type Checksum = (u32, u32);
 #[repr(C)]
 #[derive(Debug)]
 pub struct WalHeader {
-    /// Size of invidual page in wal (not frame)
+    /// Size of invidual page in wal (not frame).
     page_size: u32,
-    /// Incremented with each checkpoint
+    /// Incremented with each checkpoint.
     checkpoint_seq_num: u32,
-    /// Frame number of last checkpointed entry (if WAL is empty, then it is set to 0)
+    /// Frame number of last checkpointed entry (if WAL is empty, then it is set to 0).
     last_checkpointed: u32,
-    /// Database size in pages (updated after each checkpoint)
+    /// Database size in pages (updated after each checkpoint).
     db_size: u32,
+    /// Size of WAL in pages after which we should trigger checkpoint.
+    checkpoint_size: u32,
+    /// Number of frames transfered from WAL to DB.
+    backfilled_number: u64,
     /// Checksum of header
     checksum: Checksum,
 }
@@ -63,6 +68,8 @@ impl WalHeader {
             checkpoint_seq_num: 0,
             last_checkpointed: 0,
             db_size,
+            checkpoint_size: 1000,
+            backfilled_number: 0,
             checksum: (0, 0),
         };
         wal_header.update_checksum();
@@ -74,9 +81,11 @@ impl WalHeader {
         let checkpoint_seq_num = u32::from_le_bytes(buffer[4..8].try_into().unwrap());
         let last_checkpointed = u32::from_le_bytes(buffer[8..12].try_into().unwrap());
         let db_size = u32::from_le_bytes(buffer[12..16].try_into().unwrap());
+        let checkpoint_size = u32::from_le_bytes(buffer[16..20].try_into().unwrap());
+        let backfilled_number = u64::from_le_bytes(buffer[20..28].try_into().unwrap());
         let checksum = (
-            u32::from_le_bytes(buffer[16..20].try_into().unwrap()),
-            u32::from_le_bytes(buffer[20..24].try_into().unwrap()),
+            u32::from_le_bytes(buffer[28..32].try_into().unwrap()),
+            u32::from_le_bytes(buffer[32..36].try_into().unwrap()),
         );
 
         Self {
@@ -84,6 +93,8 @@ impl WalHeader {
             checkpoint_seq_num,
             last_checkpointed,
             db_size,
+            checkpoint_size,
+            backfilled_number,
             checksum,
         }
     }
@@ -196,6 +207,9 @@ pub struct GlobalWal {
     /// Checksum of last frame in WAL. It is cumulative checksum of all pages. Stored as two u32 packed in single atomic.
     last_checksum: AtomicU64,
 
+    /// Number of frames transfered to DB from WAL.
+    backfilled_number: AtomicU64,
+
     /// Array of read locks. Each locks is atomic u32 which represents minimal frame number this transaction can see.
     readers: ReadersPool,
 
@@ -243,6 +257,7 @@ impl GlobalWal {
             index,
             min_max_frame: AtomicU64::new(pack_u64(min_frame, max_frame)),
             last_checksum: AtomicU64::new(pack_u64(running_checksum.0, running_checksum.1)),
+            backfilled_number: AtomicU64::new(0),
             // by default it is set to u32::MAX to indicate that it is free and it is quite not possible for WAL to outgrow 17 TB of 4KB pages.
             readers: ReadersPool::new(READERS_NUM),
             writer: Mutex::new(()),
@@ -273,6 +288,10 @@ impl LocalWal {
             last_checksum: (0, 0),
             temp_buffer: vec![0; frame_size],
         }
+    }
+
+    pub fn is_in_wal(&self, page_number: &PageNumber) -> bool {
+        self.global_wal.index.contains(page_number)
     }
 
     pub fn begin_read_tx(&mut self) -> StorageResult<ReadGuard> {
@@ -308,6 +327,7 @@ impl LocalWal {
 
     /// Ends write transaction by dropping write locks and updates all
     pub fn end_write_tx(&mut self, guard: MutexGuard<()>) -> StorageResult<()> {
+        self.global_wal.wal_file.flush()?;
         self.global_wal.wal_file.sync()?;
 
         self.global_wal.last_checksum.store_packed(
@@ -344,7 +364,12 @@ impl LocalWal {
         page_number: PageNumber,
         page: MemPageRef,
         buffer_pool: LocalBufferPool,
-    ) -> StorageResult<MemPageRef> {
+    ) -> StorageResult<Option<MemPageRef>> {
+        // if given page number is not present in WAL we can simply return OK(None)
+        if !self.is_in_wal(&page_number) {
+            return Ok(None);
+        }
+
         let page = pager::begin_read_page(page)?;
 
         let mut buffer = buffer_pool.get();
@@ -357,7 +382,7 @@ impl LocalWal {
 
         let read_result = self.read_raw(visible_frame_number, &mut buffer[..]);
 
-        pager::complete_read_page(read_result, page, buffer)
+        pager::complete_read_page(read_result, page, buffer).map(|pg| Some(pg))
     }
 
     /// Writes content of `self.temp_buffer` into WAL at given `frame_number`
@@ -396,6 +421,58 @@ impl LocalWal {
         self.global_wal.index.insert(page_number, frame_number);
 
         Ok(page)
+    }
+
+    pub fn append_vectored(
+        &mut self,
+        pages: Vec<MemPageRef>,
+        db_size: u32,
+    ) -> StorageResult<Vec<MemPageRef>> {
+        let mut io_buffers = Vec::with_capacity(pages.len() * 2);
+        let mut header_buffers: Vec<Vec<u8>> = (0..pages.len())
+            .map(|_| vec![0; FRAME_HEADER_SIZE])
+            .collect();
+
+        let mut running_checksum = self.last_checksum;
+
+        for (i, page) in pages.iter().enumerate() {
+            let page_number = page.get().id;
+            let page_content = &page.get_content().as_ptr();
+            let checksum = checksum_bytes(page_content, Some(running_checksum));
+
+            running_checksum = checksum;
+            let commit_db_size = if i + 1 == pages.len() { db_size } else { 0 };
+
+            let frame_header = FrameHeader {
+                page_number,
+                db_size: commit_db_size,
+                checksum,
+            };
+
+            frame_header.to_bytes(&mut header_buffers[i][..]);
+        }
+
+        for (i, page) in pages.iter().enumerate() {
+            io_buffers.push(IoSlice::new(&header_buffers[i]));
+            io_buffers.push(page.get_content().as_io_slice());
+        }
+
+        let frame_number = self.max_frame + 1;
+
+        self.global_wal
+            .wal_file
+            .write_vectored(frame_number, &mut io_buffers)?;
+
+        self.last_checksum = running_checksum;
+        self.max_frame = self.max_frame + pages.len() as FrameNumber;
+
+        for (i, page) in pages.iter().enumerate() {
+            self.global_wal
+                .index
+                .insert(page.get().id, frame_number + i as FrameNumber);
+        }
+
+        Ok(pages)
     }
 }
 
@@ -446,6 +523,10 @@ impl WalIndex {
         vec.sort_by_key(|(pn, _)| *pn);
 
         vec
+    }
+
+    pub fn contains(&self, page_number: &PageNumber) -> bool {
+        self.map.contains_key(page_number)
     }
 
     pub fn get(&self, page_number: &PageNumber, max_frame: FrameNumber) -> Option<FrameNumber> {
