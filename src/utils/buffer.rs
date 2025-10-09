@@ -130,8 +130,6 @@ pub unsafe fn dealloc_heap(ptr: NonNull<u8>, size: usize, align: usize) {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-
     use super::*;
 
     #[test]

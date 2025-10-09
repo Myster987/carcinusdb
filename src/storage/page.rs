@@ -1,4 +1,9 @@
-use std::{cell::RefCell, collections::HashMap, io::Cursor, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    io::{Cursor, IoSlice},
+    sync::Arc,
+};
 
 use crate::{
     storage::{Error, PageNumber, SlotNumber, StorageResult},
@@ -170,6 +175,10 @@ impl Page {
     pub fn as_ptr(&self) -> &mut [u8] {
         let buf = self.buffer.as_ptr();
         unsafe { buf.as_mut().unwrap().as_mut_slice() }
+    }
+
+    pub fn as_io_slice(&self) -> IoSlice {
+        IoSlice::new(self.as_ptr())
     }
 
     fn read_u8(&self, pos: usize) -> u8 {
