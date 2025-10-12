@@ -35,6 +35,8 @@ const WAL_HEADER_SIZE_NO_CHECKSUM: usize = WAL_HEADER_SIZE - size_of::<[u32; 2]>
 const FRAME_HEADER_SIZE: usize = size_of::<FrameHeader>();
 const READERS_NUM: usize = 5;
 
+const DEFAULT_CHECKPOINT_SIZE: FrameNumber = 1000;
+
 type Checksum = (u32, u32);
 
 #[repr(C)]
@@ -48,10 +50,8 @@ pub struct WalHeader {
     last_checkpointed: u32,
     /// Database size in pages (updated after each checkpoint).
     db_size: u32,
-    /// Size of WAL in pages after which we should trigger checkpoint.
-    checkpoint_size: u32,
     /// Number of frames transfered from WAL to DB.
-    backfilled_number: u64,
+    backfilled_number: u32,
     /// Checksum of header
     checksum: Checksum,
 }
@@ -68,7 +68,6 @@ impl WalHeader {
             checkpoint_seq_num: 0,
             last_checkpointed: 0,
             db_size,
-            checkpoint_size: 1000,
             backfilled_number: 0,
             checksum: (0, 0),
         };
@@ -81,11 +80,10 @@ impl WalHeader {
         let checkpoint_seq_num = u32::from_le_bytes(buffer[4..8].try_into().unwrap());
         let last_checkpointed = u32::from_le_bytes(buffer[8..12].try_into().unwrap());
         let db_size = u32::from_le_bytes(buffer[12..16].try_into().unwrap());
-        let checkpoint_size = u32::from_le_bytes(buffer[16..20].try_into().unwrap());
-        let backfilled_number = u64::from_le_bytes(buffer[20..28].try_into().unwrap());
+        let backfilled_number = u32::from_le_bytes(buffer[16..20].try_into().unwrap());
         let checksum = (
-            u32::from_le_bytes(buffer[28..32].try_into().unwrap()),
-            u32::from_le_bytes(buffer[32..36].try_into().unwrap()),
+            u32::from_le_bytes(buffer[20..24].try_into().unwrap()),
+            u32::from_le_bytes(buffer[24..28].try_into().unwrap()),
         );
 
         Self {
@@ -93,7 +91,6 @@ impl WalHeader {
             checkpoint_seq_num,
             last_checkpointed,
             db_size,
-            checkpoint_size,
             backfilled_number,
             checksum,
         }
@@ -198,20 +195,25 @@ pub struct GlobalWal {
     db_file: Arc<BlockIO<File>>,
 
     frame_size: usize,
+
+    /// Size of WAL in pages after which we should trigger checkpoint.
+    checkpoint_size: u32,
     /// WAL header loaded to memory.
     header: Arc<Mutex<WalHeader>>,
     /// WAL index that sppeds up searching for frame.
     index: Arc<WalIndex>,
-    /// Stores two u32 inside one variable. First one is last checkpointed entry in WAL and second is last commited frame in transaction.
-    min_max_frame: AtomicU64,
+    /// Last checkpointed entry in WAL.
+    min_frame: AtomicU32,
+    /// Last commited frame in transaction.
+    max_frame: AtomicU32,
     /// Checksum of last frame in WAL. It is cumulative checksum of all pages. Stored as two u32 packed in single atomic.
     last_checksum: AtomicU64,
 
     /// Number of frames transfered to DB from WAL.
-    backfilled_number: AtomicU64,
+    backfilled_number: AtomicU32,
 
     /// Array of read locks. Each locks is atomic u32 which represents minimal frame number this transaction can see.
-    readers: ReadersPool,
+    readers: Arc<ReadersPool<READERS_NUM>>,
 
     writer: Mutex<()>,
 }
@@ -223,6 +225,7 @@ impl GlobalWal {
         header: WalHeader,
     ) -> StorageResult<Self> {
         let frame_size = header.page_size as usize + FRAME_HEADER_SIZE;
+        let backfilled_number = header.backfilled_number;
         let index = Arc::new(WalIndex::new());
 
         let min_frame = header.last_checkpointed;
@@ -253,13 +256,15 @@ impl GlobalWal {
             wal_file,
             db_file,
             frame_size,
+            checkpoint_size: DEFAULT_CHECKPOINT_SIZE,
             header: Arc::new(Mutex::new(header)),
             index,
-            min_max_frame: AtomicU64::new(pack_u64(min_frame, max_frame)),
+            min_frame: AtomicU32::new(min_frame),
+            max_frame: AtomicU32::new(max_frame),
             last_checksum: AtomicU64::new(pack_u64(running_checksum.0, running_checksum.1)),
-            backfilled_number: AtomicU64::new(0),
+            backfilled_number: AtomicU32::new(backfilled_number),
             // by default it is set to u32::MAX to indicate that it is free and it is quite not possible for WAL to outgrow 17 TB of 4KB pages.
-            readers: ReadersPool::new(READERS_NUM),
+            readers: Arc::new(ReadersPool::new()),
             writer: Mutex::new(()),
         })
     }
@@ -294,13 +299,16 @@ impl LocalWal {
         self.global_wal.index.contains(page_number)
     }
 
-    pub fn begin_read_tx(&mut self) -> StorageResult<ReadGuard> {
-        let guard = self.global_wal.readers.get_permit();
+    pub fn begin_read_tx(&mut self) -> StorageResult<ReadGuard<READERS_NUM>> {
+        let guard = self
+            .global_wal
+            .readers
+            .clone()
+            .acquire(|| self.global_wal.min_frame.load(Ordering::Acquire));
 
         // takes snapshot of both min and max frame that this transaction will be able to see in WAL
-        let (min_frame, max_frame) = self.global_wal.min_max_frame.load_packed(Ordering::Acquire);
-        self.min_frame = min_frame;
-        self.max_frame = max_frame;
+        self.min_frame = guard.min_frame();
+        self.max_frame = self.global_wal.max_frame.load(Ordering::Acquire);
 
         Ok(guard)
     }
@@ -308,15 +316,14 @@ impl LocalWal {
     pub fn begin_write_tx(&mut self) -> StorageResult<MutexGuard<()>> {
         let guard = self.global_wal.writer.lock();
 
-        let (min_frame, max_frame) = self.global_wal.min_max_frame.load_packed(Ordering::Acquire);
-        self.min_frame = min_frame;
-        self.max_frame = max_frame;
+        self.min_frame = self.global_wal.min_frame.load(Ordering::Acquire);
+        self.max_frame = self.global_wal.max_frame.load(Ordering::Acquire);
         self.last_checksum = self.global_wal.last_checksum.load_packed(Ordering::Acquire);
 
         Ok(guard)
     }
 
-    pub fn end_read_tx(&mut self, guard: ReadGuard) -> StorageResult<()> {
+    pub fn end_read_tx(&mut self, guard: ReadGuard<READERS_NUM>) -> StorageResult<()> {
         self.min_frame = 0;
         self.max_frame = 0;
 
@@ -335,11 +342,10 @@ impl LocalWal {
             self.last_checksum.1,
             Ordering::Release,
         );
-        self.global_wal.min_max_frame.store_packed(
-            self.min_frame,
-            self.max_frame,
-            Ordering::Release,
-        );
+
+        self.global_wal
+            .max_frame
+            .store(self.max_frame, Ordering::Release);
 
         self.min_frame = 0;
         self.max_frame = 0;
@@ -473,6 +479,13 @@ impl LocalWal {
         }
 
         Ok(pages)
+    }
+
+    fn should_checkpoint(&self) -> bool {
+        let max_frame = self.global_wal.max_frame.load(Ordering::Acquire);
+        let backfilled_number = self.global_wal.backfilled_number.load(Ordering::Acquire);
+
+        max_frame > self.global_wal.checkpoint_size + backfilled_number
     }
 }
 
