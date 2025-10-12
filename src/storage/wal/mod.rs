@@ -268,6 +268,39 @@ impl GlobalWal {
             writer: Mutex::new(()),
         })
     }
+
+    pub fn get_min_frame(&self) -> FrameNumber {
+        self.min_frame.load(Ordering::Acquire)
+    }
+
+    pub fn get_max_frame(&self) -> FrameNumber {
+        self.max_frame.load(Ordering::Acquire)
+    }
+
+    pub fn get_last_checksum(&self) -> Checksum {
+        self.last_checksum.load_packed(Ordering::Acquire)
+    }
+
+    pub fn get_backfilled_number(&self) -> u32 {
+        self.backfilled_number.load(Ordering::Acquire)
+    }
+
+    pub fn set_min_frame(&self, value: FrameNumber) {
+        self.min_frame.store(value, Ordering::Release);
+    }
+
+    pub fn set_max_frame(&self, value: FrameNumber) {
+        self.max_frame.store(value, Ordering::Release);
+    }
+
+    pub fn set_last_checksum(&self, value: Checksum) {
+        self.last_checksum
+            .store_packed(value.0, value.1, Ordering::Release);
+    }
+
+    pub fn set_backfilled_number(&self, value: u32) {
+        self.backfilled_number.store(value, Ordering::Release);
+    }
 }
 
 pub struct LocalWal {
@@ -304,11 +337,11 @@ impl LocalWal {
             .global_wal
             .readers
             .clone()
-            .acquire(|| self.global_wal.min_frame.load(Ordering::Acquire));
+            .acquire(|| self.global_wal.get_min_frame());
 
         // takes snapshot of both min and max frame that this transaction will be able to see in WAL
         self.min_frame = guard.min_frame();
-        self.max_frame = self.global_wal.max_frame.load(Ordering::Acquire);
+        self.max_frame = self.global_wal.get_max_frame();
 
         Ok(guard)
     }
@@ -316,9 +349,9 @@ impl LocalWal {
     pub fn begin_write_tx(&mut self) -> StorageResult<MutexGuard<()>> {
         let guard = self.global_wal.writer.lock();
 
-        self.min_frame = self.global_wal.min_frame.load(Ordering::Acquire);
-        self.max_frame = self.global_wal.max_frame.load(Ordering::Acquire);
-        self.last_checksum = self.global_wal.last_checksum.load_packed(Ordering::Acquire);
+        self.min_frame = self.global_wal.get_min_frame();
+        self.max_frame = self.global_wal.get_max_frame();
+        self.last_checksum = self.global_wal.get_last_checksum();
 
         Ok(guard)
     }
@@ -337,15 +370,9 @@ impl LocalWal {
         self.global_wal.wal_file.flush()?;
         self.global_wal.wal_file.sync()?;
 
-        self.global_wal.last_checksum.store_packed(
-            self.last_checksum.0,
-            self.last_checksum.1,
-            Ordering::Release,
-        );
+        self.global_wal.set_last_checksum(self.last_checksum);
 
-        self.global_wal
-            .max_frame
-            .store(self.max_frame, Ordering::Release);
+        self.global_wal.set_max_frame(self.max_frame);
 
         self.min_frame = 0;
         self.max_frame = 0;
@@ -482,8 +509,8 @@ impl LocalWal {
     }
 
     fn should_checkpoint(&self) -> bool {
-        let max_frame = self.global_wal.max_frame.load(Ordering::Acquire);
-        let backfilled_number = self.global_wal.backfilled_number.load(Ordering::Acquire);
+        let max_frame = self.global_wal.get_max_frame();
+        let backfilled_number = self.global_wal.get_backfilled_number();
 
         max_frame > self.global_wal.checkpoint_size + backfilled_number
     }
