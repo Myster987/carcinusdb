@@ -10,7 +10,7 @@ use std::{
 };
 
 use dashmap::DashMap;
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::{Mutex, RwLock};
 
 use crate::{
     os::{Open, OpenOptions},
@@ -19,7 +19,7 @@ use crate::{
         buffer_pool::LocalBufferPool,
         page::MAX_PAGE_SIZE,
         pager::{self, MemPageRef},
-        wal::locks::{PackedU64, ReadGuard, ReadersPool},
+        wal::locks::{PackedU64, ReadGuard, ReadersPool, WriteGuard},
     },
     utils::{
         self,
@@ -214,8 +214,12 @@ pub struct GlobalWal {
 
     /// Array of read locks. Each locks is atomic u32 which represents minimal frame number this transaction can see.
     readers: Arc<ReadersPool<READERS_NUM>>,
-
+    /// Lock for single writer.
     writer: Mutex<()>,
+    /// All transactions read or write must acquire this lock before they can do anything.
+    /// When we want to run checkpoint we get write lock instead to block other transactions.
+    /// While this can couse latency spikes, it prevents WAL from growing indefinitely.   
+    checkpoint_lock: RwLock<()>,
 }
 
 impl GlobalWal {
@@ -266,6 +270,7 @@ impl GlobalWal {
             // by default it is set to u32::MAX to indicate that it is free and it is quite not possible for WAL to outgrow 17 TB of 4KB pages.
             readers: Arc::new(ReadersPool::new()),
             writer: Mutex::new(()),
+            checkpoint_lock: RwLock::new(()),
         })
     }
 
@@ -333,11 +338,13 @@ impl LocalWal {
     }
 
     pub fn begin_read_tx(&mut self) -> StorageResult<ReadGuard<READERS_NUM>> {
+        let checkpoint_guard = self.global_wal.checkpoint_lock.read();
+
         let guard = self
             .global_wal
             .readers
             .clone()
-            .acquire(|| self.global_wal.get_min_frame());
+            .acquire(checkpoint_guard, || self.global_wal.get_min_frame());
 
         // takes snapshot of both min and max frame that this transaction will be able to see in WAL
         self.min_frame = guard.min_frame();
@@ -346,8 +353,11 @@ impl LocalWal {
         Ok(guard)
     }
 
-    pub fn begin_write_tx(&mut self) -> StorageResult<MutexGuard<()>> {
-        let guard = self.global_wal.writer.lock();
+    pub fn begin_write_tx(&mut self) -> StorageResult<WriteGuard> {
+        let checkpoint_guard = self.global_wal.checkpoint_lock.read();
+        let mutex_guard = self.global_wal.writer.lock();
+
+        let guard = WriteGuard::new(checkpoint_guard, mutex_guard);
 
         self.min_frame = self.global_wal.get_min_frame();
         self.max_frame = self.global_wal.get_max_frame();
@@ -366,7 +376,7 @@ impl LocalWal {
     }
 
     /// Ends write transaction by dropping write locks and updates all
-    pub fn end_write_tx(&mut self, guard: MutexGuard<()>) -> StorageResult<()> {
+    pub fn end_write_tx(&mut self, guard: WriteGuard) -> StorageResult<()> {
         self.global_wal.wal_file.flush()?;
         self.global_wal.wal_file.sync()?;
 
@@ -513,6 +523,20 @@ impl LocalWal {
         let backfilled_number = self.global_wal.get_backfilled_number();
 
         max_frame > self.global_wal.checkpoint_size + backfilled_number
+    }
+
+    pub fn checkpoint(&self) -> StorageResult<()> {
+        if !self.should_checkpoint() {
+            return Ok(());
+        }
+
+        let exclusive = self.global_wal.checkpoint_lock.write();
+
+        let min_active_frame = self.global_wal.readers.min_active_frame();
+
+        // if min_active_frame == self.global_wal.get_min_frame()
+
+        todo!()
     }
 }
 

@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use crossbeam::utils::Backoff;
-use parking_lot::{Condvar, Mutex};
+use parking_lot::{Condvar, Mutex, MutexGuard, RwLockReadGuard};
 
 use crate::{
     storage::FrameNumber,
@@ -76,7 +76,11 @@ impl<const READERS_NUM: usize> ReadersPool<READERS_NUM> {
         self.slots[slot_id].load(Ordering::Acquire)
     }
 
-    pub fn acquire<F>(self: Arc<Self>, get_min_visible: F) -> ReadGuard<READERS_NUM>
+    pub fn acquire<'a, F>(
+        self: Arc<Self>,
+        checkpoint_guard: RwLockReadGuard<'a, ()>,
+        get_min_visible: F,
+    ) -> ReadGuard<'a, READERS_NUM>
     where
         F: Fn() -> FrameNumber,
     {
@@ -95,6 +99,7 @@ impl<const READERS_NUM: usize> ReadersPool<READERS_NUM> {
                 {
                     self.backoff.reset();
                     return ReadGuard {
+                        _checkpoint_guard: checkpoint_guard,
                         slot_id: i,
                         pool: self.clone(),
                     };
@@ -113,20 +118,37 @@ impl<const READERS_NUM: usize> ReadersPool<READERS_NUM> {
     }
 }
 
-pub struct ReadGuard<const READERS_NUM: usize> {
+/// Wrapper of two lock guard to hold them in single place.
+pub struct ReadGuard<'a, const READERS_NUM: usize> {
+    _checkpoint_guard: RwLockReadGuard<'a, ()>,
     pool: Arc<ReadersPool<READERS_NUM>>,
     slot_id: usize,
 }
 
-impl<const READERS_NUM: usize> ReadGuard<READERS_NUM> {
+impl<'a, const READERS_NUM: usize> ReadGuard<'a, READERS_NUM> {
     pub fn min_frame(&self) -> FrameNumber {
         self.pool.get_min_frame(self.slot_id)
     }
 }
 
-impl<const READERS_NUM: usize> Drop for ReadGuard<READERS_NUM> {
+impl<'a, const READERS_NUM: usize> Drop for ReadGuard<'a, READERS_NUM> {
     fn drop(&mut self) {
         self.pool.release(self.slot_id);
+    }
+}
+
+/// Wrapper of two lock guard to hold them in single place.
+pub struct WriteGuard<'a> {
+    _checkpoint_guard: RwLockReadGuard<'a, ()>,
+    _mutex_guard: MutexGuard<'a, ()>,
+}
+
+impl<'a> WriteGuard<'a> {
+    pub fn new(checkpoint_guard: RwLockReadGuard<'a, ()>, mutex_guard: MutexGuard<'a, ()>) -> Self {
+        Self {
+            _checkpoint_guard: checkpoint_guard,
+            _mutex_guard: mutex_guard,
+        }
     }
 }
 
