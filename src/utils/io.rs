@@ -1,7 +1,7 @@
 use std::{
     cell::UnsafeCell,
     fs::{self, File},
-    io::{self, IoSlice, Write},
+    io::{self, IoSlice, Seek, Write},
     os::fd::AsRawFd,
     path::Path,
 };
@@ -87,6 +87,7 @@ pub trait IO {
     fn pread(&self, offset: usize, buf: &mut [u8]) -> io::Result<usize>;
     fn pwrite(&self, offset: usize, buf: &[u8]) -> io::Result<usize>;
     fn pwrite_vec(&self, offset: usize, buf: &mut [IoSlice<'_>]) -> io::Result<usize>;
+    fn truncate_beginning(&mut self, bytes_to_remove: u64, header_size: usize) -> io::Result<()>;
 }
 
 impl IO for File {
@@ -167,6 +168,61 @@ impl IO for File {
 
         Ok(total_written)
     }
+
+    /// Truncates beginning of a file (skips header). `bytes_to_remove` is deleted and rest is
+    /// moved to beginning using [`libc::copy_file_range`].
+    fn truncate_beginning(&mut self, bytes_to_remove: u64, header_size: usize) -> io::Result<()> {
+        let fd = self.as_raw_fd();
+        let metadata = self.metadata()?;
+        let file_size = metadata.len();
+
+        if bytes_to_remove + header_size as u64 >= file_size {
+            unsafe {
+                if libc::ftruncate(fd, header_size as libc::off_t) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+
+            return Ok(());
+        }
+
+        let remaining = file_size - bytes_to_remove - header_size as u64;
+
+        let mut off_in = (header_size as u64 + bytes_to_remove) as libc::off64_t;
+        let mut off_out = header_size as libc::off64_t;
+
+        let mut copied = 0;
+
+        while copied < remaining {
+            let chunk = unsafe {
+                libc::copy_file_range(
+                    fd,
+                    &mut off_in,
+                    fd,
+                    &mut off_out,
+                    remaining as libc::size_t,
+                    0,
+                )
+            };
+
+            if chunk < 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            copied += chunk as u64;
+        }
+
+        let new_size = header_size as u64 + remaining;
+
+        unsafe {
+            if libc::ftruncate(fd, new_size as libc::off_t) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+
+        self.seek(io::SeekFrom::Start(0))?;
+        Ok(())
+    }
 }
 
 /// Wrapper to simplify working with page like structures on disk.
@@ -237,6 +293,18 @@ impl<I: IO> BlockIO<I> {
     /// Writes header at the beginning of a file. Note that buffer size must match header size. This operation is atomic.
     pub fn write_header(&self, buffer: &[u8]) -> io::Result<usize> {
         self.raw_write(0, buffer)
+    }
+
+    pub fn truncate_beginning(&self, up_to_block_number: BlockNumber) -> io::Result<()> {
+        assert!(
+            up_to_block_number > 0,
+            "block number, up to which file will be truncated, must be grater than 0."
+        );
+
+        let bytes_to_remove = (up_to_block_number as usize * self.block_size) as u64;
+
+        self.get_io()
+            .truncate_beginning(bytes_to_remove, self.header_size)
     }
 }
 
