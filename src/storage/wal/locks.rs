@@ -1,11 +1,15 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
+use crossbeam::utils::Backoff;
 use parking_lot::{Condvar, Mutex};
 
-use crate::utils::bytes::{pack_u64, unpack_u64};
+use crate::{
+    storage::FrameNumber,
+    utils::bytes::{pack_u64, unpack_u64},
+};
 
 /// Counting semaphore. Used to sync readers.
 pub struct Semaphore {
@@ -40,32 +44,89 @@ impl Semaphore {
     }
 }
 
-pub struct ReadersPool {
-    permits: Arc<Semaphore>,
+pub struct ReadersPool<const READERS_NUM: usize> {
+    slots: [AtomicU32; READERS_NUM],
+    backoff: Backoff,
 }
 
-impl ReadersPool {
-    pub fn new(capacity: usize) -> Self {
+impl<const READERS_NUM: usize> ReadersPool<READERS_NUM> {
+    const FREE_SLOT: FrameNumber = 0;
+
+    pub fn new() -> Self {
         Self {
-            permits: Arc::new(Semaphore::new(capacity)),
+            slots: std::array::from_fn(|_| AtomicU32::new(Self::FREE_SLOT)),
+            backoff: Backoff::new(),
         }
     }
 
-    pub fn get_permit(&self) -> ReadGuard {
-        self.permits.acquire();
-        ReadGuard {
-            semaphore: self.permits.clone(),
+    pub fn min_active_frame(&self) -> FrameNumber {
+        let mut min_frame = FrameNumber::MAX;
+
+        for slot in &self.slots {
+            let value = slot.load(Ordering::Acquire);
+            if value != Self::FREE_SLOT {
+                min_frame = std::cmp::min(min_frame, value);
+            }
         }
+
+        min_frame
+    }
+
+    pub fn get_min_frame(&self, slot_id: usize) -> FrameNumber {
+        self.slots[slot_id].load(Ordering::Acquire)
+    }
+
+    pub fn acquire<F>(self: Arc<Self>, get_min_visible: F) -> ReadGuard<READERS_NUM>
+    where
+        F: Fn() -> FrameNumber,
+    {
+        let mut min_visible_frame = get_min_visible();
+
+        loop {
+            for (i, slot) in self.slots.iter().enumerate() {
+                if slot
+                    .compare_exchange(
+                        Self::FREE_SLOT,
+                        min_visible_frame,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    self.backoff.reset();
+                    return ReadGuard {
+                        slot_id: i,
+                        pool: self.clone(),
+                    };
+                }
+            }
+            self.backoff.spin();
+
+            if self.backoff.is_completed() {
+                min_visible_frame = get_min_visible();
+            }
+        }
+    }
+
+    pub fn release(&self, slot_id: usize) {
+        self.slots[slot_id].store(0, Ordering::Release);
     }
 }
 
-pub struct ReadGuard {
-    semaphore: Arc<Semaphore>,
+pub struct ReadGuard<const READERS_NUM: usize> {
+    pool: Arc<ReadersPool<READERS_NUM>>,
+    slot_id: usize,
 }
 
-impl Drop for ReadGuard {
+impl<const READERS_NUM: usize> ReadGuard<READERS_NUM> {
+    pub fn min_frame(&self) -> FrameNumber {
+        self.pool.get_min_frame(self.slot_id)
+    }
+}
+
+impl<const READERS_NUM: usize> Drop for ReadGuard<READERS_NUM> {
     fn drop(&mut self) {
-        self.semaphore.release();
+        self.pool.release(self.slot_id);
     }
 }
 
