@@ -15,11 +15,7 @@ use parking_lot::{Mutex, RwLock};
 use crate::{
     os::{Open, OpenOptions},
     storage::{
-        Error, FrameNumber, PageNumber, StorageResult,
-        buffer_pool::LocalBufferPool,
-        page::MAX_PAGE_SIZE,
-        pager::{self, MemPageRef},
-        wal::locks::{PackedU64, ReadGuard, ReadersPool, WriteGuard},
+        buffer_pool::LocalBufferPool, cache::LruPageCache, page::MAX_PAGE_SIZE, pager::{self, MemPageRef, Pager}, wal::locks::{PackedU64, ReadGuard, ReadersPool, WriteGuard}, Error, FrameNumber, PageNumber, StorageResult
     },
     utils::{
         self,
@@ -525,14 +521,29 @@ impl LocalWal {
         max_frame > self.global_wal.checkpoint_size + backfilled_number
     }
 
-    pub fn checkpoint(&self) -> StorageResult<()> {
+    pub fn checkpoint(&self, pager: &mut Pager) -> StorageResult<()> {
         if !self.should_checkpoint() {
             return Ok(());
         }
 
-        let exclusive = self.global_wal.checkpoint_lock.write();
+        let exclusive_lock = self.global_wal.checkpoint_lock.write();
 
-        let min_active_frame = self.global_wal.readers.min_active_frame();
+        let max_frame = self.global_wal.get_max_frame();
+
+        let frames_to_checkpoint = self.global_wal.index.latest_frames_sorted(max_frame);
+
+        for (page_number, frame_number) in frames_to_checkpoint {
+            if let Some(mem_page) = pager.page_cache.get(&page_number) {
+                if mem_page.is_dirty() {
+                    pager.write_page(page_number, mem_page)?;
+                }
+            } else {
+                todo!()
+            }
+        }
+
+        self.global_wal.db_file.flush()?;
+        self.global_wal.db_file.sync()?;
 
         // if min_active_frame == self.global_wal.get_min_frame()
 
@@ -572,15 +583,20 @@ impl WalIndex {
             .push_back(frame_number);
     }
 
-    /// Returns sorted list of latest frames used for commit to put them into db.
-    pub fn latest_frames_sorted(&self) -> Vec<(PageNumber, FrameNumber)> {
+    /// Returns sorted list of latest visible frames used for checkpoint to put them into db.
+    pub fn latest_frames_sorted(&self, max_frame: FrameNumber) -> Vec<(PageNumber, FrameNumber)> {
         let mut vec: Vec<_> = self
             .map
             .iter()
             .filter_map(|entry| {
                 let page_number = *entry.key();
-                let latest = entry.value().back().copied()?;
-                Some((page_number, latest))
+                let latest_visible = entry
+                    .value()
+                    .iter()
+                    .rev()
+                    .find(|&&frame| frame <= max_frame)
+                    .copied()?;
+                Some((page_number, latest_visible))
             })
             .collect();
 
