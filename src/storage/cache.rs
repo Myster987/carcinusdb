@@ -1,5 +1,7 @@
-use std::{collections::HashMap, fmt::Debug, ptr::NonNull};
+use std::{fmt::Debug, ptr::NonNull};
 
+use dashmap::DashMap;
+use parking_lot::Mutex;
 use thiserror::Error;
 
 use crate::storage::{PageNumber, pager::MemPageRef};
@@ -45,16 +47,30 @@ impl PageCacheEntry {
     }
 }
 
+/// In LRU wrapped in mutex to protect head and tail from concurrent access.
+pub struct CacheLinkeListState {
+    /// Head of doubly linked list.
+    head: Option<NonNull<PageCacheEntry>>,
+    /// Tail of doubly ll.
+    tail: Option<NonNull<PageCacheEntry>>,
+}
+
+impl CacheLinkeListState {
+    pub fn new() -> Self {
+        Self {
+            head: None,
+            tail: None,
+        }
+    }
+}
+
 /// Simple LRU cache implementation using hashmap and doubly linked list.
 pub struct LruPageCache {
     /// Total capacity of cache (in pages)
     capacity: usize,
     /// Hashmap of cache entries.
-    map: HashMap<PageCacheKey, NonNull<PageCacheEntry>>,
-    /// Head of doubly linked list.
-    head: Option<NonNull<PageCacheEntry>>,
-    /// Tail of doubly ll.
-    tail: Option<NonNull<PageCacheEntry>>,
+    map: DashMap<PageCacheKey, NonNull<PageCacheEntry>>,
+    linked_list: Mutex<CacheLinkeListState>,
 }
 
 impl LruPageCache {
@@ -63,9 +79,8 @@ impl LruPageCache {
 
         Self {
             capacity,
-            map: HashMap::with_capacity(capacity),
-            head: None,
-            tail: None,
+            map: DashMap::with_capacity(capacity),
+            linked_list: Mutex::new(CacheLinkeListState::new()),
         }
     }
 
@@ -80,10 +95,10 @@ impl LruPageCache {
 
     /// Returns pointer to entry and copies it (coping pointer is cheap). If entry doesn't exist, it returns None.
     fn get_ptr(&self, key: &PageCacheKey) -> Option<NonNull<PageCacheEntry>> {
-        self.map.get(key).copied()
+        self.map.get(key).map(|r| *r)
     }
 
-    pub fn peek(&mut self, key: &PageCacheKey, touch: bool) -> Option<MemPageRef> {
+    pub fn peek(&self, key: &PageCacheKey, touch: bool) -> Option<MemPageRef> {
         let mut ptr = self.get_ptr(key)?;
         if touch {
             self.unlink(ptr);
@@ -93,15 +108,15 @@ impl LruPageCache {
         Some(page)
     }
 
-    pub fn get(&mut self, key: &PageCacheKey) -> Option<MemPageRef> {
+    pub fn get(&self, key: &PageCacheKey) -> Option<MemPageRef> {
         self.peek(key, true)
     }
 
-    pub fn insert(&mut self, key: PageCacheKey, page: MemPageRef) -> CacheResult<()> {
+    pub fn insert(&self, key: PageCacheKey, page: MemPageRef) -> CacheResult<()> {
         self.try_insert(key, page)
     }
 
-    fn try_insert(&mut self, key: PageCacheKey, page: MemPageRef) -> CacheResult<()> {
+    fn try_insert(&self, key: PageCacheKey, page: MemPageRef) -> CacheResult<()> {
         if self.contains_key(&key) {
             return Err(CacheError::KeyExists);
         }
@@ -118,11 +133,11 @@ impl LruPageCache {
         Ok(())
     }
 
-    pub fn delete(&mut self, key: PageCacheKey) -> CacheResult<()> {
+    pub fn delete(&self, key: PageCacheKey) -> CacheResult<()> {
         self.try_delete(key, true)
     }
 
-    fn try_delete(&mut self, key: PageCacheKey, clean_page: bool) -> CacheResult<()> {
+    fn try_delete(&self, key: PageCacheKey, clean_page: bool) -> CacheResult<()> {
         if !self.contains_key(&key) {
             return Ok(());
         }
@@ -131,7 +146,7 @@ impl LruPageCache {
         // Detach before deleting.
         self.detach(entry, clean_page)?;
 
-        let ptr = self.map.remove(&key).unwrap();
+        let (_, ptr) = self.map.remove(&key).unwrap();
         unsafe {
             // Creates Box that owns entry and is dropped
             let _ = Box::from_raw(ptr.as_ptr());
@@ -141,10 +156,10 @@ impl LruPageCache {
     }
 
     /// Removes entry from linked list and eventiualy cleans up page from memory (returns `Buffer` to `BufferPool`).
-    fn detach(&mut self, mut entry: NonNull<PageCacheEntry>, clean_page: bool) -> CacheResult<()> {
+    fn detach(&self, mut entry: NonNull<PageCacheEntry>, clean_page: bool) -> CacheResult<()> {
         let entry_mut = unsafe { entry.as_mut() };
 
-        if entry_mut.page.is_locked() {
+        if entry_mut.page.is_locked() { 
             return Err(CacheError::PageLocked);
         }
         if entry_mut.page.is_dirty() {
@@ -165,7 +180,7 @@ impl LruPageCache {
     }
 
     /// Disconnects entry from linked list.
-    fn unlink(&mut self, mut entry: NonNull<PageCacheEntry>) {
+    fn unlink(&self, mut entry: NonNull<PageCacheEntry>) {
         let (next, prev) = unsafe {
             let entry_mut = entry.as_mut();
             let next = entry_mut.next;
@@ -176,19 +191,20 @@ impl LruPageCache {
 
             (next, prev)
         };
+        let mut linked_list = self.linked_list.lock();
 
         match (prev, next) {
             (None, None) => {
-                self.head = None;
-                self.tail = None;
+                linked_list.head = None;
+                linked_list.tail = None;
             }
             (None, Some(mut n)) => {
                 unsafe { n.as_mut().prev = None };
-                self.head.replace(n);
+                linked_list.head.replace(n);
             }
             (Some(mut p), None) => {
                 unsafe { p.as_mut().next = None };
-                self.tail.replace(p);
+                linked_list.tail.replace(p);
             }
             (Some(mut p), Some(mut n)) => unsafe {
                 p.as_mut().next = Some(n);
@@ -198,21 +214,25 @@ impl LruPageCache {
     }
 
     /// Inserts entry before head. To work correctly use `Self::detach` before.
-    fn touch(&mut self, mut entry: NonNull<PageCacheEntry>) {
-        if let Some(mut head) = self.head {
+    fn touch(&self, mut entry: NonNull<PageCacheEntry>) {
+        let mut linked_list = self.linked_list.lock();
+
+        if let Some(mut head) = linked_list.head {
             unsafe {
                 entry.as_mut().next.replace(head);
                 head.as_mut().prev = Some(entry);
             }
         }
 
-        if self.tail.is_none() {
-            self.tail.replace(entry);
+        if linked_list.tail.is_none() {
+            linked_list.tail.replace(entry);
         }
-        self.head.replace(entry);
+        linked_list.head.replace(entry);
     }
 
-    fn make_room_for(&mut self, entries_num: usize) -> CacheResult<()> {
+    fn make_room_for(&self, entries_num: usize) -> CacheResult<()> {
+        let linked_list = self.linked_list.lock();
+
         if entries_num > self.capacity {
             return Err(CacheError::Full);
         }
@@ -225,7 +245,7 @@ impl LruPageCache {
         }
 
         // Now we need to handle case when there are too many entires, so we need to delete oldest ones (closest to the tail)
-        let tail = self.tail.ok_or(CacheError::Internal(format!(
+        let tail = linked_list.tail.ok_or(CacheError::Internal(format!(
             "Page cache of length {} exprected to have a tail",
             self.len()
         )))?;
@@ -250,8 +270,9 @@ impl LruPageCache {
     }
 
     /// Deletes all entries. Sets head and tail to `None`.
-    pub fn clear(&mut self) -> CacheResult<()> {
-        let mut current = self.head;
+    pub fn clear(&self) -> CacheResult<()> {
+        let mut linked_list = self.linked_list.lock();
+        let mut current = linked_list.head;
 
         while let Some(mut c) = current {
             let entry = unsafe { c.as_mut() };
@@ -270,11 +291,11 @@ impl LruPageCache {
             current = next;
         }
 
-        let _ = self.head.take();
-        let _ = self.tail.take();
+        let _ = linked_list.head.take();
+        let _ = linked_list.tail.take();
 
-        assert!(self.head.is_none());
-        assert!(self.tail.is_none());
+        assert!(linked_list.head.is_none());
+        assert!(linked_list.tail.is_none());
         assert!(self.map.is_empty());
 
         Ok(())
@@ -283,8 +304,9 @@ impl LruPageCache {
 
 impl Debug for LruPageCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let linked_list = self.linked_list.lock();
         let mut debug_vec = vec![];
-        let mut current = self.head;
+        let mut current = linked_list.head;
 
         while let Some(c) = current {
             let entry = unsafe { c.as_ref() };

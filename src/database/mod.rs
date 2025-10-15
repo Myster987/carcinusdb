@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use parking_lot::Mutex;
-
 use crate::{
     error::DatabaseResult,
     storage::{buffer_pool::GlobalBufferPool, cache::LruPageCache},
@@ -42,7 +40,7 @@ pub struct DatabaseConfig {
 #[derive(Debug)]
 pub struct Database {
     global_pool: GlobalBufferPool,
-    cache: Arc<Mutex<LruPageCache>>,
+    cache: Arc<LruPageCache>,
 }
 
 impl Database {
@@ -50,7 +48,7 @@ impl Database {
         let global_pool = GlobalBufferPool::default(config.page_size, config.pool_init_size);
         Self {
             global_pool,
-            cache: Arc::new(Mutex::new(LruPageCache::new(config.cache_capacity))),
+            cache: Arc::new(LruPageCache::new(config.cache_capacity)),
         }
     }
 }

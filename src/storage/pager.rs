@@ -141,7 +141,7 @@ pub struct Pager {
     /// Each pager gets local wal to sync with other pagers
     wal: LocalWal,
     /// Reference to global LRU cache
-    page_cache: Arc<Mutex<LruPageCache>>,
+    pub page_cache: Arc<LruPageCache>,
     page_size: u16,
     reserved_space: u8,
 }
@@ -151,7 +151,7 @@ impl Pager {
         io: BlockIO<File>,
         buffer_pool: LocalBufferPool,
         wal: LocalWal,
-        page_cache: Arc<Mutex<LruPageCache>>,
+        page_cache: Arc<LruPageCache>,
         page_size: u16,
         reserved_space: u8,
     ) -> StorageResult<Self> {
@@ -176,7 +176,7 @@ impl Pager {
 
     pub fn read_page(&mut self, page_number: PageNumber) -> StorageResult<MemPageRef> {
         // check cache...
-        if let Some(cached_page) = self.page_cache.lock().get(&page_number) {
+        if let Some(cached_page) = self.page_cache.get(&page_number) {
             return Ok(cached_page.clone());
         }
 
@@ -193,7 +193,7 @@ impl Pager {
         // read from disk
         let page = self.read_page_from_disk(page_number, page_wrapper)?;
 
-        self.page_cache.lock().insert(page_number, page.clone())?;
+        self.page_cache.insert(page_number, page.clone())?;
 
         Ok(page)
     }
@@ -203,15 +203,28 @@ impl Pager {
         page_number: PageNumber,
         page: MemPageRef,
     ) -> StorageResult<MemPageRef> {
+        let page = begin_read_page(page)?;
         let mut buf = self.buffer_pool.get();
-        page.set_locked();
 
         let read_result = self.io.read(page_number, &mut buf[..]);
 
         complete_read_page(read_result, page, buf)
     }
 
-    pub fn write(&mut self, page_number: PageNumber, buffer: &[u8]) -> StorageResult<usize> {
+    pub fn write_page(
+        &mut self,
+        page_number: PageNumber,
+        page: MemPageRef,
+    ) -> StorageResult<MemPageRef> {
+        let page = begin_write_page(page)?;
+        let buf = page.get_content().as_ptr();
+
+        let write_result = self.write_raw(page_number, buf);
+
+        complete_write_page(write_result, page)
+    }
+
+    fn write_raw(&mut self, page_number: PageNumber, buffer: &[u8]) -> std::io::Result<usize> {
         Ok(self.io.write(page_number, buffer)?)
     }
 

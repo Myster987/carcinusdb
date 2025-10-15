@@ -167,7 +167,7 @@ impl Page {
         }
     }
 
-    pub fn alloc(offset: usize, size: usize, drop: Option<DropFn>) -> Self {
+    pub fn alloc(size: usize, drop: Option<DropFn>) -> Self {
         let buf = Buffer::alloc_page(size, drop);
         Self::new(Arc::new(RefCell::new(buf)))
     }
