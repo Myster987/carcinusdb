@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use parking_lot::Mutex;
 
 use crate::storage::buffer_pool::LocalBufferPool;
-use crate::storage::cache::LruPageCache;
+use crate::storage::cache::ShardedLruCache;
 use crate::storage::page::PageType;
 use crate::storage::wal::LocalWal;
 use crate::storage::{Error, StorageResult};
@@ -141,7 +141,7 @@ pub struct Pager {
     /// Each pager gets local wal to sync with other pagers
     wal: LocalWal,
     /// Reference to global LRU cache
-    pub page_cache: Arc<LruPageCache>,
+    pub page_cache: Arc<ShardedLruCache>,
     page_size: u16,
     reserved_space: u8,
 }
@@ -151,7 +151,7 @@ impl Pager {
         io: BlockIO<File>,
         buffer_pool: LocalBufferPool,
         wal: LocalWal,
-        page_cache: Arc<LruPageCache>,
+        page_cache: Arc<ShardedLruCache>,
         page_size: u16,
         reserved_space: u8,
     ) -> StorageResult<Self> {

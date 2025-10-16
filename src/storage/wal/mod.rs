@@ -15,7 +15,12 @@ use parking_lot::{Mutex, RwLock};
 use crate::{
     os::{Open, OpenOptions},
     storage::{
-        buffer_pool::LocalBufferPool, cache::LruPageCache, page::MAX_PAGE_SIZE, pager::{self, MemPageRef, Pager}, wal::locks::{PackedU64, ReadGuard, ReadersPool, WriteGuard}, Error, FrameNumber, PageNumber, StorageResult
+        Error, FrameNumber, PageNumber, StorageResult,
+        buffer_pool::LocalBufferPool,
+        cache::ShardedLruCache,
+        page::MAX_PAGE_SIZE,
+        pager::{self, MemPageRef, Pager},
+        wal::locks::{PackedU64, ReadGuard, ReadersPool, WriteGuard},
     },
     utils::{
         self,

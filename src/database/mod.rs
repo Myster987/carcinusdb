@@ -1,8 +1,10 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use crate::{
     error::DatabaseResult,
-    storage::{buffer_pool::GlobalBufferPool, cache::LruPageCache},
+    storage::{
+        buffer_pool::GlobalBufferPool, cache::ShardedLruCache, pager::Pager, wal::WalManager,
+    },
     tcp::server::{TcpServer, connection::Connection},
 };
 
@@ -32,23 +34,35 @@ pub fn handle_connection(conn: Connection) -> DatabaseResult<()> {
 
 #[derive(Debug)]
 pub struct DatabaseConfig {
+    db_path_path: PathBuf,
     page_size: usize,
     cache_capacity: usize,
     pool_init_size: usize,
 }
 
-#[derive(Debug)]
 pub struct Database {
+    config: DatabaseConfig,
     global_pool: GlobalBufferPool,
-    cache: Arc<LruPageCache>,
+    wal_manager: WalManager,
+    cache: Arc<ShardedLruCache>,
 }
 
 impl Database {
-    pub fn new(config: DatabaseConfig) -> Self {
-        let global_pool = GlobalBufferPool::default(config.page_size, config.pool_init_size);
-        Self {
-            global_pool,
-            cache: Arc::new(LruPageCache::new(config.cache_capacity)),
-        }
+    pub fn new(db_file_path: PathBuf) -> Self {
+        todo!()
+        // let global_pool = GlobalBufferPool::default(config.page_size, config.pool_init_size);
+        // let wal_manager = WalManager::new(wal_file_path, db_file, config.page_size);
+        // let cache = Arc::new(ShardedLruCache::new(config.cache_capacity));
+
+        // Self {
+        //     config,
+        //     global_pool,
+        //     wal_manager,
+        //     cache,
+        // }
+    }
+
+    pub fn pager(&self) -> Pager {
+        todo!()
     }
 }

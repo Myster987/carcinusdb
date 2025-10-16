@@ -1,6 +1,10 @@
-use std::{fmt::Debug, ptr::NonNull};
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    hash::{BuildHasher, Hash, Hasher, RandomState},
+    ptr::NonNull,
+};
 
-use dashmap::DashMap;
 use parking_lot::Mutex;
 use thiserror::Error;
 
@@ -47,30 +51,95 @@ impl PageCacheEntry {
     }
 }
 
-/// In LRU wrapped in mutex to protect head and tail from concurrent access.
-pub struct CacheLinkeListState {
-    /// Head of doubly linked list.
-    head: Option<NonNull<PageCacheEntry>>,
-    /// Tail of doubly ll.
-    tail: Option<NonNull<PageCacheEntry>>,
+pub struct ShardedLruCache<S: BuildHasher = RandomState> {
+    shards: Vec<Shard>,
+    hasher: S,
 }
 
-impl CacheLinkeListState {
-    pub fn new() -> Self {
+unsafe impl Send for ShardedLruCache {}
+unsafe impl Sync for ShardedLruCache {}
+
+const DEFAULT_SHARD_COUNT: usize = 16;
+
+impl ShardedLruCache {
+    pub fn new(capacity: usize) -> Self {
+        let per_shard_capacity = (capacity + DEFAULT_SHARD_COUNT - 1) / DEFAULT_SHARD_COUNT;
+
         Self {
-            head: None,
-            tail: None,
+            shards: (0..DEFAULT_SHARD_COUNT)
+                .map(|_| Mutex::new(LruPageCache::new(per_shard_capacity)))
+                .collect(),
+            hasher: RandomState::default(),
         }
     }
 }
 
+impl<S: BuildHasher> ShardedLruCache<S> {
+    fn get_shard(&self, key: &PageCacheKey) -> &Shard {
+        let mut hasher = self.hasher.build_hasher();
+
+        key.hash(&mut hasher);
+
+        let h = hasher.finish() as usize;
+        let shard_idx = h % DEFAULT_SHARD_COUNT;
+
+        &self.shards[shard_idx]
+    }
+
+    pub fn get(&self, key: &PageCacheKey) -> Option<MemPageRef> {
+        self.get_shard(key).lock().get(key)
+    }
+
+    pub fn insert(&self, key: PageCacheKey, page: MemPageRef) -> CacheResult<()> {
+        self.get_shard(&key).lock().insert(key, page)
+    }
+
+    pub fn delete(&self, key: PageCacheKey) -> CacheResult<()> {
+        self.get_shard(&key).lock().delete(key)
+    }
+
+    pub fn clear(&self) -> CacheResult<()> {
+        for shard in &self.shards {
+            shard.lock().clear()?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<S: BuildHasher> Drop for ShardedLruCache<S> {
+    fn drop(&mut self) {
+        self.clear().unwrap();
+    }
+}
+
+impl Debug for ShardedLruCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut shards_representation = Vec::with_capacity(self.shards.len());
+
+        for (i, shard) in self.shards.iter().enumerate() {
+            shards_representation.push(format!("shard {i}: {:?}", shard.lock()));
+        }
+
+        f.write_str(&format!(
+            "ShardedLruCache({}\n)",
+            shards_representation.join(",\n ")
+        ))
+    }
+}
+
+type Shard = Mutex<LruPageCache>;
+
 /// Simple LRU cache implementation using hashmap and doubly linked list.
-pub struct LruPageCache {
+struct LruPageCache {
     /// Total capacity of cache (in pages)
     capacity: usize,
     /// Hashmap of cache entries.
-    map: DashMap<PageCacheKey, NonNull<PageCacheEntry>>,
-    linked_list: Mutex<CacheLinkeListState>,
+    map: HashMap<PageCacheKey, NonNull<PageCacheEntry>>,
+    /// Head of doubly linked list.
+    head: Option<NonNull<PageCacheEntry>>,
+    /// Tail of doubly ll.
+    tail: Option<NonNull<PageCacheEntry>>,
 }
 
 impl LruPageCache {
@@ -79,8 +148,9 @@ impl LruPageCache {
 
         Self {
             capacity,
-            map: DashMap::with_capacity(capacity),
-            linked_list: Mutex::new(CacheLinkeListState::new()),
+            map: HashMap::with_capacity(capacity),
+            head: None,
+            tail: None,
         }
     }
 
@@ -98,7 +168,7 @@ impl LruPageCache {
         self.map.get(key).map(|r| *r)
     }
 
-    pub fn peek(&self, key: &PageCacheKey, touch: bool) -> Option<MemPageRef> {
+    pub fn peek(&mut self, key: &PageCacheKey, touch: bool) -> Option<MemPageRef> {
         let mut ptr = self.get_ptr(key)?;
         if touch {
             self.unlink(ptr);
@@ -108,15 +178,15 @@ impl LruPageCache {
         Some(page)
     }
 
-    pub fn get(&self, key: &PageCacheKey) -> Option<MemPageRef> {
+    pub fn get(&mut self, key: &PageCacheKey) -> Option<MemPageRef> {
         self.peek(key, true)
     }
 
-    pub fn insert(&self, key: PageCacheKey, page: MemPageRef) -> CacheResult<()> {
+    pub fn insert(&mut self, key: PageCacheKey, page: MemPageRef) -> CacheResult<()> {
         self.try_insert(key, page)
     }
 
-    fn try_insert(&self, key: PageCacheKey, page: MemPageRef) -> CacheResult<()> {
+    fn try_insert(&mut self, key: PageCacheKey, page: MemPageRef) -> CacheResult<()> {
         if self.contains_key(&key) {
             return Err(CacheError::KeyExists);
         }
@@ -133,11 +203,11 @@ impl LruPageCache {
         Ok(())
     }
 
-    pub fn delete(&self, key: PageCacheKey) -> CacheResult<()> {
+    pub fn delete(&mut self, key: PageCacheKey) -> CacheResult<()> {
         self.try_delete(key, true)
     }
 
-    fn try_delete(&self, key: PageCacheKey, clean_page: bool) -> CacheResult<()> {
+    fn try_delete(&mut self, key: PageCacheKey, clean_page: bool) -> CacheResult<()> {
         if !self.contains_key(&key) {
             return Ok(());
         }
@@ -146,7 +216,7 @@ impl LruPageCache {
         // Detach before deleting.
         self.detach(entry, clean_page)?;
 
-        let (_, ptr) = self.map.remove(&key).unwrap();
+        let ptr = self.map.remove(&key).unwrap();
         unsafe {
             // Creates Box that owns entry and is dropped
             let _ = Box::from_raw(ptr.as_ptr());
@@ -156,10 +226,10 @@ impl LruPageCache {
     }
 
     /// Removes entry from linked list and eventiualy cleans up page from memory (returns `Buffer` to `BufferPool`).
-    fn detach(&self, mut entry: NonNull<PageCacheEntry>, clean_page: bool) -> CacheResult<()> {
+    fn detach(&mut self, mut entry: NonNull<PageCacheEntry>, clean_page: bool) -> CacheResult<()> {
         let entry_mut = unsafe { entry.as_mut() };
 
-        if entry_mut.page.is_locked() { 
+        if entry_mut.page.is_locked() {
             return Err(CacheError::PageLocked);
         }
         if entry_mut.page.is_dirty() {
@@ -180,7 +250,7 @@ impl LruPageCache {
     }
 
     /// Disconnects entry from linked list.
-    fn unlink(&self, mut entry: NonNull<PageCacheEntry>) {
+    fn unlink(&mut self, mut entry: NonNull<PageCacheEntry>) {
         let (next, prev) = unsafe {
             let entry_mut = entry.as_mut();
             let next = entry_mut.next;
@@ -191,20 +261,19 @@ impl LruPageCache {
 
             (next, prev)
         };
-        let mut linked_list = self.linked_list.lock();
 
         match (prev, next) {
             (None, None) => {
-                linked_list.head = None;
-                linked_list.tail = None;
+                self.head = None;
+                self.tail = None;
             }
             (None, Some(mut n)) => {
                 unsafe { n.as_mut().prev = None };
-                linked_list.head.replace(n);
+                self.head.replace(n);
             }
             (Some(mut p), None) => {
                 unsafe { p.as_mut().next = None };
-                linked_list.tail.replace(p);
+                self.tail.replace(p);
             }
             (Some(mut p), Some(mut n)) => unsafe {
                 p.as_mut().next = Some(n);
@@ -214,25 +283,21 @@ impl LruPageCache {
     }
 
     /// Inserts entry before head. To work correctly use `Self::detach` before.
-    fn touch(&self, mut entry: NonNull<PageCacheEntry>) {
-        let mut linked_list = self.linked_list.lock();
-
-        if let Some(mut head) = linked_list.head {
+    fn touch(&mut self, mut entry: NonNull<PageCacheEntry>) {
+        if let Some(mut head) = self.head {
             unsafe {
                 entry.as_mut().next.replace(head);
                 head.as_mut().prev = Some(entry);
             }
         }
 
-        if linked_list.tail.is_none() {
-            linked_list.tail.replace(entry);
+        if self.tail.is_none() {
+            self.tail.replace(entry);
         }
-        linked_list.head.replace(entry);
+        self.head.replace(entry);
     }
 
-    fn make_room_for(&self, entries_num: usize) -> CacheResult<()> {
-        let linked_list = self.linked_list.lock();
-
+    fn make_room_for(&mut self, entries_num: usize) -> CacheResult<()> {
         if entries_num > self.capacity {
             return Err(CacheError::Full);
         }
@@ -245,7 +310,7 @@ impl LruPageCache {
         }
 
         // Now we need to handle case when there are too many entires, so we need to delete oldest ones (closest to the tail)
-        let tail = linked_list.tail.ok_or(CacheError::Internal(format!(
+        let tail = self.tail.ok_or(CacheError::Internal(format!(
             "Page cache of length {} exprected to have a tail",
             self.len()
         )))?;
@@ -270,9 +335,8 @@ impl LruPageCache {
     }
 
     /// Deletes all entries. Sets head and tail to `None`.
-    pub fn clear(&self) -> CacheResult<()> {
-        let mut linked_list = self.linked_list.lock();
-        let mut current = linked_list.head;
+    pub fn clear(&mut self) -> CacheResult<()> {
+        let mut current = self.head;
 
         while let Some(mut c) = current {
             let entry = unsafe { c.as_mut() };
@@ -291,11 +355,11 @@ impl LruPageCache {
             current = next;
         }
 
-        let _ = linked_list.head.take();
-        let _ = linked_list.tail.take();
+        let _ = self.head.take();
+        let _ = self.tail.take();
 
-        assert!(linked_list.head.is_none());
-        assert!(linked_list.tail.is_none());
+        assert!(self.head.is_none());
+        assert!(self.tail.is_none());
         assert!(self.map.is_empty());
 
         Ok(())
@@ -304,9 +368,8 @@ impl LruPageCache {
 
 impl Debug for LruPageCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let linked_list = self.linked_list.lock();
         let mut debug_vec = vec![];
-        let mut current = linked_list.head;
+        let mut current = self.head;
 
         while let Some(c) = current {
             let entry = unsafe { c.as_ref() };
@@ -355,6 +418,29 @@ mod tests {
 
         lry_cache.clear()?;
         println!("{:?}", lry_cache);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_sharded() -> anyhow::Result<()> {
+        let sharded = Arc::new(ShardedLruCache::new(100));
+        let mut threads = Vec::new();
+
+        for i in 0..2 {
+            let sharded_clone = sharded.clone();
+            threads.push(std::thread::spawn(move || {
+                for j in 10 * i..10 * (i + 1) {
+                    let _ = sharded_clone.insert(j, Arc::new(MemPage::new(j)));
+                }
+            }));
+        }
+
+        for t in threads {
+            t.join().unwrap();
+        }
+
+        println!("{:?}", sharded);
 
         Ok(())
     }
