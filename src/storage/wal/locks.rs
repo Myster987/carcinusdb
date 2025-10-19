@@ -44,8 +44,11 @@ impl Semaphore {
     }
 }
 
+/// Pool of all avalible readers that are allowed to read from WAL.
 pub struct ReadersPool<const READERS_NUM: usize> {
+    /// Array of atomic u32 that keeps track of `min_frame` for each reader.
     slots: [AtomicU32; READERS_NUM],
+    /// [`Backoff`] to don't spam other atomic when trying to acquire read lock.
     backoff: Backoff,
 }
 
@@ -59,6 +62,8 @@ impl<const READERS_NUM: usize> ReadersPool<READERS_NUM> {
         }
     }
 
+    /// Returns smallest active frame that is currently visible. If no lock is held,
+    /// then it returns `FrameNumber::MAX`.
     pub fn min_active_frame(&self) -> FrameNumber {
         let mut min_frame = FrameNumber::MAX;
 
@@ -72,10 +77,14 @@ impl<const READERS_NUM: usize> ReadersPool<READERS_NUM> {
         min_frame
     }
 
+    /// Retruns `min_frame` at given slot. This operation is atomic.
     pub fn get_min_frame(&self, slot_id: usize) -> FrameNumber {
         self.slots[slot_id].load(Ordering::Acquire)
     }
 
+    /// Acquires read lock and sets `min_visible` frame for it with `get_min_visible` fn.
+    /// When all locks are in use it starts exponential backoff (if backoff reaches
+    /// certein point, it updates `min_visible`).
     pub fn acquire<'a, F>(
         self: Arc<Self>,
         checkpoint_guard: RwLockReadGuard<'a, ()>,

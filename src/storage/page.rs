@@ -13,9 +13,11 @@ use crate::{
     },
 };
 
+pub const DATABASE_HEADER_SIZE: usize = size_of::<DatabaseHeader>();
+
 pub const DEFAULT_PAGE_SIZE: u16 = 4096;
 
-const DEFAULT_CACHE_SIZE: i32 = -2000;
+const DEFAULT_CACHE_SIZE: u32 = 2000;
 
 pub const MIN_PAGE_SIZE: usize = 512;
 pub const MAX_PAGE_SIZE: usize = 64 << 10;
@@ -33,6 +35,7 @@ pub fn max_cell_size(usable_space: usize) -> usize {
     ((usable_space - 12) * 64 / 255) - 23
 }
 
+#[repr(C)]
 #[derive(Debug)]
 pub struct DatabaseHeader {
     /// Version number of db.
@@ -40,7 +43,7 @@ pub struct DatabaseHeader {
     /// Size of each page in database.
     page_size: u16,
     /// Nummber of bytes reserved at the end of each `Page`. Default is 0
-    pub reserved_space: u8,
+    pub reserved_space: u16,
     /// Counts how many times database file was changed. Increments on each update.
     change_counter: u32,
     /// Size of database in `Pages`.
@@ -49,10 +52,8 @@ pub struct DatabaseHeader {
     pub freelist_trunk_page: PageNumber,
     /// Total number of freelist pages.
     pub freelist_pages: u32,
-    /// Increments when schema changes.
-    schema_cookie: u32,
-    /// Cache size is stored as negative number, and it means that it holds X KiB of memory.
-    pub default_page_cache_size: i32,
+    /// Number of `pages` to cache.
+    pub default_page_cache_size: u32,
 }
 
 impl DatabaseHeader {
@@ -62,6 +63,39 @@ impl DatabaseHeader {
         } else {
             self.page_size as usize
         }
+    }
+
+    pub fn from_bytes(buffer: &[u8]) -> Self {
+        let version = u32::from_le_bytes(buffer[0..4].try_into().unwrap());
+        let page_size = u16::from_le_bytes(buffer[4..6].try_into().unwrap());
+        let reserved_space = u16::from_le_bytes(buffer[6..8].try_into().unwrap());
+        let change_counter = u32::from_le_bytes(buffer[8..12].try_into().unwrap());
+        let database_size = u32::from_le_bytes(buffer[12..16].try_into().unwrap());
+        let freelist_trunk_page = u32::from_le_bytes(buffer[16..20].try_into().unwrap());
+        let freelist_pages = u32::from_le_bytes(buffer[20..24].try_into().unwrap());
+        let default_page_cache_size = u32::from_le_bytes(buffer[24..28].try_into().unwrap());
+
+        Self {
+            version,
+            page_size,
+            reserved_space,
+            change_counter,
+            database_size,
+            freelist_trunk_page,
+            freelist_pages,
+            default_page_cache_size,
+        }
+    }
+
+    pub fn to_bytes(self, buffer: &mut [u8]) {
+        buffer[0..4].copy_from_slice(&self.version.to_le_bytes());
+        buffer[4..6].copy_from_slice(&self.page_size.to_le_bytes());
+        buffer[6..8].copy_from_slice(&self.reserved_space.to_le_bytes());
+        buffer[8..12].copy_from_slice(&self.change_counter.to_le_bytes());
+        buffer[12..16].copy_from_slice(&self.database_size.to_le_bytes());
+        buffer[16..20].copy_from_slice(&self.freelist_trunk_page.to_le_bytes());
+        buffer[20..24].copy_from_slice(&self.freelist_pages.to_le_bytes());
+        buffer[24..28].copy_from_slice(&self.default_page_cache_size.to_le_bytes());
     }
 }
 
@@ -75,23 +109,9 @@ impl Default for DatabaseHeader {
             database_size: 1,
             freelist_trunk_page: 0,
             freelist_pages: 0,
-            schema_cookie: 0,
             default_page_cache_size: DEFAULT_CACHE_SIZE,
         }
     }
-}
-
-/// Writes database header to buffer. Takes uses 31 bytes at the beginning.
-pub fn write_database_header(buf: &mut [u8], header: &DatabaseHeader) {
-    buf[..4].copy_from_slice(&header.version.to_le_bytes());
-    buf[4..6].copy_from_slice(&header.page_size.to_le_bytes());
-    buf[6] = header.reserved_space;
-    buf[7..11].copy_from_slice(&header.change_counter.to_le_bytes());
-    buf[11..15].copy_from_slice(&header.database_size.to_le_bytes());
-    buf[15..19].copy_from_slice(&header.freelist_trunk_page.to_le_bytes());
-    buf[19..23].copy_from_slice(&header.freelist_pages.to_le_bytes());
-    buf[23..27].copy_from_slice(&header.schema_cookie.to_le_bytes());
-    buf[27..31].copy_from_slice(&header.default_page_cache_size.to_le_bytes());
 }
 
 #[repr(u8)]

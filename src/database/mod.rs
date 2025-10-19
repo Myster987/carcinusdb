@@ -1,12 +1,21 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{fs::File, path::PathBuf, sync::Arc};
 
 use crate::{
     error::DatabaseResult,
+    os::{Open, OpenOptions},
     storage::{
-        buffer_pool::GlobalBufferPool, cache::ShardedLruCache, pager::Pager, wal::WalManager,
+        buffer_pool::GlobalBufferPool,
+        cache::ShardedLruCache,
+        page::{DATABASE_HEADER_SIZE, DEFAULT_PAGE_SIZE, DatabaseHeader},
+        pager::Pager,
+        wal::WalManager,
     },
     tcp::server::{TcpServer, connection::Connection},
+    utils::io::{BlockIO, IO},
 };
+
+pub const GLOBAL_INIT_POOL_SIZE: usize = 250;
+pub const LOCAL_INIT_POOL_SIZE: usize = 40;
 
 pub async fn run(hostname: String, port: u16) -> DatabaseResult<()> {
     log::info!("Starting CarcinusDB...");
@@ -32,37 +41,77 @@ pub fn handle_connection(conn: Connection) -> DatabaseResult<()> {
     Ok(())
 }
 
-#[derive(Debug)]
-pub struct DatabaseConfig {
-    db_path_path: PathBuf,
-    page_size: usize,
-    cache_capacity: usize,
-    pool_init_size: usize,
-}
-
 pub struct Database {
-    config: DatabaseConfig,
+    header: DatabaseHeader,
+    db_file: Arc<BlockIO<File>>,
     global_pool: GlobalBufferPool,
     wal_manager: WalManager,
     cache: Arc<ShardedLruCache>,
 }
 
 impl Database {
-    pub fn new(db_file_path: PathBuf) -> Self {
-        todo!()
-        // let global_pool = GlobalBufferPool::default(config.page_size, config.pool_init_size);
-        // let wal_manager = WalManager::new(wal_file_path, db_file, config.page_size);
-        // let cache = Arc::new(ShardedLruCache::new(config.cache_capacity));
+    pub fn new(db_file_path: PathBuf) -> DatabaseResult<Self> {
+        let mut header = (!db_file_path.exists()).then(|| DatabaseHeader::default());
 
-        // Self {
-        //     config,
-        //     global_pool,
-        //     wal_manager,
-        //     cache,
-        // }
+        let file = OpenOptions::default()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(db_file_path.clone())?;
+
+        if header.is_none() {
+            let buf = &mut [0; DATABASE_HEADER_SIZE];
+            file.pread(0, buf)?;
+            let h = DatabaseHeader::from_bytes(buf);
+
+            header = Some(h);
+        }
+
+        let db_header = header.unwrap();
+        let db_file = Arc::new(BlockIO::new(
+            file,
+            db_header.get_page_size(),
+            DATABASE_HEADER_SIZE,
+        ));
+        let wal_file_path = {
+            let mut path = db_file_path;
+
+            if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
+                let new_file_name = format!("{}-wal", file_name);
+                path.set_file_name(new_file_name);
+            } else {
+                panic!("Expected to include database file name in path: {:?}", path);
+            }
+
+            path
+        };
+
+        let global_pool =
+            GlobalBufferPool::default(db_header.get_page_size(), GLOBAL_INIT_POOL_SIZE);
+        let wal_manager = WalManager::new(
+            wal_file_path,
+            db_file.clone(),
+            db_header.get_page_size() as u32,
+        )?;
+        let cache = Arc::new(ShardedLruCache::new(
+            db_header.default_page_cache_size as usize,
+        ));
+
+        Ok(Self {
+            header: db_header,
+            db_file,
+            global_pool,
+            wal_manager,
+            cache,
+        })
     }
 
     pub fn pager(&self) -> Pager {
-        todo!()
+        Pager::new(
+            self.db_file.clone(),
+            self.global_pool.local_pool(LOCAL_INIT_POOL_SIZE),
+            self.wal_manager.local_wal(),
+            self.cache.clone(),
+        )
     }
 }

@@ -135,43 +135,28 @@ impl MemPage {
 /// Is responsive for reading and writing to file
 pub struct Pager {
     /// I/O interface
-    io: BlockIO<File>,
+    io: Arc<BlockIO<File>>,
     /// Each pager gets it's dedicated local pool
     buffer_pool: LocalBufferPool,
     /// Each pager gets local wal to sync with other pagers
     wal: LocalWal,
     /// Reference to global LRU cache
     pub page_cache: Arc<ShardedLruCache>,
-    page_size: u16,
-    reserved_space: u8,
 }
 
 impl Pager {
-    pub fn begin_open(
-        io: BlockIO<File>,
+    pub fn new(
+        io: Arc<BlockIO<File>>,
         buffer_pool: LocalBufferPool,
         wal: LocalWal,
         page_cache: Arc<ShardedLruCache>,
-        page_size: u16,
-        reserved_space: u8,
-    ) -> StorageResult<Self> {
-        // let file = OpenOptions::default()
-        //     .create(true)
-        //     .read(true)
-        //     .write(true)
-        //     .sync_on_write(true)
-        //     .bypass_cache(true)
-        //     .lock(true)
-        //     .open(&path)?;
-
-        Ok(Self {
+    ) -> Self {
+        Self {
             io,
             buffer_pool,
             wal,
             page_cache,
-            page_size,
-            reserved_space,
-        })
+        }
     }
 
     pub fn read_page(&mut self, page_number: PageNumber) -> StorageResult<MemPageRef> {
