@@ -1,4 +1,8 @@
-use std::{fs::File, path::PathBuf, sync::Arc};
+use std::{
+    fs::File,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use crate::{
     error::DatabaseResult,
@@ -42,7 +46,7 @@ pub fn handle_connection(conn: Connection) -> DatabaseResult<()> {
 }
 
 pub struct Database {
-    header: DatabaseHeader,
+    header: Arc<Mutex<DatabaseHeader>>,
     db_file: Arc<BlockIO<File>>,
     global_pool: GlobalBufferPool,
     wal_manager: WalManager,
@@ -98,7 +102,7 @@ impl Database {
         ));
 
         Ok(Self {
-            header: db_header,
+            header: Arc::new(Mutex::new(db_header)),
             db_file,
             global_pool,
             wal_manager,
@@ -108,6 +112,7 @@ impl Database {
 
     pub fn pager(&self) -> Pager {
         Pager::new(
+            self.header.clone(),
             self.db_file.clone(),
             self.global_pool.local_pool(LOCAL_INIT_POOL_SIZE),
             self.wal_manager.local_wal(),

@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 
 use crate::storage::buffer_pool::LocalBufferPool;
 use crate::storage::cache::ShardedLruCache;
-use crate::storage::page::PageType;
+use crate::storage::page::{DatabaseHeader, PageType};
 use crate::storage::wal::LocalWal;
 use crate::storage::{Error, StorageResult};
 use crate::utils::buffer::Buffer;
@@ -134,6 +134,8 @@ impl MemPage {
 
 /// Is responsive for reading and writing to file
 pub struct Pager {
+    /// Reference to database header owned by `Database` struct.
+    db_header: Arc<Mutex<DatabaseHeader>>,
     /// I/O interface
     io: Arc<BlockIO<File>>,
     /// Each pager gets it's dedicated local pool
@@ -146,12 +148,14 @@ pub struct Pager {
 
 impl Pager {
     pub fn new(
+        db_header: Arc<Mutex<DatabaseHeader>>,
         io: Arc<BlockIO<File>>,
         buffer_pool: LocalBufferPool,
         wal: LocalWal,
         page_cache: Arc<ShardedLruCache>,
     ) -> Self {
         Self {
+            db_header,
             io,
             buffer_pool,
             wal,
@@ -188,7 +192,7 @@ impl Pager {
         page_number: PageNumber,
         page: MemPageRef,
     ) -> StorageResult<MemPageRef> {
-        let page = begin_read_page(page)?;
+        begin_read_page(&page)?;
         let mut buf = self.buffer_pool.get();
 
         let read_result = self.io.read(page_number, &mut buf[..]);
@@ -196,20 +200,18 @@ impl Pager {
         complete_read_page(read_result, page, buf)
     }
 
-    pub fn write_page(
-        &mut self,
-        page_number: PageNumber,
-        page: MemPageRef,
-    ) -> StorageResult<MemPageRef> {
-        let page = begin_write_page(page)?;
-        let buf = page.get_content().as_ptr();
+    pub fn write_page(&mut self, page: MemPageRef) -> StorageResult<MemPageRef> {
+        begin_write_page(&page)?;
 
-        let write_result = self.write_raw(page_number, buf);
-
-        complete_write_page(write_result, page)
+        self.wal
+            .append_frame(page, self.db_header.lock().database_size)
     }
 
-    fn write_raw(&mut self, page_number: PageNumber, buffer: &[u8]) -> std::io::Result<usize> {
+    pub(crate) fn write_raw(
+        &mut self,
+        page_number: PageNumber,
+        buffer: &[u8],
+    ) -> std::io::Result<usize> {
         Ok(self.io.write(page_number, buffer)?)
     }
 
@@ -223,14 +225,14 @@ impl Pager {
 }
 
 /// Prepares page for read operation
-pub fn begin_read_page(page: MemPageRef) -> StorageResult<MemPageRef> {
+pub fn begin_read_page(page: &MemPageRef) -> StorageResult<()> {
     page.set_locked();
-    Ok(page)
+    Ok(())
 }
 
-pub fn begin_write_page(page: MemPageRef) -> StorageResult<MemPageRef> {
+pub fn begin_write_page(page: &MemPageRef) -> StorageResult<()> {
     page.set_locked();
-    Ok(page)
+    Ok(())
 }
 
 /// Should be universal to both disk and wal reads. Takes io::Result and if it

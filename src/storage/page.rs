@@ -87,7 +87,13 @@ impl DatabaseHeader {
         }
     }
 
-    pub fn to_bytes(self, buffer: &mut [u8]) {
+    pub fn to_bytes(self) -> Vec<u8> {
+        let mut buffer = vec![0; DATABASE_HEADER_SIZE];
+        self.write_to_buffer(&mut buffer);
+        buffer
+    }
+
+    pub fn write_to_buffer(&self, buffer: &mut [u8]) {
         buffer[0..4].copy_from_slice(&self.version.to_le_bytes());
         buffer[4..6].copy_from_slice(&self.page_size.to_le_bytes());
         buffer[6..8].copy_from_slice(&self.reserved_space.to_le_bytes());
