@@ -30,7 +30,7 @@ pub trait FileOps {
     /// Truncates file to 0 length
     fn truncate(&mut self) -> io::Result<()>;
 
-    /// Attempts to persist data on disk    
+    /// Attempts to persist data on disk
     fn sync(&self) -> io::Result<()>;
 }
 
@@ -171,6 +171,22 @@ impl IO for File {
 
     /// Truncates beginning of a file (skips header). `bytes_to_remove` is deleted and rest is
     /// moved to beginning using [`libc::copy_file_range`].
+    ///
+    /// # Example
+    /// ```text
+    /// Block size: 10 bytes
+    /// Bytes to remove: 30
+    ///
+    /// Before:
+    /// +--------+---------+---------+---------+---------+---------+
+    /// | Header | Block 1 | Block 2 | Block 3 | Block 4 | Block 5 |
+    /// +--------+---------+---------+---------+---------+---------+
+    ///
+    /// After (Block 1, 2 and 3 were removed):
+    /// +--------+---------+---------+
+    /// | Header | Block 4 | Block 5 |
+    /// +--------+---------+---------+
+    /// ```
     fn truncate_beginning(&mut self, bytes_to_remove: u64, header_size: usize) -> io::Result<()> {
         let fd = self.as_raw_fd();
         let metadata = self.metadata()?;
@@ -295,6 +311,17 @@ impl<I: IO> BlockIO<I> {
         self.raw_write(0, buffer)
     }
 
+    /// Removes first `up_to_block_numer` (inclusive) from file. Shifts rest to
+    /// beginning of a file. For more information go to `IO::truncate_beginning`.
+    ///
+    /// # Example
+    /// ```text
+    /// File before: [Header, Block 1, Block 2, Block 3, Block 4, Block 5]
+    ///
+    /// up_to_block_numer = 3
+    ///
+    /// File after: [Header, Block 4, Block 5]
+    /// ```
     pub fn truncate_beginning(&self, up_to_block_number: BlockNumber) -> io::Result<()> {
         assert!(
             up_to_block_number > 0,
@@ -319,7 +346,7 @@ impl<I: Write> BlockIO<I> {
 }
 
 impl<I: FileOps> BlockIO<I> {
-    /// Makes syscall to kernel to write **flushed** buffers to disk.   
+    /// Makes syscall to kernel to write **flushed** buffers to disk.
     pub fn sync(&self) -> io::Result<()> {
         self.get_io().sync()
     }
