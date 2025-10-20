@@ -17,7 +17,6 @@ use crate::{
     storage::{
         Error, FrameNumber, PageNumber, StorageResult,
         buffer_pool::LocalBufferPool,
-        cache::ShardedLruCache,
         page::MAX_PAGE_SIZE,
         pager::{self, MemPageRef, Pager},
         wal::locks::{PackedU64, ReadGuard, ReadersPool, WriteGuard},
@@ -97,6 +96,22 @@ impl WalHeader {
         }
     }
 
+    pub fn to_bytes(self) -> Vec<u8> {
+        let mut buffer = vec![0; WAL_HEADER_SIZE];
+        self.write_to_buffer(&mut buffer);
+        buffer
+    }
+
+    pub fn write_to_buffer(&self, buffer: &mut [u8]) {
+        buffer[0..4].copy_from_slice(&self.page_size.to_le_bytes());
+        buffer[4..8].copy_from_slice(&self.checkpoint_seq_num.to_le_bytes());
+        buffer[8..12].copy_from_slice(&self.last_checkpointed.to_le_bytes());
+        buffer[12..16].copy_from_slice(&self.db_size.to_le_bytes());
+        buffer[16..20].copy_from_slice(&self.backfilled_number.to_le_bytes());
+        buffer[20..24].copy_from_slice(&self.checksum.0.to_le_bytes());
+        buffer[24..28].copy_from_slice(&self.checksum.1.to_le_bytes());
+    }
+
     fn checksum_self(&self, seed: Option<Checksum>) -> Checksum {
         let header_bytes = &utils::cast::bytes_of(self)[..WAL_HEADER_SIZE_NO_CHECKSUM];
         checksum_bytes(header_bytes, seed)
@@ -164,6 +179,7 @@ impl WalManager {
             .read(true)
             .write(true)
             .open(wal_file_path)?;
+
         let wal_file = Arc::new(BlockIO::new(file, page_size as usize, WAL_HEADER_SIZE));
 
         if header.is_none() {
@@ -212,6 +228,8 @@ pub struct GlobalWal {
 
     /// Number of frames transfered to DB from WAL.
     backfilled_number: AtomicU32,
+    /// Counter of checkpoints
+    checkpoint_seq_num: AtomicU32,
 
     /// Array of read locks. Each locks is atomic u32 which represents minimal frame number this transaction can see.
     readers: Arc<ReadersPool<READERS_NUM>>,
@@ -219,7 +237,7 @@ pub struct GlobalWal {
     writer: Mutex<()>,
     /// All transactions read or write must acquire this lock before they can do anything.
     /// When we want to run checkpoint we get write lock instead to block other transactions.
-    /// While this can couse latency spikes, it prevents WAL from growing indefinitely.   
+    /// While this can couse latency spikes, it prevents WAL from growing indefinitely.
     checkpoint_lock: RwLock<()>,
 }
 
@@ -231,6 +249,7 @@ impl GlobalWal {
     ) -> StorageResult<Self> {
         let frame_size = header.page_size as usize + FRAME_HEADER_SIZE;
         let backfilled_number = header.backfilled_number;
+        let checkpoint_seq_num = header.checkpoint_seq_num;
         let index = Arc::new(WalIndex::new());
 
         let min_frame = header.last_checkpointed;
@@ -268,6 +287,7 @@ impl GlobalWal {
             max_frame: AtomicU32::new(max_frame),
             last_checksum: AtomicU64::new(pack_u64(running_checksum.0, running_checksum.1)),
             backfilled_number: AtomicU32::new(backfilled_number),
+            checkpoint_seq_num: AtomicU32::new(checkpoint_seq_num),
             // by default it is set to u32::MAX to indicate that it is free and it is quite not possible for WAL to outgrow 17 TB of 4KB pages.
             readers: Arc::new(ReadersPool::new()),
             writer: Mutex::new(()),
@@ -291,6 +311,10 @@ impl GlobalWal {
         self.backfilled_number.load(Ordering::Acquire)
     }
 
+    pub fn get_checkpoint_seq_num(&self) -> u32 {
+        self.checkpoint_seq_num.load(Ordering::Acquire)
+    }
+
     pub fn set_min_frame(&self, value: FrameNumber) {
         self.min_frame.store(value, Ordering::Release);
     }
@@ -307,6 +331,10 @@ impl GlobalWal {
     pub fn set_backfilled_number(&self, value: u32) {
         self.backfilled_number.store(value, Ordering::Release);
     }
+
+    pub fn increment_checkpoint_seq_num(&self) {
+        self.checkpoint_seq_num.fetch_add(1, Ordering::Release);
+    }
 }
 
 pub struct LocalWal {
@@ -318,19 +346,15 @@ pub struct LocalWal {
     max_frame: u32,
     /// Copied from `GlobalWal` when beginning transaction.
     last_checksum: Checksum,
-    /// Buffer used for writing frames.
-    temp_buffer: Vec<u8>,
 }
 
 impl LocalWal {
     pub fn new(global_wal: Arc<GlobalWal>) -> Self {
-        let frame_size = global_wal.frame_size;
         Self {
             global_wal,
             min_frame: 0,
             max_frame: 0,
             last_checksum: (0, 0),
-            temp_buffer: vec![0; frame_size],
         }
     }
 
@@ -394,7 +418,7 @@ impl LocalWal {
     }
 
     /// Reads only page from WAL (skips header).
-    fn read_raw(&mut self, frame_number: FrameNumber, buffer: &mut [u8]) -> std::io::Result<usize> {
+    fn read_raw(&self, frame_number: FrameNumber, buffer: &mut [u8]) -> std::io::Result<usize> {
         let offset = WAL_HEADER_SIZE
             + (self.global_wal.frame_size * frame_number as usize)
             + FRAME_HEADER_SIZE;
@@ -414,7 +438,7 @@ impl LocalWal {
             return Ok(None);
         }
 
-        let page = pager::begin_read_page(page)?;
+        pager::begin_read_page(&page)?;
 
         let mut buffer = buffer_pool.get();
 
@@ -430,41 +454,13 @@ impl LocalWal {
     }
 
     /// Writes content of `self.temp_buffer` into WAL at given `frame_number`
-    fn write_raw(&mut self, frame_number: FrameNumber) -> std::io::Result<usize> {
-        self.global_wal
-            .wal_file
-            .write(frame_number, &self.temp_buffer)
+    fn write_raw(&self, frame_number: FrameNumber, buffer: &[u8]) -> std::io::Result<usize> {
+        self.global_wal.wal_file.write(frame_number, buffer)
     }
 
-    pub fn append_frame(
-        &mut self,
-        page_number: PageNumber,
-        page: MemPageRef,
-        db_size: u32,
-    ) -> StorageResult<MemPageRef> {
-        let page = pager::begin_write_page(page)?;
-        let frame_number = self.max_frame + 1;
-
-        let page_content = page.get_content().as_ptr();
-        let checksum = checksum_bytes(&page_content, Some(self.last_checksum));
-
-        let frame_header = FrameHeader {
-            page_number,
-            db_size,
-            checksum,
-        };
-
-        frame_header.to_bytes(&mut self.temp_buffer);
-        self.temp_buffer[FRAME_HEADER_SIZE..].copy_from_slice(&page_content);
-
-        let write_result = self.write_raw(frame_number);
-        let page = pager::complete_write_page(write_result, page)?;
-
-        self.last_checksum = checksum;
-        self.max_frame = frame_number;
-        self.global_wal.index.insert(page_number, frame_number);
-
-        Ok(page)
+    pub fn append_frame(&mut self, page: MemPageRef, db_size: u32) -> StorageResult<MemPageRef> {
+        self.append_vectored(vec![page], db_size)
+            .map(|mut res| res.pop().unwrap())
     }
 
     pub fn append_vectored(
@@ -526,30 +522,44 @@ impl LocalWal {
         max_frame > self.global_wal.checkpoint_size + backfilled_number
     }
 
-    pub fn checkpoint(&self, pager: &mut Pager) -> StorageResult<()> {
+    pub fn checkpoint(&mut self, pager: &mut Pager) -> StorageResult<()> {
         if !self.should_checkpoint() {
             return Ok(());
         }
 
         let exclusive_lock = self.global_wal.checkpoint_lock.write();
+        let mut wal_header = self.global_wal.header.lock();
 
         let max_frame = self.global_wal.get_max_frame();
 
         let frames_to_checkpoint = self.global_wal.index.latest_frames_sorted(max_frame);
+        let to_backfill = frames_to_checkpoint.len() as u32;
+        let mut temp_buffer = vec![0; self.global_wal.frame_size - FRAME_HEADER_SIZE];
 
         for (page_number, frame_number) in frames_to_checkpoint {
             if let Some(mem_page) = pager.page_cache.get(&page_number) {
                 if mem_page.is_dirty() {
-                    pager.write_page(page_number, mem_page)?;
+                    pager.write_page(mem_page)?;
                 }
             } else {
-                todo!()
+                self.read_raw(frame_number, &mut temp_buffer)?;
+                pager.write_raw(page_number, &temp_buffer)?;
             }
         }
 
         self.global_wal.db_file.flush()?;
         self.global_wal.db_file.sync()?;
 
+        wal_header.backfilled_number = to_backfill;
+        wal_header.checkpoint_seq_num = wal_header.checkpoint_seq_num.wrapping_add(1);
+
+        // wal_header.db_size = self.global_wal.db_file.s
+        // self.global_wal.set
+        // self.global_wal.set_backfilled_number(to_backfill as u32);
+        // self.global_wal.increment_checkpoint_seq_num();
+
+        // removes all frames from WAL leaving the header
+        self.global_wal.wal_file.truncate_beginning(max_frame)?;
         // if min_active_frame == self.global_wal.get_min_frame()
 
         todo!()
