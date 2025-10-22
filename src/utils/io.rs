@@ -4,9 +4,15 @@ use std::{
     io::{self, IoSlice, Seek, Write},
     os::fd::AsRawFd,
     path::Path,
+    sync::{Arc, OnceLock},
 };
 
 use libc::c_void;
+
+use crate::{
+    storage::{Error, StorageResult, page::Page, pager::MemPageRef},
+    utils::buffer::Buffer,
+};
 
 pub type BlockNumber = u32;
 
@@ -241,6 +247,18 @@ impl IO for File {
     }
 }
 
+trait StorageIO {
+    /// Reads block with given number. Includes header offset. This operation is atomic. `block_number starts at 1`.
+    fn read(&self, block_number: BlockNumber, buffer: &mut [u8]) -> io::Result<usize>;
+    /// Writes block at given number. Includes header offset. This operation is atomic. `page_number starts at 1`.
+    fn write(&self, block_number: BlockNumber, buffer: &[u8]) -> io::Result<usize>;
+    fn write_vectored(
+        &self,
+        block_number: BlockNumber,
+        buffers: &mut [IoSlice],
+    ) -> io::Result<usize>;
+}
+
 /// Wrapper to simplify working with page like structures on disk.
 #[derive(Debug)]
 pub struct BlockIO<I> {
@@ -268,42 +286,13 @@ impl<I: IO> BlockIO<I> {
         self.get_io().pread(offset, buffer)
     }
 
-    /// Reads block with given number. Includes header offset. This operation is atomic. `block_number starts at 1`.
-    pub fn read(&self, block_number: BlockNumber, buffer: &mut [u8]) -> io::Result<usize> {
-        assert!(block_number > 0, "block number must be grater than 0.");
-        let block_number = (block_number - 1) as usize;
-        let offset = self.header_size + block_number * self.block_size;
-        self.raw_read(offset, buffer)
-    }
-
     /// Reads header from beginning of a file. Note that buffer size must match header size. This operation is atomic.
     pub fn read_header(&self, buffer: &mut [u8]) -> io::Result<usize> {
         self.raw_read(0, buffer)
     }
-}
 
-impl<I: IO> BlockIO<I> {
     pub fn raw_write(&self, offset: usize, buffer: &[u8]) -> io::Result<usize> {
         self.get_io().pwrite(offset, buffer)
-    }
-
-    /// Writes block at given number. Includes header offset. This operation is atomic. `page_number starts at 1`.
-    pub fn write(&self, block_number: BlockNumber, buffer: &[u8]) -> io::Result<usize> {
-        assert!(block_number > 0, "block number must be grater than 0.");
-        let block_number = (block_number - 1) as usize;
-        let offset = self.header_size + block_number as usize * self.block_size;
-        self.raw_write(offset, buffer)
-    }
-
-    pub fn write_vectored(
-        &self,
-        block_number: BlockNumber,
-        buffers: &mut [IoSlice],
-    ) -> io::Result<usize> {
-        assert!(block_number > 0, "block number must be grater than 0.");
-        let block_number = (block_number - 1) as usize;
-        let offset = self.header_size + block_number as usize * self.block_size;
-        self.get_io().pwrite_vec(offset, buffers)
     }
 
     /// Writes header at the beginning of a file. Note that buffer size must match header size. This operation is atomic.
@@ -335,6 +324,33 @@ impl<I: IO> BlockIO<I> {
     }
 }
 
+impl<I: IO> StorageIO for BlockIO<I> {
+    fn read(&self, block_number: BlockNumber, buffer: &mut [u8]) -> io::Result<usize> {
+        assert!(block_number > 0, "block number must be grater than 0.");
+        let block_number = (block_number - 1) as usize;
+        let offset = self.header_size + block_number * self.block_size;
+        self.raw_read(offset, buffer)
+    }
+
+    fn write(&self, block_number: BlockNumber, buffer: &[u8]) -> io::Result<usize> {
+        assert!(block_number > 0, "block number must be grater than 0.");
+        let block_number = (block_number - 1) as usize;
+        let offset = self.header_size + block_number as usize * self.block_size;
+        self.raw_write(offset, buffer)
+    }
+
+    fn write_vectored(
+        &self,
+        block_number: BlockNumber,
+        buffers: &mut [IoSlice],
+    ) -> io::Result<usize> {
+        assert!(block_number > 0, "block number must be grater than 0.");
+        let block_number = (block_number - 1) as usize;
+        let offset = self.header_size + block_number as usize * self.block_size;
+        self.get_io().pwrite_vec(offset, buffers)
+    }
+}
+
 impl<I: Write> BlockIO<I> {
     /// Flush buffered contents to kernel.
     ///
@@ -363,4 +379,129 @@ impl BlockIO<File> {
     pub fn size_in_blocks(&self) -> io::Result<usize> {
         Ok((self.size()? - self.header_size) / self.block_size)
     }
+}
+
+pub type ReadJobBegin = dyn Fn(MemPageRef);
+pub type ReadJobComplete = dyn Fn(StorageResult<(usize, MemPageRef, Arc<Buffer>)>);
+
+pub type WriteJobBegin = dyn Fn(MemPageRef);
+pub type WriteJobComplete = dyn Fn(StorageResult<(usize, MemPageRef)>);
+
+pub struct Job {
+    job_type: JobType,
+    /// If one of the scheduled jobs failed, then whole job failed.
+    result: Option<StorageResult<usize>>,
+}
+
+impl Job {
+    pub fn new(job_type: JobType) -> Self {
+        Self {
+            job_type,
+            result: None,
+        }
+    }
+
+    /// Run this before io operation, to prep pages for given task.
+    pub fn begin(&self) {
+        match &self.job_type {
+            JobType::Read(r) => r.begin(),
+            JobType::Write(w) => w.begin(),
+        }
+    }
+
+    pub fn ok(&self, bytes_read: usize) {
+        let result = Ok(bytes_read);
+        self.complete(result);
+    }
+
+    pub fn error(&self, err: Error) {
+        let error = Err(err);
+        self.complete(error);
+    }
+
+    /// Run this after io operation.
+    pub fn complete(&self, result: StorageResult<usize>) {
+        match &self.job_type {
+            JobType::Read(r) => r.complete(result),
+            JobType::Write(w) => w.complete(result),
+        }
+    }
+}
+
+pub enum JobType {
+    Read(ReadJob),
+    Write(WriteJob),
+    // Group(GroupJob),
+}
+
+type JobFn = Arc<dyn StorageIO>;
+
+pub struct ReadJob {
+    mem_page: MemPageRef,
+    buffer: Arc<Buffer>,
+
+    begin: Box<ReadJobBegin>,
+    complete: Box<ReadJobComplete>,
+}
+
+impl ReadJob {
+    pub fn new(
+        mem_page: MemPageRef,
+        buffer: Arc<Buffer>,
+        begin: Box<ReadJobBegin>,
+        complete: Box<ReadJobComplete>,
+    ) -> Self {
+        Self {
+            mem_page,
+            buffer,
+            begin,
+            complete,
+        }
+    }
+}
+
+impl JobOperations for ReadJob {
+    fn begin(&self) {
+        (self.begin)(self.mem_page.clone())
+    }
+
+    fn complete(&self, bytes_read: StorageResult<usize>) {
+        (self.complete)(bytes_read.map(|b| (b, self.mem_page.clone(), self.buffer.clone())))
+    }
+}
+
+pub struct WriteJob {
+    mem_page: MemPageRef,
+
+    begin: Box<WriteJobBegin>,
+    complete: Box<WriteJobComplete>,
+}
+
+impl WriteJob {
+    pub fn new(
+        mem_page: MemPageRef,
+        begin: Box<WriteJobBegin>,
+        complete: Box<WriteJobComplete>,
+    ) -> Self {
+        Self {
+            mem_page,
+            begin,
+            complete,
+        }
+    }
+}
+
+impl JobOperations for WriteJob {
+    fn begin(&self) {
+        (self.begin)(self.mem_page.clone())
+    }
+
+    fn complete(&self, bytes_read: StorageResult<usize>) {
+        (self.complete)(bytes_read.map(|b| (b, self.mem_page.clone())))
+    }
+}
+
+trait JobOperations {
+    fn begin(&self);
+    fn complete(&self, bytes_read: StorageResult<usize>);
 }

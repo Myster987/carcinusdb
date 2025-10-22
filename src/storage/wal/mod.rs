@@ -23,6 +23,7 @@ use crate::{
     },
     utils::{
         self,
+        buffer::Buffer,
         bytes::{byte_swap_u32, pack_u64},
         io::BlockIO,
     },
@@ -430,8 +431,8 @@ impl LocalWal {
     pub fn read_frame(
         &mut self,
         page_number: PageNumber,
-        page: MemPageRef,
-        buffer_pool: LocalBufferPool,
+        page: &MemPageRef,
+        buffer: &mut Buffer,
     ) -> StorageResult<Option<MemPageRef>> {
         // if given page number is not present in WAL we can simply return OK(None)
         if !self.is_in_wal(&page_number) {
@@ -439,8 +440,6 @@ impl LocalWal {
         }
 
         pager::begin_read_page(&page)?;
-
-        let mut buffer = buffer_pool.get();
 
         let visible_frame_number = self
             .global_wal
