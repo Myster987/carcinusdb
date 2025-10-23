@@ -33,6 +33,8 @@ pub enum Error {
     PageNotFound(PageNumber),
     #[error("invalid page type")]
     InvalidPageType,
+    #[error("page number must be grater than 0")]
+    PageNumberOutOfRange,
 
     // wal
     #[error("invalid checksum. data is corrupted")]

@@ -12,7 +12,7 @@ use crate::storage::page::{DatabaseHeader, PageType};
 use crate::storage::wal::LocalWal;
 use crate::storage::{Error, StorageResult};
 use crate::utils::buffer::Buffer;
-use crate::utils::io::BlockIO;
+use crate::utils::io::{BlockIO, IoResult, Job, ReadJobCallbackArgs, WriteJob};
 
 use crate::storage::PageNumber;
 
@@ -192,12 +192,17 @@ impl Pager {
         page_number: PageNumber,
         page: MemPageRef,
     ) -> StorageResult<MemPageRef> {
-        begin_read_page(&page)?;
-        let mut buf = self.buffer_pool.get();
+        begin_read_page(&page);
 
-        let read_result = self.io.read(page_number, &mut buf[..]);
+        let complete = Box::new(|read_result| {});
 
-        complete_read_page(read_result, page, buf)
+        let mut buf = Arc::new(self.buffer_pool.get());
+
+        let job = Job::new_read(page, buf, complete);
+
+        self.io.read(page_number, &mut buf[..], job);
+
+        Ok(page)
     }
 
     pub fn write_page(&mut self, page: MemPageRef) -> StorageResult<MemPageRef> {
@@ -207,12 +212,13 @@ impl Pager {
             .append_frame(page, self.db_header.lock().database_size)
     }
 
-    pub(crate) fn write_raw(
+    pub fn write_raw(
         &mut self,
         page_number: PageNumber,
         buffer: &[u8],
-    ) -> std::io::Result<usize> {
-        Ok(self.io.write(page_number, buffer)?)
+        job: Job<WriteJob>,
+    ) -> StorageResult<Job<WriteJob>> {
+        self.io.write(page_number, buffer, job)
     }
 
     pub fn flush(&mut self) -> StorageResult<()> {
@@ -239,34 +245,25 @@ pub fn begin_write_page(page: &MemPageRef) -> StorageResult<()> {
 /// is an error it will set proper flags on page. Otherwise it will set
 /// correct state and value for page.
 /// ### Note that `page` should be locked before calling this function (use `begin_read_page` to setup page for read)
-pub fn complete_read_page(
-    read_result: std::io::Result<usize>,
-    page: MemPageRef,
-    buffer: Buffer,
-) -> StorageResult<MemPageRef> {
+pub fn complete_read_page(read_result: IoResult<usize>, (page, buffer): ReadJobCallbackArgs) {
     if let Ok(bytes_read) = read_result {
         if bytes_read != buffer.size() {
             page.set_error();
             page.clear_loaded();
-            return Err(Error::PartialRead {
-                expected: buffer.size(),
-                read: bytes_read,
-            });
+            return;
         }
     }
-    if let Err(error) = read_result {
+    if let Err(_) = read_result {
         page.set_error();
         page.clear_locked();
-        return Err(error.into());
+        return;
     }
 
-    let content = Page::new(Arc::new(RefCell::new(buffer)));
+    let content = Page::new(buffer.clone());
 
     page.get().content = Some(content);
     page.set_loaded();
     page.clear_locked();
-
-    Ok(page)
 }
 
 pub fn complete_write_page(
