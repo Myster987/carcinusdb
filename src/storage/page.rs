@@ -181,12 +181,12 @@ impl TryFrom<u8> for PageType {
 /// Only chunk of `Cell` is stored in `Page` and it needs to be reassembled by going over
 ///
 pub struct Page {
-    buffer: Arc<RefCell<Buffer>>,
+    buffer: Arc<Buffer>,
     overflow: HashMap<SlotNumber, bool>,
 }
 
 impl Page {
-    pub fn new(buffer: Arc<RefCell<Buffer>>) -> Self {
+    pub fn new(buffer: Arc<Buffer>) -> Self {
         Self {
             buffer,
             overflow: HashMap::new(),
@@ -195,12 +195,12 @@ impl Page {
 
     pub fn alloc(size: usize, drop: Option<DropFn>) -> Self {
         let buf = Buffer::alloc_page(size, drop);
-        Self::new(Arc::new(RefCell::new(buf)))
+        Self::new(Arc::new(buf))
     }
 
+    #[allow(clippy::mut_from_ref)]
     pub fn as_ptr(&self) -> &mut [u8] {
-        let buf = self.buffer.as_ptr();
-        unsafe { buf.as_mut().unwrap().as_mut_slice() }
+        self.buffer.as_mut_slice()
     }
 
     pub fn as_io_slice(&self) -> IoSlice {

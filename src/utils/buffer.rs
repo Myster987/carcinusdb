@@ -51,7 +51,7 @@ impl Buffer {
         self.ptr.as_ptr().cast_const()
     }
 
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+    pub fn as_mut_ptr(&self) -> *mut u8 {
         self.ptr.as_ptr()
     }
 
@@ -59,7 +59,7 @@ impl Buffer {
         unsafe { std::slice::from_raw_parts(self.as_ptr(), self.size) }
     }
 
-    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+    pub fn as_mut_slice(&self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr(), self.size) }
     }
 
