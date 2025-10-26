@@ -23,9 +23,8 @@ use crate::{
     },
     utils::{
         self,
-        buffer::Buffer,
         bytes::{byte_swap_u32, pack_u64},
-        io::BlockIO,
+        io::{BlockIO, IO, Job},
     },
 };
 
@@ -97,7 +96,7 @@ impl WalHeader {
         }
     }
 
-    pub fn to_bytes(self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Vec<u8> {
         let mut buffer = vec![0; WAL_HEADER_SIZE];
         self.write_to_buffer(&mut buffer);
         buffer
@@ -147,7 +146,7 @@ impl FrameHeader {
         }
     }
 
-    pub fn to_bytes(self, buffer: &mut [u8]) {
+    pub fn to_bytes(&self, buffer: &mut [u8]) {
         buffer[0..4].copy_from_slice(&self.page_number.to_le_bytes());
         buffer[4..8].copy_from_slice(&self.db_size.to_le_bytes());
         buffer[8..12].copy_from_slice(&self.checksum.0.to_le_bytes());
@@ -166,14 +165,8 @@ impl WalManager {
         page_size: u32,
     ) -> StorageResult<Self> {
         // If WAL doesn't exist, then it creates header with default parameters
-        let mut header = (!wal_file_path.exists()).then(|| {
-            WalHeader::default(
-                page_size,
-                db_file
-                    .size_in_blocks()
-                    .expect("Database file size must be known") as u32,
-            )
-        });
+        let mut header = (!wal_file_path.exists())
+            .then(|| WalHeader::default(page_size, db_file.get_block_count()));
 
         let file = OpenOptions::default()
             .create(true)
@@ -181,11 +174,9 @@ impl WalManager {
             .write(true)
             .open(wal_file_path)?;
 
-        let wal_file = Arc::new(BlockIO::new(file, page_size as usize, WAL_HEADER_SIZE));
-
         if header.is_none() {
             let buf = &mut [0; WAL_HEADER_SIZE];
-            wal_file.read_header(buf)?;
+            file.pread(0, buf)?;
             let h = WalHeader::from_bytes(buf);
 
             // validate header checksum
@@ -196,7 +187,16 @@ impl WalManager {
             header = Some(h);
         }
 
-        let global_wal = GlobalWal::new(wal_file, db_file, header.unwrap())?;
+        let header = header.unwrap();
+
+        let wal_file = Arc::new(BlockIO::new(
+            file,
+            page_size as usize,
+            header.last_checkpointed as usize,
+            WAL_HEADER_SIZE,
+        ));
+
+        let global_wal = GlobalWal::new(wal_file, db_file, header)?;
 
         Ok(Self {
             global_wal: Arc::new(global_wal),
@@ -260,7 +260,7 @@ impl GlobalWal {
         let mut running_checksum = header.checksum_self(None);
         let mut buffer = vec![0; frame_size];
 
-        for frame_number in 0..u32::MAX {
+        for frame_number in 1..header.last_checkpointed {
             let (valid, is_commit, page_number) =
                 validate_frame(&wal_file, frame_number, &mut running_checksum, &mut buffer)?;
             if !valid {
@@ -359,6 +359,10 @@ impl LocalWal {
         }
     }
 
+    fn calculate_frame_offset(&self, frame_number: FrameNumber) -> StorageResult<usize> {
+        self.global_wal.wal_file.calculate_offset(frame_number)
+    }
+
     pub fn is_in_wal(&self, page_number: &PageNumber) -> bool {
         self.global_wal.index.contains(page_number)
     }
@@ -403,8 +407,7 @@ impl LocalWal {
 
     /// Ends write transaction by dropping write locks and updates all
     pub fn end_write_tx(&mut self, guard: WriteGuard) -> StorageResult<()> {
-        self.global_wal.wal_file.flush()?;
-        self.global_wal.wal_file.sync()?;
+        self.global_wal.wal_file.persist()?;
 
         self.global_wal.set_last_checksum(self.last_checksum);
 
@@ -419,11 +422,12 @@ impl LocalWal {
     }
 
     /// Reads only page from WAL (skips header).
-    fn read_raw(&self, frame_number: FrameNumber, buffer: &mut [u8]) -> std::io::Result<usize> {
-        let offset = WAL_HEADER_SIZE
-            + (self.global_wal.frame_size * frame_number as usize)
-            + FRAME_HEADER_SIZE;
-        self.global_wal.wal_file.raw_read(offset, buffer)
+    fn read_raw(&self, frame_number: FrameNumber, buffer: &mut [u8]) -> StorageResult<usize> {
+        let offset = self.calculate_frame_offset(frame_number)? + FRAME_HEADER_SIZE;
+        self.global_wal
+            .wal_file
+            .raw_read(offset, buffer)
+            .map_err(|err| err.into())
     }
 
     /// Reads given `page_number` from WAL. This operation doesn't interrupt
@@ -431,8 +435,8 @@ impl LocalWal {
     pub fn read_frame(
         &mut self,
         page_number: PageNumber,
-        page: &MemPageRef,
-        buffer: &mut Buffer,
+        page: MemPageRef,
+        buffer_pool: &LocalBufferPool,
     ) -> StorageResult<Option<MemPageRef>> {
         // if given page number is not present in WAL we can simply return OK(None)
         if !self.is_in_wal(&page_number) {
@@ -447,14 +451,19 @@ impl LocalWal {
             .get(&page_number, self.max_frame)
             .ok_or(Error::PageNotFoundInWal(page_number))?;
 
-        let read_result = self.read_raw(visible_frame_number, &mut buffer[..]);
+        let complete = Box::new(|read_result, args| pager::complete_read_page(read_result, args));
 
-        pager::complete_read_page(read_result, page, buffer).map(|pg| Some(pg))
-    }
+        let buffer = Arc::new(buffer_pool.get());
 
-    /// Writes content of `self.temp_buffer` into WAL at given `frame_number`
-    fn write_raw(&self, frame_number: FrameNumber, buffer: &[u8]) -> std::io::Result<usize> {
-        self.global_wal.wal_file.write(frame_number, buffer)
+        let job = Job::new_read(page, buffer.clone(), complete);
+
+        let (page, _) = self
+            .global_wal
+            .wal_file
+            .read(visible_frame_number, buffer, job, FRAME_HEADER_SIZE)?
+            .finish();
+
+        Ok(Some(page))
     }
 
     pub fn append_frame(&mut self, page: MemPageRef, db_size: u32) -> StorageResult<MemPageRef> {
@@ -474,6 +483,8 @@ impl LocalWal {
 
         let mut running_checksum = self.last_checksum;
 
+        let mut group_job = Job::new_group_write();
+
         for (i, page) in pages.iter().enumerate() {
             let page_number = page.get().id;
             let page_content = &page.get_content().as_ptr();
@@ -489,6 +500,12 @@ impl LocalWal {
             };
 
             frame_header.to_bytes(&mut header_buffers[i][..]);
+
+            let complete =
+                Box::new(|write_result, args| pager::complete_write_page(write_result, args));
+
+            let job = Job::new_write(page.clone(), complete).into_inner();
+            group_job.add(job);
         }
 
         for (i, page) in pages.iter().enumerate() {
@@ -500,7 +517,7 @@ impl LocalWal {
 
         self.global_wal
             .wal_file
-            .write_vectored(frame_number, &mut io_buffers)?;
+            .write_vectored(frame_number, &mut io_buffers, group_job)?;
 
         self.last_checksum = running_checksum;
         self.max_frame = self.max_frame + pages.len() as FrameNumber;
@@ -516,7 +533,8 @@ impl LocalWal {
 
     fn should_checkpoint(&self) -> bool {
         let max_frame = self.global_wal.get_max_frame();
-        let backfilled_number = self.global_wal.get_backfilled_number();
+        // I don't think this is usefull for now
+        let backfilled_number = self.global_wal.get_backfilled_number() * 0;
 
         max_frame > self.global_wal.checkpoint_size + backfilled_number
     }
@@ -536,32 +554,52 @@ impl LocalWal {
         let mut temp_buffer = vec![0; self.global_wal.frame_size - FRAME_HEADER_SIZE];
 
         for (page_number, frame_number) in frames_to_checkpoint {
+            let offset = self.global_wal.db_file.calculate_offset(page_number)?;
             if let Some(mem_page) = pager.page_cache.get(&page_number) {
                 if mem_page.is_dirty() {
-                    pager.write_page(mem_page)?;
+                    self.global_wal
+                        .db_file
+                        .raw_write(offset, &mem_page.get_content().as_ptr())?;
                 }
             } else {
                 self.read_raw(frame_number, &mut temp_buffer)?;
-                pager.write_raw(page_number, &temp_buffer)?;
+                self.global_wal.db_file.raw_write(offset, &temp_buffer)?;
             }
         }
+        // persist changes to db file
+        self.global_wal.db_file.persist()?;
 
-        self.global_wal.db_file.flush()?;
-        self.global_wal.db_file.sync()?;
-
+        // change wal header params, because it will be truncated
         wal_header.backfilled_number = to_backfill;
         wal_header.checkpoint_seq_num = wal_header.checkpoint_seq_num.wrapping_add(1);
+        wal_header.last_checkpointed = 0;
+        wal_header.db_size = pager.db_header.get_database_size();
+        wal_header.update_checksum();
 
-        // wal_header.db_size = self.global_wal.db_file.s
-        // self.global_wal.set
-        // self.global_wal.set_backfilled_number(to_backfill as u32);
-        // self.global_wal.increment_checkpoint_seq_num();
+        // write header to WAL
+        self.global_wal
+            .wal_file
+            .write_header(&wal_header.to_bytes())?;
 
         // removes all frames from WAL leaving the header
         self.global_wal.wal_file.truncate_beginning(max_frame)?;
-        // if min_active_frame == self.global_wal.get_min_frame()
 
-        todo!()
+        // persist changes to wal file
+        self.global_wal.wal_file.persist()?;
+
+        self.global_wal.set_backfilled_number(to_backfill);
+        self.global_wal.set_min_frame(0);
+        self.global_wal.set_max_frame(0);
+        self.global_wal.set_last_checksum(wal_header.checksum);
+        self.global_wal
+            .set_backfilled_number(wal_header.backfilled_number);
+        self.global_wal.increment_checkpoint_seq_num();
+
+        self.global_wal.index.clear();
+
+        drop(exclusive_lock);
+
+        Ok(())
     }
 }
 
@@ -628,6 +666,10 @@ impl WalIndex {
             .get(page_number)
             .and_then(|vec| vec.iter().rev().find(|&&frame| frame <= max_frame).copied())
     }
+
+    pub fn clear(&self) {
+        self.map.clear();
+    }
 }
 
 /// Validates if given frame is valid and WAL isn't corrupted. If if frame isn't valid,
@@ -645,7 +687,8 @@ fn validate_frame(
     running_checksum: &mut Checksum,
     buffer: &mut [u8],
 ) -> StorageResult<(bool, bool, PageNumber)> {
-    if wal_file.read(frame_number, buffer).is_err() {
+    let offset = wal_file.calculate_offset(frame_number)?;
+    if wal_file.raw_read(offset, buffer).is_err() {
         return Ok((false, false, 0));
     }
 
