@@ -1,5 +1,4 @@
 use std::{
-    cell::RefCell,
     collections::HashMap,
     io::{Cursor, IoSlice},
     sync::Arc,
@@ -39,13 +38,13 @@ pub fn max_cell_size(usable_space: usize) -> usize {
 #[derive(Debug)]
 pub struct DatabaseHeader {
     /// Version number of db.
-    version: u32,
+    pub version: u32,
     /// Size of each page in database.
-    page_size: u16,
+    pub page_size: u16,
     /// Nummber of bytes reserved at the end of each `Page`. Default is 0
     pub reserved_space: u16,
     /// Counts how many times database file was changed. Increments on each update.
-    change_counter: u32,
+    pub change_counter: u32,
     /// Size of database in `Pages`.
     pub database_size: PageNumber,
     /// Page number of first freelist trunk page.
@@ -87,7 +86,7 @@ impl DatabaseHeader {
         }
     }
 
-    pub fn to_bytes(self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Vec<u8> {
         let mut buffer = vec![0; DATABASE_HEADER_SIZE];
         self.write_to_buffer(&mut buffer);
         buffer
@@ -303,7 +302,7 @@ impl Page {
 
     /// Returns avalible space without header.
     pub fn storage_space(&self) -> u16 {
-        (self.buffer.borrow().size() - self.header_size()) as u16
+        (self.buffer.size() - self.header_size()) as u16
     }
 
     /// Free space between slot array and last cell.

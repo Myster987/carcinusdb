@@ -1,16 +1,20 @@
 use std::{
     fs::File,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
 };
 
 use crate::{
     error::DatabaseResult,
     os::{Open, OpenOptions},
     storage::{
+        PageNumber,
         buffer_pool::GlobalBufferPool,
         cache::ShardedLruCache,
-        page::{DATABASE_HEADER_SIZE, DEFAULT_PAGE_SIZE, DatabaseHeader},
+        page::{DATABASE_HEADER_SIZE, DatabaseHeader, MAX_PAGE_SIZE},
         pager::Pager,
         wal::WalManager,
     },
@@ -45,8 +49,87 @@ pub fn handle_connection(conn: Connection) -> DatabaseResult<()> {
     Ok(())
 }
 
+pub struct MemDatabaseHeader {
+    pub version: u32,
+    pub page_size: usize,
+    pub reserved_space: u16,
+    change_counter: AtomicU32,
+    database_size: AtomicU32,
+    freelist_trunk_page: AtomicU32,
+    freelist_pages: AtomicU32,
+    pub default_page_cache_size: u32,
+}
+
+impl MemDatabaseHeader {
+    pub fn into_raw_header(&self) -> DatabaseHeader {
+        let page_size = if self.page_size == MAX_PAGE_SIZE {
+            1
+        } else {
+            self.page_size
+        };
+        DatabaseHeader {
+            version: self.version,
+            page_size: page_size as u16,
+            reserved_space: self.reserved_space,
+            change_counter: self.get_change_counter(),
+            database_size: self.get_database_size(),
+            freelist_trunk_page: self.get_freelist_trunk_page(),
+            freelist_pages: self.get_freelist_pages(),
+            default_page_cache_size: self.default_page_cache_size,
+        }
+    }
+
+    pub fn get_change_counter(&self) -> u32 {
+        self.change_counter.load(Ordering::Acquire)
+    }
+
+    pub fn get_database_size(&self) -> u32 {
+        self.database_size.load(Ordering::Acquire)
+    }
+
+    pub fn get_freelist_trunk_page(&self) -> PageNumber {
+        self.freelist_trunk_page.load(Ordering::Acquire)
+    }
+
+    pub fn get_freelist_pages(&self) -> PageNumber {
+        self.freelist_pages.load(Ordering::Acquire)
+    }
+
+    pub fn increment_change_counter(&self) {
+        self.change_counter.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn add_database_size(&self, add: u32) {
+        self.database_size.fetch_add(add, Ordering::Release);
+    }
+
+    pub fn set_freelist_trunk_page(&self, page_number: PageNumber) {
+        self.freelist_trunk_page
+            .store(page_number, Ordering::Release);
+    }
+
+    pub fn set_freelist_pages(&self, value: PageNumber) {
+        self.freelist_pages.store(value, Ordering::Release);
+    }
+}
+
+impl From<DatabaseHeader> for MemDatabaseHeader {
+    fn from(db_header: DatabaseHeader) -> Self {
+        Self {
+            version: db_header.version,
+            page_size: db_header.get_page_size(),
+            reserved_space: db_header.reserved_space,
+            change_counter: AtomicU32::new(db_header.change_counter),
+            database_size: AtomicU32::new(db_header.database_size),
+            freelist_trunk_page: AtomicU32::new(db_header.freelist_trunk_page),
+            freelist_pages: AtomicU32::new(db_header.freelist_pages),
+            default_page_cache_size: db_header.default_page_cache_size,
+        }
+    }
+}
+
 pub struct Database {
-    header: Arc<Mutex<DatabaseHeader>>,
+    header: Arc<MemDatabaseHeader>,
     db_file: Arc<BlockIO<File>>,
     global_pool: GlobalBufferPool,
     wal_manager: WalManager,
@@ -75,8 +158,10 @@ impl Database {
         let db_file = Arc::new(BlockIO::new(
             file,
             db_header.get_page_size(),
+            db_header.database_size as usize,
             DATABASE_HEADER_SIZE,
         ));
+
         let wal_file_path = {
             let mut path = db_file_path;
 
@@ -102,7 +187,7 @@ impl Database {
         ));
 
         Ok(Self {
-            header: Arc::new(Mutex::new(db_header)),
+            header: Arc::new(MemDatabaseHeader::from(db_header)),
             db_file,
             global_pool,
             wal_manager,
