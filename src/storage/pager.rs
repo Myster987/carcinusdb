@@ -1,18 +1,16 @@
-use std::cell::{RefCell, UnsafeCell};
+use std::cell::UnsafeCell;
 
 use std::fs::File;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use parking_lot::Mutex;
-
+use crate::database::MemDatabaseHeader;
+use crate::storage::StorageResult;
 use crate::storage::buffer_pool::LocalBufferPool;
 use crate::storage::cache::ShardedLruCache;
-use crate::storage::page::{DatabaseHeader, PageType};
+use crate::storage::page::PageType;
 use crate::storage::wal::LocalWal;
-use crate::storage::{Error, StorageResult};
-use crate::utils::buffer::Buffer;
-use crate::utils::io::{BlockIO, IoResult, Job, ReadJobCallbackArgs, WriteJob};
+use crate::utils::io::{BlockIO, IoResult, Job, ReadJobCallbackArgs, WriteJobCallbackArgs};
 
 use crate::storage::PageNumber;
 
@@ -65,63 +63,65 @@ impl MemPage {
     }
 
     pub fn is_uptodate(&self) -> bool {
-        self.get().flags.load(Ordering::SeqCst) & PAGE_UPTODATE != 0
+        self.get().flags.load(Ordering::Acquire) & PAGE_UPTODATE != 0
     }
 
     pub fn set_uptodate(&self) {
-        self.get().flags.fetch_or(PAGE_UPTODATE, Ordering::SeqCst);
+        self.get().flags.fetch_or(PAGE_UPTODATE, Ordering::Release);
     }
 
     pub fn clear_uptodate(&self) {
-        self.get().flags.fetch_and(!PAGE_UPTODATE, Ordering::SeqCst);
+        self.get()
+            .flags
+            .fetch_and(!PAGE_UPTODATE, Ordering::Release);
     }
 
     pub fn is_locked(&self) -> bool {
-        self.get().flags.load(Ordering::SeqCst) & PAGE_LOCKED != 0
+        self.get().flags.load(Ordering::Acquire) & PAGE_LOCKED != 0
     }
 
     pub fn set_locked(&self) {
-        self.get().flags.fetch_or(PAGE_LOCKED, Ordering::SeqCst);
+        self.get().flags.fetch_or(PAGE_LOCKED, Ordering::Release);
     }
 
     pub fn clear_locked(&self) {
-        self.get().flags.fetch_and(!PAGE_LOCKED, Ordering::SeqCst);
+        self.get().flags.fetch_and(!PAGE_LOCKED, Ordering::Release);
     }
 
     pub fn is_error(&self) -> bool {
-        self.get().flags.load(Ordering::SeqCst) & PAGE_ERROR != 0
+        self.get().flags.load(Ordering::Acquire) & PAGE_ERROR != 0
     }
 
     pub fn set_error(&self) {
-        self.get().flags.fetch_or(PAGE_ERROR, Ordering::SeqCst);
+        self.get().flags.fetch_or(PAGE_ERROR, Ordering::Release);
     }
 
     pub fn clear_error(&self) {
-        self.get().flags.fetch_and(!PAGE_ERROR, Ordering::SeqCst);
+        self.get().flags.fetch_and(!PAGE_ERROR, Ordering::Release);
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.get().flags.load(Ordering::SeqCst) & PAGE_DIRTY != 0
+        self.get().flags.load(Ordering::Acquire) & PAGE_DIRTY != 0
     }
 
     pub fn set_dirty(&self) {
-        self.get().flags.fetch_or(PAGE_DIRTY, Ordering::SeqCst);
+        self.get().flags.fetch_or(PAGE_DIRTY, Ordering::Release);
     }
 
     pub fn clear_dirty(&self) {
-        self.get().flags.fetch_and(!PAGE_DIRTY, Ordering::SeqCst);
+        self.get().flags.fetch_and(!PAGE_DIRTY, Ordering::Release);
     }
 
     pub fn is_loaded(&self) -> bool {
-        self.get().flags.load(Ordering::SeqCst) & PAGE_LOADED != 0
+        self.get().flags.load(Ordering::Acquire) & PAGE_LOADED != 0
     }
 
     pub fn set_loaded(&self) {
-        self.get().flags.fetch_or(PAGE_LOADED, Ordering::SeqCst);
+        self.get().flags.fetch_or(PAGE_LOADED, Ordering::Release);
     }
 
     pub fn clear_loaded(&self) {
-        self.get().flags.fetch_and(!PAGE_LOADED, Ordering::SeqCst);
+        self.get().flags.fetch_and(!PAGE_LOADED, Ordering::Release);
     }
 
     pub fn is_index(&self) -> bool {
@@ -135,7 +135,7 @@ impl MemPage {
 /// Is responsive for reading and writing to file
 pub struct Pager {
     /// Reference to database header owned by `Database` struct.
-    db_header: Arc<Mutex<DatabaseHeader>>,
+    pub db_header: Arc<MemDatabaseHeader>,
     /// I/O interface
     io: Arc<BlockIO<File>>,
     /// Each pager gets it's dedicated local pool
@@ -148,7 +148,7 @@ pub struct Pager {
 
 impl Pager {
     pub fn new(
-        db_header: Arc<Mutex<DatabaseHeader>>,
+        db_header: Arc<MemDatabaseHeader>,
         io: Arc<BlockIO<File>>,
         buffer_pool: LocalBufferPool,
         wal: LocalWal,
@@ -163,6 +163,14 @@ impl Pager {
         }
     }
 
+    pub fn write_header(&mut self) -> StorageResult<()> {
+        let raw_header = self.db_header.into_raw_header();
+
+        self.io.write_header(&raw_header.to_bytes())?;
+
+        Ok(())
+    }
+
     pub fn read_page(&mut self, page_number: PageNumber) -> StorageResult<MemPageRef> {
         // check cache...
         if let Some(cached_page) = self.page_cache.get(&page_number) {
@@ -174,7 +182,7 @@ impl Pager {
         // check wall...
         if let Ok(Some(page)) =
             self.wal
-                .read_frame(page_number, page_wrapper.clone(), self.buffer_pool.clone())
+                .read_frame(page_number, page_wrapper.clone(), &self.buffer_pool)
         {
             return Ok(page);
         }
@@ -192,15 +200,16 @@ impl Pager {
         page_number: PageNumber,
         page: MemPageRef,
     ) -> StorageResult<MemPageRef> {
-        begin_read_page(&page);
+        begin_read_page(&page)?;
 
-        let complete = Box::new(|read_result| {});
+        // runs after IO operation is completed with given result and arguments supplied
+        let complete = Box::new(|read_result, args| complete_read_page(read_result, args));
 
-        let mut buf = Arc::new(self.buffer_pool.get());
+        let buffer = Arc::new(self.buffer_pool.get());
 
-        let job = Job::new_read(page, buf, complete);
+        let job = Job::new_read(page, buffer.clone(), complete);
 
-        self.io.read(page_number, &mut buf[..], job);
+        let (page, _) = self.io.read(page_number, buffer, job, 0)?.finish();
 
         Ok(page)
     }
@@ -209,16 +218,7 @@ impl Pager {
         begin_write_page(&page)?;
 
         self.wal
-            .append_frame(page, self.db_header.lock().database_size)
-    }
-
-    pub fn write_raw(
-        &mut self,
-        page_number: PageNumber,
-        buffer: &[u8],
-        job: Job<WriteJob>,
-    ) -> StorageResult<Job<WriteJob>> {
-        self.io.write(page_number, buffer, job)
+            .append_frame(page, self.db_header.get_database_size())
     }
 
     pub fn flush(&mut self) -> StorageResult<()> {
@@ -241,15 +241,16 @@ pub fn begin_write_page(page: &MemPageRef) -> StorageResult<()> {
     Ok(())
 }
 
-/// Should be universal to both disk and wal reads. Takes io::Result and if it
-/// is an error it will set proper flags on page. Otherwise it will set
-/// correct state and value for page.
+/// Should be universal to both disk and wal reads. Takes `IoResult` with page
+/// and buffer and if it is an error it will set proper flags on page. Otherwise
+/// it will set correct state and value for page.
 /// ### Note that `page` should be locked before calling this function (use `begin_read_page` to setup page for read)
 pub fn complete_read_page(read_result: IoResult<usize>, (page, buffer): ReadJobCallbackArgs) {
     if let Ok(bytes_read) = read_result {
         if bytes_read != buffer.size() {
             page.set_error();
             page.clear_loaded();
+            page.clear_locked();
             return;
         }
     }
@@ -266,21 +267,14 @@ pub fn complete_read_page(read_result: IoResult<usize>, (page, buffer): ReadJobC
     page.clear_locked();
 }
 
-pub fn complete_write_page(
-    write_result: std::io::Result<usize>,
-    page: MemPageRef,
-) -> StorageResult<MemPageRef> {
-    if let Err(error) = write_result {
+pub fn complete_write_page(write_result: IoResult<usize>, (page): WriteJobCallbackArgs) {
+    if write_result.is_err() {
         page.set_error();
-        page.clear_locked();
-        return Err(error.into());
+    } else {
+        page.clear_dirty();
+        page.clear_loaded();
+        let _ = page.get().content.take();
     }
 
-    let _ = page.get().content.take();
-
-    page.clear_dirty();
-    page.clear_loaded();
-    page.clear_loaded();
-
-    Ok(page)
+    page.clear_locked();
 }
