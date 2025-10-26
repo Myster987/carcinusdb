@@ -4,7 +4,10 @@ use std::{
     io::{self, IoSlice, Seek, Write},
     os::fd::AsRawFd,
     path::Path,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
 };
 
 use libc::c_void;
@@ -61,7 +64,7 @@ impl FileOps for File {
     where
         Self: Sized,
     {
-        File::options().read(true).write(false).open(path)
+        File::options().read(true).write(true).open(path)
     }
 
     fn remove(path: impl AsRef<Path>) -> io::Result<()> {
@@ -93,6 +96,26 @@ pub trait IO {
     fn pread(&self, offset: usize, buf: &mut [u8]) -> io::Result<usize>;
     fn pwrite(&self, offset: usize, buf: &[u8]) -> io::Result<usize>;
     fn pwrite_vec(&self, offset: usize, buf: &mut [IoSlice<'_>]) -> io::Result<usize>;
+    fn truncate(&self, length: usize) -> io::Result<()>;
+
+    /// Truncates beginning of a file (skips header). `bytes_to_remove` is deleted and rest is
+    /// moved to beginning using [`libc::copy_file_range`].
+    ///
+    /// # Example
+    /// ```text
+    /// Block size: 10 bytes
+    /// Bytes to remove: 30
+    ///
+    /// Before:
+    /// +--------+---------+---------+---------+---------+---------+
+    /// | Header | Block 1 | Block 2 | Block 3 | Block 4 | Block 5 |
+    /// +--------+---------+---------+---------+---------+---------+
+    ///
+    /// After (Block 1, 2 and 3 were removed):
+    /// +--------+---------+---------+
+    /// | Header | Block 4 | Block 5 |
+    /// +--------+---------+---------+
+    /// ```
     fn truncate_beginning(&mut self, bytes_to_remove: u64, header_size: usize) -> io::Result<()>;
 }
 
@@ -175,24 +198,17 @@ impl IO for File {
         Ok(total_written)
     }
 
-    /// Truncates beginning of a file (skips header). `bytes_to_remove` is deleted and rest is
-    /// moved to beginning using [`libc::copy_file_range`].
-    ///
-    /// # Example
-    /// ```text
-    /// Block size: 10 bytes
-    /// Bytes to remove: 30
-    ///
-    /// Before:
-    /// +--------+---------+---------+---------+---------+---------+
-    /// | Header | Block 1 | Block 2 | Block 3 | Block 4 | Block 5 |
-    /// +--------+---------+---------+---------+---------+---------+
-    ///
-    /// After (Block 1, 2 and 3 were removed):
-    /// +--------+---------+---------+
-    /// | Header | Block 4 | Block 5 |
-    /// +--------+---------+---------+
-    /// ```
+    fn truncate(&self, length: usize) -> io::Result<()> {
+        let fd = self.as_raw_fd();
+
+        let res = unsafe { libc::ftruncate(fd, length as libc::off_t) };
+
+        if res != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     fn truncate_beginning(&mut self, bytes_to_remove: u64, header_size: usize) -> io::Result<()> {
         let fd = self.as_raw_fd();
         let metadata = self.metadata()?;
@@ -250,22 +266,48 @@ impl IO for File {
 /// Wrapper to simplify working with page like structures on disk.
 #[derive(Debug)]
 pub struct BlockIO<I> {
+    /// Unsafe wrapper for io operations. In order to make it safe, `I` must be
+    ///  safe to operate in multi-threaded envirioment. Example: Linux `pread` and `pwrite`.
     io: UnsafeCell<I>,
+    /// Size of single block in **bytes**.
     block_size: usize,
+    /// Atomic counter of blocks in file. It should be
+    block_count: AtomicU32,
     header_size: usize,
 }
 
 impl<I> BlockIO<I> {
-    pub fn new(io: I, block_size: usize, header_size: usize) -> Self {
+    pub fn new(io: I, block_size: usize, block_count: usize, header_size: usize) -> Self {
         Self {
             io: UnsafeCell::new(io),
             block_size,
+            block_count: AtomicU32::new(block_count as u32),
             header_size,
         }
     }
 
-    pub fn get_io(&self) -> &mut I {
+    fn get_io(&self) -> &mut I {
         unsafe { self.io.get().as_mut().unwrap() }
+    }
+
+    fn increment_block_count(&self, add: BlockNumber) {
+        self.block_count.fetch_add(add, Ordering::Release);
+    }
+
+    fn decrement_block_count(&self, sub: BlockNumber) {
+        self.block_count.fetch_sub(sub, Ordering::Release);
+    }
+
+    pub fn get_block_count(&self) -> BlockNumber {
+        self.block_count.load(Ordering::Acquire)
+    }
+
+    /// Calculates offset to block (starts at 1). Includes header size.
+    pub fn calculate_offset(&self, block_number: BlockNumber) -> StorageResult<usize> {
+        if block_number < 1 {
+            return Err(Error::PageNumberOutOfRange);
+        }
+        Ok(self.header_size + (block_number - 1) as usize * self.block_size)
     }
 }
 
@@ -274,26 +316,27 @@ impl<I: IO> BlockIO<I> {
         self.get_io().pread(offset, buffer)
     }
 
-    /// Reads header from beginning of a file. Note that buffer size must match header size. This operation is atomic.
+    /// Reads header from beginning of a file. Note that buffer size must match
+    /// header size. This operation is atomic.
     pub fn read_header(&self, buffer: &mut [u8]) -> io::Result<usize> {
         self.raw_read(0, buffer)
     }
 
-    /// Reads block with given number. Includes header offset. This operation is atomic. `block_number starts at 1`.
+    /// Reads block with given number. Includes header offset. This operation is
+    /// atomic. `block_number starts at 1`. Also `skip` param allows to skip certain
+    /// ammount of bytes. Usefull when you want to read page from WAL skipping
+    /// frame header.
     pub fn read(
         &self,
         block_number: BlockNumber,
-        buffer: &mut [u8],
+        buffer: Arc<Buffer>,
         job: Job<ReadJob>,
+        skip: usize,
     ) -> StorageResult<Job<ReadJob>> {
-        if block_number < 1 {
-            return Err(Error::PageNumberOutOfRange);
-        }
-        let block_number = (block_number - 1) as usize;
-        let offset = self.header_size + block_number * self.block_size;
+        let offset = self.calculate_offset(block_number)? + skip;
 
         let result = self
-            .raw_read(offset, buffer)
+            .raw_read(offset, buffer.as_mut_slice())
             .map_err(|err| Arc::new(err.into()));
 
         job.complete(result);
@@ -305,52 +348,67 @@ impl<I: IO> BlockIO<I> {
         self.get_io().pwrite(offset, buffer)
     }
 
-    /// Writes header at the beginning of a file. Note that buffer size must match header size. This operation is atomic.
+    /// Writes header at the beginning of a file. Note that buffer size must
+    /// match header size. This operation is atomic.
     pub fn write_header(&self, buffer: &[u8]) -> io::Result<usize> {
         self.raw_write(0, buffer)
     }
-    /// Writes block at given number. Includes header offset. This operation is atomic. `page_number starts at 1`.
+
+    /// Writes block at given number. Includes header offset. This operation is
+    /// atomic. `page_number starts at 1`. Also `skip` param allows to skip certain
+    /// ammount of bytes. Usefull when you want to write page to WAL skipping
+    /// frame header.
     pub fn write(
         &self,
         block_number: BlockNumber,
-        buffer: &[u8],
+        buffer: Arc<Buffer>,
         job: Job<WriteJob>,
+        skip: usize,
     ) -> StorageResult<Job<WriteJob>> {
-        if block_number < 1 {
-            return Err(Error::PageNumberOutOfRange);
-        }
-        let block_number = (block_number - 1) as usize;
-        let offset = self.header_size + block_number as usize * self.block_size;
+        let offset = self.calculate_offset(block_number)? + skip;
 
         let result = self
-            .raw_write(offset, buffer)
-            .map_err(|err| Arc::new(err.into()));
+            .raw_write(offset, buffer.as_slice())
+            .map_err(|err| Arc::new(err.into()))
+            .inspect(|_| self.increment_block_count(1));
 
         job.complete(result);
 
         Ok(job)
     }
 
+    /// Writes sequence of block starting at `block_number`. Note that buffers
+    /// are structured like this: header + content. So to write single block
+    /// you need to use two [`IoSlice`]`s`.
     pub fn write_vectored(
         &self,
         block_number: BlockNumber,
         buffers: &mut [IoSlice],
         job: Job<GroupJob<WriteJob>>,
     ) -> StorageResult<Job<GroupJob<WriteJob>>> {
-        if block_number < 1 {
-            return Err(Error::PageNumberOutOfRange);
+        if buffers.len() % 2 != 0 {
+            return Err(Error::InvalidPageType);
         }
-        let block_number = (block_number - 1) as usize;
-        let offset = self.header_size + block_number as usize * self.block_size;
+
+        let offset = self.calculate_offset(block_number)?;
 
         let result = self
             .get_io()
             .pwrite_vec(offset, buffers)
-            .map_err(|err| Arc::new(err.into()));
+            .map_err(|err| Arc::new(err.into()))
+            .inspect(|_| self.increment_block_count(buffers.len() as u32 / 2));
 
         job.complete(result);
 
         Ok(job)
+    }
+
+    /// Truncates file to specific block length. If `to_block_len`
+    /// is 0, then only header will be left.
+    pub fn truncate(&self, to_block_len: BlockNumber) -> io::Result<()> {
+        let len_in_bytes = self.header_size + (to_block_len as usize * self.block_size);
+
+        self.get_io().truncate(len_in_bytes)
     }
 
     /// Removes first `up_to_block_numer` (inclusive) from file. Shifts rest to
@@ -362,7 +420,7 @@ impl<I: IO> BlockIO<I> {
     ///
     /// up_to_block_numer = 3
     ///
-    /// File after: [Header, Block 4, Block 5]
+    /// File after: [Header, Block 1 (before 4), Block 2 (before 5)]
     /// ```
     pub fn truncate_beginning(&self, up_to_block_number: BlockNumber) -> io::Result<()> {
         assert!(
@@ -374,6 +432,7 @@ impl<I: IO> BlockIO<I> {
 
         self.get_io()
             .truncate_beginning(bytes_to_remove, self.header_size)
+            .inspect(|_| self.decrement_block_count(up_to_block_number))
     }
 }
 
@@ -401,9 +460,10 @@ impl BlockIO<File> {
         Ok(meta.len() as usize)
     }
 
-    /// Returns size of file inside wrapper in **blocks**.
-    pub fn size_in_blocks(&self) -> io::Result<usize> {
-        Ok((self.size()? - self.header_size) / self.block_size)
+    /// Flushes and fsync all writes to make sure that they are persisted.
+    pub fn persist(&self) -> io::Result<()> {
+        self.flush()?;
+        self.sync()
     }
 }
 
@@ -446,6 +506,16 @@ impl<J: JobOperations> Job<J> {
     pub fn finish(self) -> J::Output {
         self.inner.finish()
     }
+
+    pub fn into_inner(self) -> J {
+        self.inner
+    }
+}
+
+impl<J: JobOperations> From<J> for Job<J> {
+    fn from(value: J) -> Self {
+        Self::new(value)
+    }
 }
 
 impl Job<ReadJob> {
@@ -471,11 +541,19 @@ impl Job<GroupJob<ReadJob>> {
         let group_job = GroupJob::new();
         Self::new(group_job)
     }
+
+    pub fn add(&mut self, job: ReadJob) {
+        self.inner.add(job);
+    }
 }
 impl Job<GroupJob<WriteJob>> {
     pub fn new_group_write() -> Self {
         let group_job = GroupJob::new();
         Self::new(group_job)
+    }
+
+    pub fn add(&mut self, job: WriteJob) {
+        self.inner.add(job);
     }
 }
 
@@ -560,7 +638,7 @@ impl<J: JobOperations> JobOperations for GroupJob<J> {
     }
 }
 
-trait JobOperations {
+pub trait JobOperations {
     type Output;
     fn complete(&self, bytes_read: IoResult<usize>);
     fn finish(self) -> Self::Output;
