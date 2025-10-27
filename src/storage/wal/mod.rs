@@ -118,6 +118,86 @@ impl WalHeader {
     }
 }
 
+pub struct MemWalHeader {
+    pub page_size: u32,
+    checkpoint_seq_num: AtomicU32,
+    last_checkpointed: AtomicU32,
+    db_size: AtomicU32,
+    backfilled_number: AtomicU32,
+    checksum: AtomicU64,
+}
+
+impl MemWalHeader {
+    pub fn into_raw_header(&self) -> WalHeader {
+        WalHeader {
+            page_size: self.page_size,
+            checkpoint_seq_num: self.get_checkpoint_seq_num(),
+            last_checkpointed: self.get_last_checkpointed(),
+            db_size: self.get_db_size(),
+            backfilled_number: self.get_backfilled_number(),
+            checksum: self.get_checksum(),
+        }
+    }
+
+    pub fn update_checksum(&self) {
+        let checksum = self.into_raw_header().checksum_self(None);
+        self.set_checksum(checksum);
+    }
+
+    pub fn get_checkpoint_seq_num(&self) -> u32 {
+        self.checkpoint_seq_num.load(Ordering::Acquire)
+    }
+
+    pub fn get_last_checkpointed(&self) -> u32 {
+        self.last_checkpointed.load(Ordering::Acquire)
+    }
+
+    pub fn get_db_size(&self) -> u32 {
+        self.db_size.load(Ordering::Acquire)
+    }
+
+    pub fn get_backfilled_number(&self) -> u32 {
+        self.backfilled_number.load(Ordering::Acquire)
+    }
+
+    pub fn get_checksum(&self) -> Checksum {
+        self.checksum.load_packed(Ordering::Acquire)
+    }
+
+    pub fn increment_checkpoint_seq_num(&self) {
+        self.checkpoint_seq_num.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn set_last_checkpointed(&self, value: PageNumber) {
+        self.last_checkpointed.store(value, Ordering::Release);
+    }
+
+    pub fn set_db_size(&self, value: u32) {
+        self.db_size.store(value, Ordering::Release);
+    }
+
+    pub fn set_backfilled_number(&self, value: u32) {
+        self.backfilled_number.store(value, Ordering::Release);
+    }
+
+    pub fn set_checksum(&self, (val_1, val_2): Checksum) {
+        self.checksum.store_packed(val_1, val_2, Ordering::Release);
+    }
+}
+
+impl From<WalHeader> for MemWalHeader {
+    fn from(wal_header: WalHeader) -> Self {
+        Self {
+            page_size: wal_header.page_size,
+            checkpoint_seq_num: AtomicU32::new(wal_header.checkpoint_seq_num),
+            last_checkpointed: AtomicU32::new(wal_header.last_checkpointed),
+            db_size: AtomicU32::new(wal_header.db_size),
+            backfilled_number: AtomicU32::new(wal_header.backfilled_number),
+            checksum: AtomicU64::new(pack_u64(wal_header.checksum.0, wal_header.checksum.1)),
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug)]
 pub struct FrameHeader {
@@ -217,21 +297,20 @@ pub struct GlobalWal {
     /// Size of WAL in pages after which we should trigger checkpoint.
     checkpoint_size: u32,
     /// WAL header loaded to memory.
-    header: Arc<Mutex<WalHeader>>,
+    header: Arc<MemWalHeader>,
     /// WAL index that sppeds up searching for frame.
     index: Arc<WalIndex>,
-    /// Last checkpointed entry in WAL.
-    min_frame: AtomicU32,
+    // /// Last checkpointed entry in WAL.
+    // min_frame: AtomicU32,
     /// Last commited frame in transaction.
     max_frame: AtomicU32,
     /// Checksum of last frame in WAL. It is cumulative checksum of all pages. Stored as two u32 packed in single atomic.
     last_checksum: AtomicU64,
 
-    /// Number of frames transfered to DB from WAL.
-    backfilled_number: AtomicU32,
-    /// Counter of checkpoints
-    checkpoint_seq_num: AtomicU32,
-
+    // /// Number of frames transfered to DB from WAL.
+    // backfilled_number: AtomicU32,
+    // /// Counter of checkpoints
+    // checkpoint_seq_num: AtomicU32,
     /// Array of read locks. Each locks is atomic u32 which represents minimal frame number this transaction can see.
     readers: Arc<ReadersPool<READERS_NUM>>,
     /// Lock for single writer.
@@ -249,11 +328,11 @@ impl GlobalWal {
         header: WalHeader,
     ) -> StorageResult<Self> {
         let frame_size = header.page_size as usize + FRAME_HEADER_SIZE;
-        let backfilled_number = header.backfilled_number;
-        let checkpoint_seq_num = header.checkpoint_seq_num;
+        // let backfilled_number = header.backfilled_number;
+        // let checkpoint_seq_num = header.checkpoint_seq_num;
         let index = Arc::new(WalIndex::new());
 
-        let min_frame = header.last_checkpointed;
+        // let min_frame = header.last_checkpointed;
         let mut max_frame = 0;
         let mut transaction_frames = vec![];
 
@@ -282,13 +361,13 @@ impl GlobalWal {
             db_file,
             frame_size,
             checkpoint_size: DEFAULT_CHECKPOINT_SIZE,
-            header: Arc::new(Mutex::new(header)),
+            header: Arc::new(MemWalHeader::from(header)),
             index,
-            min_frame: AtomicU32::new(min_frame),
+            // min_frame: AtomicU32::new(min_frame),
             max_frame: AtomicU32::new(max_frame),
             last_checksum: AtomicU64::new(pack_u64(running_checksum.0, running_checksum.1)),
-            backfilled_number: AtomicU32::new(backfilled_number),
-            checkpoint_seq_num: AtomicU32::new(checkpoint_seq_num),
+            // backfilled_number: AtomicU32::new(backfilled_number),
+            // checkpoint_seq_num: AtomicU32::new(checkpoint_seq_num),
             // by default it is set to u32::MAX to indicate that it is free and it is quite not possible for WAL to outgrow 17 TB of 4KB pages.
             readers: Arc::new(ReadersPool::new()),
             writer: Mutex::new(()),
@@ -296,8 +375,16 @@ impl GlobalWal {
         })
     }
 
+    pub fn write_header(&self) -> StorageResult<()> {
+        let raw_header = self.header.into_raw_header();
+
+        self.wal_file.write_header(&raw_header.to_bytes())?;
+
+        Ok(())
+    }
+
     pub fn get_min_frame(&self) -> FrameNumber {
-        self.min_frame.load(Ordering::Acquire)
+        self.header.get_last_checkpointed()
     }
 
     pub fn get_max_frame(&self) -> FrameNumber {
@@ -309,15 +396,15 @@ impl GlobalWal {
     }
 
     pub fn get_backfilled_number(&self) -> u32 {
-        self.backfilled_number.load(Ordering::Acquire)
+        self.header.get_backfilled_number()
     }
 
     pub fn get_checkpoint_seq_num(&self) -> u32 {
-        self.checkpoint_seq_num.load(Ordering::Acquire)
+        self.header.get_checkpoint_seq_num()
     }
 
     pub fn set_min_frame(&self, value: FrameNumber) {
-        self.min_frame.store(value, Ordering::Release);
+        self.header.set_last_checkpointed(value);
     }
 
     pub fn set_max_frame(&self, value: FrameNumber) {
@@ -330,11 +417,11 @@ impl GlobalWal {
     }
 
     pub fn set_backfilled_number(&self, value: u32) {
-        self.backfilled_number.store(value, Ordering::Release);
+        self.header.set_backfilled_number(value);
     }
 
     pub fn increment_checkpoint_seq_num(&self) {
-        self.checkpoint_seq_num.fetch_add(1, Ordering::Release);
+        self.header.increment_checkpoint_seq_num();
     }
 }
 
@@ -545,7 +632,7 @@ impl LocalWal {
         }
 
         let exclusive_lock = self.global_wal.checkpoint_lock.write();
-        let mut wal_header = self.global_wal.header.lock();
+        // let mut wal_header = self.global_wal.header.lock();
 
         let max_frame = self.global_wal.get_max_frame();
 
@@ -553,6 +640,8 @@ impl LocalWal {
         let to_backfill = frames_to_checkpoint.len() as u32;
         let mut temp_buffer = vec![0; self.global_wal.frame_size - FRAME_HEADER_SIZE];
 
+        // iterates over pages that should be moved to db file. If they are
+        // present in cache and dirty, they are written straight from cache
         for (page_number, frame_number) in frames_to_checkpoint {
             let offset = self.global_wal.db_file.calculate_offset(page_number)?;
             if let Some(mem_page) = pager.page_cache.get(&page_number) {
@@ -560,6 +649,7 @@ impl LocalWal {
                     self.global_wal
                         .db_file
                         .raw_write(offset, &mem_page.get_content().as_ptr())?;
+                    mem_page.clear_dirty();
                 }
             } else {
                 self.read_raw(frame_number, &mut temp_buffer)?;
@@ -570,30 +660,22 @@ impl LocalWal {
         self.global_wal.db_file.persist()?;
 
         // change wal header params, because it will be truncated
-        wal_header.backfilled_number = to_backfill;
-        wal_header.checkpoint_seq_num = wal_header.checkpoint_seq_num.wrapping_add(1);
-        wal_header.last_checkpointed = 0;
-        wal_header.db_size = pager.db_header.get_database_size();
-        wal_header.update_checksum();
+        self.global_wal.set_backfilled_number(to_backfill);
+        self.global_wal.set_min_frame(0);
+        self.global_wal.set_max_frame(0);
+        self.global_wal.set_backfilled_number(to_backfill);
+        self.global_wal.increment_checkpoint_seq_num();
+
+        self.global_wal.header.update_checksum();
 
         // write header to WAL
-        self.global_wal
-            .wal_file
-            .write_header(&wal_header.to_bytes())?;
+        self.global_wal.write_header()?;
 
         // removes all frames from WAL leaving the header
         self.global_wal.wal_file.truncate_beginning(max_frame)?;
 
         // persist changes to wal file
         self.global_wal.wal_file.persist()?;
-
-        self.global_wal.set_backfilled_number(to_backfill);
-        self.global_wal.set_min_frame(0);
-        self.global_wal.set_max_frame(0);
-        self.global_wal.set_last_checksum(wal_header.checksum);
-        self.global_wal
-            .set_backfilled_number(wal_header.backfilled_number);
-        self.global_wal.increment_checkpoint_seq_num();
 
         self.global_wal.index.clear();
 
