@@ -14,7 +14,7 @@ use crate::{
 
 pub const DATABASE_HEADER_SIZE: usize = size_of::<DatabaseHeader>();
 
-pub const DEFAULT_PAGE_SIZE: u16 = 4096;
+pub const DEFAULT_PAGE_SIZE: u32 = 4096;
 
 const DEFAULT_CACHE_SIZE: u32 = 2000;
 
@@ -40,7 +40,7 @@ pub struct DatabaseHeader {
     /// Version number of db.
     pub version: u32,
     /// Size of each page in database.
-    pub page_size: u16,
+    pub page_size: u32,
     /// Nummber of bytes reserved at the end of each `Page`. Default is 0
     pub reserved_space: u16,
     /// Counts how many times database file was changed. Increments on each update.
@@ -66,13 +66,13 @@ impl DatabaseHeader {
 
     pub fn from_bytes(buffer: &[u8]) -> Self {
         let version = u32::from_le_bytes(buffer[0..4].try_into().unwrap());
-        let page_size = u16::from_le_bytes(buffer[4..6].try_into().unwrap());
-        let reserved_space = u16::from_le_bytes(buffer[6..8].try_into().unwrap());
-        let change_counter = u32::from_le_bytes(buffer[8..12].try_into().unwrap());
-        let database_size = u32::from_le_bytes(buffer[12..16].try_into().unwrap());
-        let freelist_trunk_page = u32::from_le_bytes(buffer[16..20].try_into().unwrap());
-        let freelist_pages = u32::from_le_bytes(buffer[20..24].try_into().unwrap());
-        let default_page_cache_size = u32::from_le_bytes(buffer[24..28].try_into().unwrap());
+        let page_size = u32::from_le_bytes(buffer[4..8].try_into().unwrap());
+        let reserved_space = u16::from_le_bytes(buffer[8..10].try_into().unwrap());
+        let change_counter = u32::from_le_bytes(buffer[10..14].try_into().unwrap());
+        let database_size = u32::from_le_bytes(buffer[14..18].try_into().unwrap());
+        let freelist_trunk_page = u32::from_le_bytes(buffer[18..22].try_into().unwrap());
+        let freelist_pages = u32::from_le_bytes(buffer[22..26].try_into().unwrap());
+        let default_page_cache_size = u32::from_le_bytes(buffer[26..30].try_into().unwrap());
 
         Self {
             version,
@@ -94,13 +94,13 @@ impl DatabaseHeader {
 
     pub fn write_to_buffer(&self, buffer: &mut [u8]) {
         buffer[0..4].copy_from_slice(&self.version.to_le_bytes());
-        buffer[4..6].copy_from_slice(&self.page_size.to_le_bytes());
-        buffer[6..8].copy_from_slice(&self.reserved_space.to_le_bytes());
-        buffer[8..12].copy_from_slice(&self.change_counter.to_le_bytes());
-        buffer[12..16].copy_from_slice(&self.database_size.to_le_bytes());
-        buffer[16..20].copy_from_slice(&self.freelist_trunk_page.to_le_bytes());
-        buffer[20..24].copy_from_slice(&self.freelist_pages.to_le_bytes());
-        buffer[24..28].copy_from_slice(&self.default_page_cache_size.to_le_bytes());
+        buffer[4..8].copy_from_slice(&self.page_size.to_le_bytes());
+        buffer[8..10].copy_from_slice(&self.reserved_space.to_le_bytes());
+        buffer[10..14].copy_from_slice(&self.change_counter.to_le_bytes());
+        buffer[14..18].copy_from_slice(&self.database_size.to_le_bytes());
+        buffer[18..22].copy_from_slice(&self.freelist_trunk_page.to_le_bytes());
+        buffer[22..26].copy_from_slice(&self.freelist_pages.to_le_bytes());
+        buffer[26..30].copy_from_slice(&self.default_page_cache_size.to_le_bytes());
     }
 }
 

@@ -51,7 +51,7 @@ pub fn handle_connection(conn: Connection) -> DatabaseResult<()> {
 
 pub struct MemDatabaseHeader {
     pub version: u32,
-    pub page_size: usize,
+    pub page_size: u32,
     pub reserved_space: u16,
     change_counter: AtomicU32,
     database_size: AtomicU32,
@@ -62,14 +62,9 @@ pub struct MemDatabaseHeader {
 
 impl MemDatabaseHeader {
     pub fn into_raw_header(&self) -> DatabaseHeader {
-        let page_size = if self.page_size == MAX_PAGE_SIZE {
-            1
-        } else {
-            self.page_size
-        };
         DatabaseHeader {
             version: self.version,
-            page_size: page_size as u16,
+            page_size: self.page_size,
             reserved_space: self.reserved_space,
             change_counter: self.get_change_counter(),
             database_size: self.get_database_size(),
@@ -117,7 +112,7 @@ impl From<DatabaseHeader> for MemDatabaseHeader {
     fn from(db_header: DatabaseHeader) -> Self {
         Self {
             version: db_header.version,
-            page_size: db_header.get_page_size(),
+            page_size: db_header.page_size,
             reserved_space: db_header.reserved_space,
             change_counter: AtomicU32::new(db_header.change_counter),
             database_size: AtomicU32::new(db_header.database_size),

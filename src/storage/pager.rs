@@ -267,7 +267,7 @@ pub fn complete_read_page(read_result: IoResult<usize>, (page, buffer): ReadJobC
     page.clear_locked();
 }
 
-pub fn complete_write_page(write_result: IoResult<usize>, (page): WriteJobCallbackArgs) {
+pub fn complete_write_page(write_result: IoResult<usize>, page: WriteJobCallbackArgs) {
     if write_result.is_err() {
         page.set_error();
     } else {
