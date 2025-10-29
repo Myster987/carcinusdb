@@ -17,6 +17,7 @@ use crate::{
     storage::{
         Error, FrameNumber, PageNumber, StorageResult,
         buffer_pool::LocalBufferPool,
+        cache::ShardedLruCache,
         page::MAX_PAGE_SIZE,
         pager::{self, MemPageRef, Pager},
         wal::locks::{PackedU64, ReadGuard, ReadersPool, WriteGuard},
@@ -243,6 +244,7 @@ impl WalManager {
         wal_file_path: PathBuf,
         db_file: Arc<BlockIO<File>>,
         page_size: u32,
+        page_cache: Arc<ShardedLruCache>,
     ) -> StorageResult<Self> {
         // If WAL doesn't exist, then it creates header with default parameters
         let mut header = (!wal_file_path.exists())
@@ -276,7 +278,7 @@ impl WalManager {
             WAL_HEADER_SIZE,
         ));
 
-        let global_wal = GlobalWal::new(wal_file, db_file, header)?;
+        let global_wal = GlobalWal::new(wal_file, db_file, header, page_cache)?;
 
         Ok(Self {
             global_wal: Arc::new(global_wal),
@@ -300,6 +302,8 @@ pub struct GlobalWal {
     header: Arc<MemWalHeader>,
     /// WAL index that sppeds up searching for frame.
     index: Arc<WalIndex>,
+    /// Reference to page cache used durring checkpointing to dump dirty pages.
+    page_cache: Arc<ShardedLruCache>,
     // /// Last checkpointed entry in WAL.
     // min_frame: AtomicU32,
     /// Last commited frame in transaction.
@@ -326,6 +330,7 @@ impl GlobalWal {
         wal_file: Arc<BlockIO<File>>,
         db_file: Arc<BlockIO<File>>,
         header: WalHeader,
+        page_cache: Arc<ShardedLruCache>,
     ) -> StorageResult<Self> {
         let frame_size = header.page_size as usize + FRAME_HEADER_SIZE;
         // let backfilled_number = header.backfilled_number;
@@ -363,6 +368,7 @@ impl GlobalWal {
             checkpoint_size: DEFAULT_CHECKPOINT_SIZE,
             header: Arc::new(MemWalHeader::from(header)),
             index,
+            page_cache,
             // min_frame: AtomicU32::new(min_frame),
             max_frame: AtomicU32::new(max_frame),
             last_checksum: AtomicU64::new(pack_u64(running_checksum.0, running_checksum.1)),
@@ -497,13 +503,14 @@ impl LocalWal {
         self.global_wal.wal_file.persist()?;
 
         self.global_wal.set_last_checksum(self.last_checksum);
-
         self.global_wal.set_max_frame(self.max_frame);
 
         self.min_frame = 0;
         self.max_frame = 0;
 
         drop(guard);
+
+        self.checkpoint()?;
 
         Ok(())
     }
@@ -626,7 +633,7 @@ impl LocalWal {
         max_frame > self.global_wal.checkpoint_size + backfilled_number
     }
 
-    pub fn checkpoint(&mut self, pager: &mut Pager) -> StorageResult<()> {
+    pub fn checkpoint(&mut self) -> StorageResult<()> {
         if !self.should_checkpoint() {
             return Ok(());
         }
@@ -644,7 +651,7 @@ impl LocalWal {
         // present in cache and dirty, they are written straight from cache
         for (page_number, frame_number) in frames_to_checkpoint {
             let offset = self.global_wal.db_file.calculate_offset(page_number)?;
-            if let Some(mem_page) = pager.page_cache.get(&page_number) {
+            if let Some(mem_page) = self.global_wal.page_cache.get(&page_number) {
                 if mem_page.is_dirty() {
                     self.global_wal
                         .db_file

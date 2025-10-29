@@ -172,14 +172,17 @@ impl Database {
 
         let global_pool =
             GlobalBufferPool::default(db_header.get_page_size(), GLOBAL_INIT_POOL_SIZE);
+
+        let cache = Arc::new(ShardedLruCache::new(
+            db_header.default_page_cache_size as usize,
+        ));
+
         let wal_manager = WalManager::new(
             wal_file_path,
             db_file.clone(),
             db_header.get_page_size() as u32,
+            cache.clone(),
         )?;
-        let cache = Arc::new(ShardedLruCache::new(
-            db_header.default_page_cache_size as usize,
-        ));
 
         Ok(Self {
             header: Arc::new(MemDatabaseHeader::from(db_header)),

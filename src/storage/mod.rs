@@ -3,6 +3,7 @@ use thiserror::Error;
 use crate::utils::io::BlockNumber;
 
 pub mod allocator;
+pub mod btree;
 pub mod buffer_pool;
 pub mod cache;
 pub mod page;
@@ -10,14 +11,10 @@ pub mod pager;
 // pub mod schema;
 pub mod wal;
 
-pub type Oid = u32;
-
 /// Used for pages.
 pub type PageNumber = BlockNumber;
 /// Used for indexing inside page.
 pub type SlotNumber = u16;
-/// Used for transactions.
-pub type TransactionId = u32;
 /// Used for WAL frames.
 pub type FrameNumber = BlockNumber;
 
