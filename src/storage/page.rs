@@ -1,11 +1,12 @@
 use std::{
     collections::HashMap,
     io::{Cursor, IoSlice},
+    ptr::NonNull,
     sync::Arc,
 };
 
 use crate::{
-    storage::{Error, PageNumber, SlotNumber, StorageResult},
+    storage::{Error, PageNumber, SLOT_SIZE, SlotNumber, StorageResult},
     utils::{
         buffer::{Buffer, DropFn},
         bytes,
@@ -180,26 +181,53 @@ impl TryFrom<u8> for PageType {
 /// Only chunk of `Cell` is stored in `Page` and it needs to be reassembled by going over
 ///
 pub struct Page {
+    // Total free space in page. -1 if unknown.
+    total_free_space: isize,
+    // Buffer that contains page content.
     buffer: Arc<Buffer>,
+    // Map of overflowing cells.
     overflow: HashMap<SlotNumber, bool>,
 }
 
 impl Page {
     pub fn new(buffer: Arc<Buffer>) -> Self {
-        Self {
+        let mut page = Self {
+            total_free_space: -1,
             buffer,
             overflow: HashMap::new(),
-        }
+        };
+
+        page.total_free_space = page.total_free_space();
+
+        page
     }
 
-    pub fn alloc(size: usize, drop: Option<DropFn>) -> Self {
-        let buf = Buffer::alloc_page(size, drop);
-        Self::new(Arc::new(buf))
+    // pub fn alloc(size: usize, drop: Option<DropFn>) -> Self {
+    //     let buf = Buffer::alloc_page(size, drop);
+    //     Self::new(Arc::new(buf))
+    // }
+
+    // Returns total free space in page including space gap between slot array and last used offset, freeblocks and fragments.
+    pub fn total_free_space(&self) -> isize {
+        let mut total = self.free_space() as isize + self.free_fragments() as isize;
+
+        let mut current = self.first_freeblock();
+        while current != 0 {
+            let (next, size) = self.get_freeblock(current);
+            total += size as isize;
+            current = next;
+        }
+
+        total
     }
 
     #[allow(clippy::mut_from_ref)]
     pub fn as_ptr(&self) -> &mut [u8] {
         self.buffer.as_mut_slice()
+    }
+
+    fn usable_space(&self) -> usize {
+        (self.buffer.size() - self.header_size())
     }
 
     pub fn as_io_slice(&self) -> IoSlice {
@@ -263,12 +291,28 @@ impl Page {
         self.read_u16(1)
     }
 
+    pub fn set_first_freeblock(&self, value: u16) {
+        self.write_u16(1, value);
+    }
+
     pub fn last_used_offset(&self) -> u16 {
         self.read_u16(5)
     }
 
+    pub fn set_last_used_offset(&self, value: u16) {
+        self.write_u16(5, value);
+    }
+
     pub fn free_fragments(&self) -> u8 {
         self.read_u8(7)
+    }
+
+    pub fn set_free_fragments(&self, value: u8) {
+        self.write_u8(7, value)
+    }
+
+    pub fn add_free_fragment(&self, value: u8) {
+        self.set_free_fragments(self.free_fragments() + value)
     }
 
     /// Returns next `PageNumber` if `PageType` is internal or None if `Page` is Lead
@@ -282,6 +326,10 @@ impl Page {
     /// Returns number of slots in `Page`.
     pub fn len(&self) -> u16 {
         self.read_u16(3)
+    }
+
+    pub fn set_len(&self, value: u16) {
+        self.write_u16(3, value);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -305,10 +353,110 @@ impl Page {
         (self.buffer.size() - self.header_size()) as u16
     }
 
+    /// Total space that will be used by cell.
+    pub fn storage_size(&self, cell_size: u16) -> u16 {
+        SLOT_SIZE as u16 + cell_size
+    }
+
     /// Free space between slot array and last cell.
     pub fn free_space(&self) -> u16 {
         self.last_used_offset() - ((self.header_size()) as u16 + self.len() * 2)
     }
+
+    fn push_slot(&self, value: u16) {
+        let len = self.len();
+        let offset = self.header_size() + len as usize * 2;
+
+        self.write_u16(offset, value);
+        self.set_len(len + 1);
+    }
+
+    /// Returns freeblock at given offset (offset to next freeblock, size of current freeblock).
+    fn get_freeblock(&self, offset: u16) -> (u16, u16) {
+        let next_freeblock = self.read_u16(offset as usize);
+        let freeblock_size = self.read_u16(offset as usize + 2);
+        (next_freeblock, freeblock_size)
+    }
+
+    fn take_freeblock(&self, cell_size: u16) -> Option<u16> {
+        let mut prev = 0;
+        let mut current = self.first_freeblock();
+
+        while current != 0 {
+            let (next, current_size) = self.get_freeblock(current);
+
+            if current_size >= cell_size {
+                let diff = current_size - cell_size;
+                if diff < 4 {
+                    if prev == 0 {
+                        self.set_first_freeblock(next);
+                    } else {
+                        self.write_u16(prev as usize, next);
+                    }
+                    self.add_free_fragment(diff as u8);
+                    return Some(current);
+                } else {
+                    // split freeblock
+                    let new_current = current + current_size - cell_size;
+
+                    self.write_u16(current as usize + 2, current_size - cell_size);
+
+                    return Some(new_current);
+                }
+            }
+            prev = current;
+            current = next;
+        }
+
+        None
+    }
+
+    // /// Allocates space for cell and if operation was successfull, returns offset.
+    // pub fn try_insert(
+    //     &self,
+    //     slot_id: SlotNumber,
+    //     cell: BTreeCell,
+    // ) -> Result<SlotNumber, BTreeCell> {
+    //     assert!(cell_size < 4);
+
+    //     let free_space = self.free_space();
+    //     let last_used_offset = self.last_used_offset();
+
+    //     if free_space >= 2 {
+    //         if let Some(freeblock) = self.take_freeblock(cell_size) {
+    //             return Some(freeblock);
+    //         }
+    //     }
+    //     todo!()
+    // }
+
+    /// Shifts cells to right to get rid off fragmentation.
+    ///
+    /// Before:
+    ///
+    /// ```text
+    ///   HEADER   SLOT ARRAY    FREE SPACE                      CELLS
+    ///  +------+----+----+----+------------+--------+---------+--------+---------+--------+
+    ///  |      | O1 | O2 | O3 | ->      <- | CELL 3 |   DEL   | CELL 2 |   DEL   | CELL 1 |
+    ///  +------+----+----+----+------------+--------+---------+--------+---------+--------+
+    /// ```
+    ///
+    /// After:
+    ///
+    /// ```text
+    ///   HEADER   SLOT ARRAY              FREE SPACE                       CELLS
+    ///  +------+----+----+----+--------------------------------+--------+--------+--------+
+    ///  |      | O1 | O2 | O3 | ->                          <- | CELL 3 | CELL 2 | CELL 1 |
+    ///  +------+----+----+----+--------------------------------+--------+--------+--------+
+    /// ```
+    /// # Algorithm
+    ///
+    /// We can eliminate fragmentation in-place (without copying the page) by
+    /// simply moving the cells that have the largest offset first. In the
+    /// figures above, we would move CELL 1, then CELL 2 and finally CELL 3.
+    /// This makes sure that we don't write one cell on top of another or we
+    /// corrupt the data otherwise.
+    fn defragment(&self) {}
 
     /// Returns offset to Cell at given slot index. Note that in order to work correctly, valid index is needed otherwise it will return weird number.
     pub fn slot_at(&self, idx: usize) -> SlotNumber {
@@ -338,6 +486,69 @@ impl Page {
             max_cell_size,
             usable_space,
         )
+    }
+}
+
+pub struct SlotArray {
+    // Pointer to beginning of slot array
+    ptr: NonNull<u8>,
+    // Length of slot array
+    len: usize,
+}
+
+impl SlotArray {
+    pub fn new(ptr: NonNull<u8>, len: usize) -> Self {
+        Self { ptr, len }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    fn slot_array(&self) -> &[u16] {
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr().cast(), self.len) }
+    }
+
+    #[inline]
+    fn slot_array_mut(&mut self) -> &mut [u16] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr().cast(), self.len) }
+    }
+
+    /// Reads slot at given index.
+    pub fn get(&self, index: usize) -> u16 {
+        assert!(index < self.len, "Index out of range");
+
+        self.slot_array()[index].to_le()
+    }
+
+    /// Overwrites given slot with new value.
+    pub fn set(&mut self, index: usize, value: u16) {
+        assert!(index < self.len, "Index out of range");
+        self.slot_array_mut()[index] = value.to_le();
+    }
+
+    /// Inserts new slot into array and extends length of it.
+    ///
+    /// # Safety
+    ///
+    /// You need to ensure that array can grow without any problems, because
+    /// it would otherwise overwrite some memory.
+    pub fn insert(&mut self, index: usize, value: u16) {
+        assert!(index <= self.len, "Index out of range");
+        self.len += 1;
+
+        // if index isn't the last one, shift all slots to right
+        if index < self.len {
+            let end = self.len - 1;
+            self.slot_array_mut().copy_within(index..end, index + 1);
+        }
+
+        self.slot_array_mut()[index] = value.to_le();
+    }
+
+    pub fn push(&mut self, value: u16) {
+        self.insert(self.len, value);
     }
 }
 
@@ -519,4 +730,15 @@ pub fn cell_overflows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_min_max() -> anyhow::Result<()> {
+        // let page = Page::alloc(4096, None);
+        // page.as_ptr()[0] = 5;
+
+        // println!("Min cell size: {}", page.min_cell_size());
+        // println!("Max cell size: {}", page.max_cell_size());
+
+        Ok(())
+    }
 }

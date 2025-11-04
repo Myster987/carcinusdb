@@ -14,7 +14,7 @@ use crate::{
         PageNumber,
         buffer_pool::GlobalBufferPool,
         cache::ShardedLruCache,
-        page::{DATABASE_HEADER_SIZE, DatabaseHeader, MAX_PAGE_SIZE},
+        page::{DATABASE_HEADER_SIZE, DatabaseHeader},
         pager::Pager,
         wal::WalManager,
     },
@@ -126,6 +126,7 @@ impl From<DatabaseHeader> for MemDatabaseHeader {
 pub struct Database {
     header: Arc<MemDatabaseHeader>,
     db_file: Arc<BlockIO<File>>,
+
     global_pool: GlobalBufferPool,
     wal_manager: WalManager,
     cache: Arc<ShardedLruCache>,

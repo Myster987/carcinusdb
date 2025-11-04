@@ -19,7 +19,7 @@ use crate::{
         buffer_pool::LocalBufferPool,
         cache::ShardedLruCache,
         page::MAX_PAGE_SIZE,
-        pager::{self, MemPageRef, Pager},
+        pager::{self, MemPageRef},
         wal::locks::{PackedU64, ReadGuard, ReadersPool, WriteGuard},
     },
     utils::{
