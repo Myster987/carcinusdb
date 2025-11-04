@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BinaryHeap, HashMap},
     io::{Cursor, IoSlice},
     ptr::NonNull,
     sync::Arc,
@@ -363,53 +363,10 @@ impl Page {
         self.last_used_offset() - ((self.header_size()) as u16 + self.len() * 2)
     }
 
-    fn push_slot(&self, value: u16) {
-        let len = self.len();
-        let offset = self.header_size() + len as usize * 2;
-
-        self.write_u16(offset, value);
-        self.set_len(len + 1);
-    }
-
-    /// Returns freeblock at given offset (offset to next freeblock, size of current freeblock).
-    fn get_freeblock(&self, offset: u16) -> (u16, u16) {
-        let next_freeblock = self.read_u16(offset as usize);
-        let freeblock_size = self.read_u16(offset as usize + 2);
-        (next_freeblock, freeblock_size)
-    }
-
-    fn take_freeblock(&self, cell_size: u16) -> Option<u16> {
-        let mut prev = 0;
-        let mut current = self.first_freeblock();
-
-        while current != 0 {
-            let (next, current_size) = self.get_freeblock(current);
-
-            if current_size >= cell_size {
-                let diff = current_size - cell_size;
-                if diff < 4 {
-                    if prev == 0 {
-                        self.set_first_freeblock(next);
-                    } else {
-                        self.write_u16(prev as usize, next);
-                    }
-                    self.add_free_fragment(diff as u8);
-                    return Some(current);
-                } else {
-                    // split freeblock
-                    let new_current = current + current_size - cell_size;
-
-                    self.write_u16(current as usize + 2, current_size - cell_size);
-
-                    return Some(new_current);
-                }
-            }
-            prev = current;
-            current = next;
-        }
-
-        None
-    }
+    // pub fn slot_array(&self) -> SlotArray {
+    //     let set_len_fn = Box::new(|len| self.set_len(len));
+    //     SlotArray::new(self., self.len(), set_len_fn);
+    // }
 
     // /// Allocates space for cell and if operation was successfull, returns offset.
     // pub fn try_insert(
@@ -456,7 +413,10 @@ impl Page {
     /// figures above, we would move CELL 1, then CELL 2 and finally CELL 3.
     /// This makes sure that we don't write one cell on top of another or we
     /// corrupt the data otherwise.
-    fn defragment(&self) {}
+    fn defragment(&self) {
+
+        // let min_heap = BinaryHeap::from_iter(iter)
+    }
 
     /// Returns offset to Cell at given slot index. Note that in order to work correctly, valid index is needed otherwise it will return weird number.
     pub fn slot_at(&self, idx: usize) -> SlotNumber {
@@ -489,43 +449,79 @@ impl Page {
     }
 }
 
-pub struct SlotArray {
-    // Pointer to beginning of slot array
-    ptr: NonNull<u8>,
-    // Length of slot array
-    len: usize,
+/// View to slot array to make operations on it easier.
+pub struct SlotArray<'a> {
+    // Pointer to beginning of page.
+    mem: &'a mut [u8],
+    /// Offset to `num_slots`.
+    num_slots_offset: usize,
+    /// Offset to slot array
+    slot_array_offset: usize,
 }
 
-impl SlotArray {
-    pub fn new(ptr: NonNull<u8>, len: usize) -> Self {
-        Self { ptr, len }
+impl<'a> SlotArray<'a> {
+    pub fn new(mem: &'a mut [u8], num_slots_offset: usize, slot_array_offset: usize) -> Self {
+        Self {
+            mem,
+            num_slots_offset,
+            slot_array_offset,
+        }
     }
 
-    pub fn len(&self) -> usize {
-        self.len
+    fn read_u8(&self, pos: usize) -> u8 {
+        self.mem[pos]
     }
 
-    #[inline]
-    fn slot_array(&self) -> &[u16] {
-        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr().cast(), self.len) }
+    fn read_u16(&self, pos: usize) -> u16 {
+        u16::from_le_bytes([self.mem[pos], self.mem[pos + 1]])
+    }
+
+    fn write_u8(&mut self, pos: usize, value: u8) {
+        self.mem[pos] = value;
+    }
+
+    fn write_u16(&mut self, pos: usize, value: u16) {
+        self.mem[pos..pos + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    pub fn len(&self) -> u16 {
+        self.read_u16(self.num_slots_offset)
+    }
+
+    pub fn set_len(&mut self, value: u16) {
+        self.write_u16(self.num_slots_offset, value);
+    }
+
+    pub fn increment_len(&mut self) {
+        let new_len = self.len() + 1;
+        self.set_len(new_len);
     }
 
     #[inline]
     fn slot_array_mut(&mut self) -> &mut [u16] {
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr().cast(), self.len) }
+        let beginning = self.slot_array_offset;
+        let end = beginning + self.len() as usize * SLOT_SIZE;
+
+        let slot_array_region = &mut self.mem[beginning..end];
+        crate::utils::cast::cast_slice_mut(slot_array_region)
     }
 
     /// Reads slot at given index.
     pub fn get(&self, index: usize) -> u16 {
-        assert!(index < self.len, "Index out of range");
+        assert!(index < self.len() as usize, "Index out of range");
 
-        self.slot_array()[index].to_le()
+        let offset = self.slot_array_offset + index * SLOT_SIZE;
+        let raw = self.read_u16(offset);
+
+        u16::from_le(raw)
     }
 
     /// Overwrites given slot with new value.
     pub fn set(&mut self, index: usize, value: u16) {
-        assert!(index < self.len, "Index out of range");
-        self.slot_array_mut()[index] = value.to_le();
+        assert!(index < self.len() as usize, "Index out of range");
+
+        let offset = self.slot_array_offset + index * SLOT_SIZE;
+        self.write_u16(offset, value.to_le());
     }
 
     /// Inserts new slot into array and extends length of it.
@@ -535,20 +531,109 @@ impl SlotArray {
     /// You need to ensure that array can grow without any problems, because
     /// it would otherwise overwrite some memory.
     pub fn insert(&mut self, index: usize, value: u16) {
-        assert!(index <= self.len, "Index out of range");
-        self.len += 1;
+        assert!(index <= self.len() as usize, "Index out of range");
+        self.increment_len();
 
         // if index isn't the last one, shift all slots to right
-        if index < self.len {
-            let end = self.len - 1;
+        if index < self.len() as usize {
+            let end = self.len() as usize - 1;
             self.slot_array_mut().copy_within(index..end, index + 1);
         }
 
-        self.slot_array_mut()[index] = value.to_le();
+        self.set(index, value);
     }
 
     pub fn push(&mut self, value: u16) {
-        self.insert(self.len, value);
+        self.insert(self.len() as usize, value);
+    }
+}
+
+pub struct FreeblockList<'a> {
+    /// Mutable reference to whole page content.
+    mem: &'a mut [u8],
+}
+
+impl<'a> FreeblockList<'a> {
+    pub fn new(mem: &'a mut [u8]) -> Self {
+        Self { mem }
+    }
+
+    fn read_u8(&self, pos: usize) -> u8 {
+        self.mem[pos]
+    }
+
+    fn read_u16(&self, pos: usize) -> u16 {
+        u16::from_le_bytes([self.mem[pos], self.mem[pos + 1]])
+    }
+
+    fn write_u8(&mut self, pos: usize, value: u8) {
+        self.mem[pos] = value;
+    }
+
+    fn write_u16(&mut self, pos: usize, value: u16) {
+        self.mem[pos..pos + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    pub fn first_freeblock(&self) -> u16 {
+        self.read_u16(1)
+    }
+
+    pub fn set_first_freeblock(&mut self, value: u16) {
+        self.write_u16(1, value);
+    }
+
+    pub fn free_fragments(&self) -> u8 {
+        self.read_u8(7)
+    }
+
+    pub fn set_free_fragments(&mut self, value: u8) {
+        self.write_u8(7, value)
+    }
+
+    pub fn add_free_fragment(&mut self, value: u8) {
+        self.set_free_fragments(self.free_fragments() + value)
+    }
+
+    /// Returns freeblock at given offset (offset to next freeblock, size of current freeblock).
+    fn get_freeblock(&self, offset: u16) -> (u16, u16) {
+        let next_freeblock = self.read_u16(offset as usize);
+        let freeblock_size = self.read_u16(offset as usize + 2);
+        (next_freeblock, freeblock_size)
+    }
+
+    // Looks for freeblock that can fit given `cell_size`. If there is one, it
+    // will return offset to it, otherwise it will return None.
+    fn take_freeblock(&mut self, cell_size: u16) -> Option<u16> {
+        let mut prev = 0;
+        let mut current = self.first_freeblock();
+
+        while current != 0 {
+            let (next, current_size) = self.get_freeblock(current);
+
+            if current_size >= cell_size {
+                let diff = current_size - cell_size;
+                if diff < 4 {
+                    if prev == 0 {
+                        self.set_first_freeblock(next);
+                    } else {
+                        self.write_u16(prev as usize, next);
+                    }
+                    self.add_free_fragment(diff as u8);
+                    return Some(current);
+                } else {
+                    // split freeblock
+                    let new_current = current + current_size - cell_size;
+
+                    self.write_u16(current as usize + 2, current_size - cell_size);
+
+                    return Some(new_current);
+                }
+            }
+            prev = current;
+            current = next;
+        }
+
+        None
     }
 }
 
