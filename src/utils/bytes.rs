@@ -3,7 +3,7 @@ use bytes::Buf;
 use super::{Error, Result};
 
 /// Takes `src` that implements [Buf] and advances current position by 1. Returns u8.
-pub fn get_u8(src: &mut impl Buf) -> Result<u8> {
+pub fn get_u8<T: Buf>(src: &mut T) -> Result<u8> {
     if !src.has_remaining() {
         return Err(Error::InvalidBytes);
     }
@@ -11,12 +11,12 @@ pub fn get_u8(src: &mut impl Buf) -> Result<u8> {
 }
 
 /// Takes `src` that implements [Buf] and advences current position by 1. Returns bool.
-pub fn get_bool(src: &mut impl Buf) -> Result<bool> {
+pub fn get_bool<T: Buf>(src: &mut T) -> Result<bool> {
     Ok(get_u8(src)? == 0)
 }
 
 /// Takes `src` that implements [Buf] and advances current position by 2. Returns u16. Uses little endian.
-pub fn get_u16(src: &mut impl Buf) -> Result<u16> {
+pub fn get_u16<T: Buf>(src: &mut T) -> Result<u16> {
     if !src.has_remaining() {
         return Err(Error::InvalidBytes);
     }
@@ -24,7 +24,7 @@ pub fn get_u16(src: &mut impl Buf) -> Result<u16> {
 }
 
 /// Takes `src` that implements [Buf] and advances current position by 4. Returns u32. Uses little endian.
-pub fn get_u32(src: &mut impl Buf) -> Result<u32> {
+pub fn get_u32<T: Buf>(src: &mut T) -> Result<u32> {
     if !src.has_remaining() {
         return Err(Error::InvalidBytes);
     }
@@ -32,7 +32,7 @@ pub fn get_u32(src: &mut impl Buf) -> Result<u32> {
 }
 
 /// Takes `src` that implements [Buf] and advances current position by 8. Returns u64. Uses little endian.
-pub fn get_u64(src: &mut impl Buf) -> Result<u64> {
+pub fn get_u64<T: Buf>(src: &mut T) -> Result<u64> {
     if !src.has_remaining() {
         return Err(Error::InvalidBytes);
     }
@@ -40,7 +40,7 @@ pub fn get_u64(src: &mut impl Buf) -> Result<u64> {
 }
 
 /// Takes `src` that implements [Buf] and advances position by 1-9, depending on size of varint. Returns u64 as varint.
-pub fn read_varint(src: &mut impl Buf) -> u64 {
+pub fn read_varint<T: Buf>(src: &mut T) -> u64 {
     let mut v: u64 = 0;
     for _ in 0..8 {
         match src.try_get_u8().ok() {

@@ -1,7 +1,7 @@
 use std::{
     collections::{BinaryHeap, HashMap},
+    fmt::Debug,
     io::{Cursor, IoSlice},
-    ptr::NonNull,
     sync::Arc,
 };
 
@@ -181,8 +181,8 @@ impl TryFrom<u8> for PageType {
 /// Only chunk of `Cell` is stored in `Page` and it needs to be reassembled by going over
 ///
 pub struct Page {
-    // Total free space in page. -1 if unknown.
-    total_free_space: isize,
+    // // Total free space in page. -1 if unknown.
+    // total_free_space: isize,
     // Buffer that contains page content.
     buffer: Arc<Buffer>,
     // Map of overflowing cells.
@@ -191,21 +191,16 @@ pub struct Page {
 
 impl Page {
     pub fn new(buffer: Arc<Buffer>) -> Self {
-        let mut page = Self {
-            total_free_space: -1,
+        Self {
             buffer,
             overflow: HashMap::new(),
-        };
-
-        page.total_free_space = page.total_free_space();
-
-        page
+        }
     }
 
-    // pub fn alloc(size: usize, drop: Option<DropFn>) -> Self {
-    //     let buf = Buffer::alloc_page(size, drop);
-    //     Self::new(Arc::new(buf))
-    // }
+    pub fn alloc(size: usize, drop: Option<DropFn>) -> Self {
+        let buf = Buffer::alloc_page(size, drop);
+        Self::new(Arc::new(buf))
+    }
 
     // Returns total free space in page including space gap between slot array and last used offset, freeblocks and fragments.
     pub fn total_free_space(&self) -> isize {
@@ -213,9 +208,10 @@ impl Page {
 
         let mut current = self.first_freeblock();
         while current != 0 {
-            let (next, size) = self.get_freeblock(current);
-            total += size as isize;
-            current = next;
+            todo!()
+            // let (next, size) = self.get_freeblock(current);
+            // total += size as isize;
+            // current = next;
         }
 
         total
@@ -228,6 +224,14 @@ impl Page {
 
     fn usable_space(&self) -> usize {
         (self.buffer.size() - self.header_size())
+    }
+
+    fn min_cell_size(&self) -> usize {
+        min_cell_size(self.usable_space())
+    }
+
+    fn max_cell_size(&self) -> usize {
+        max_cell_size(self.usable_space())
     }
 
     pub fn as_io_slice(&self) -> IoSlice {
@@ -340,6 +344,10 @@ impl Page {
         !self.overflow.is_empty()
     }
 
+    fn can_fit_new_slot(&self) -> bool {
+        self.header_size() as u16 + (self.len() + 1) * SLOT_SIZE as u16 >= self.last_used_offset()
+    }
+
     /// Depending on `PageType`, this function returns 12 or 8.
     pub fn header_size(&self) -> usize {
         match self.page_type() {
@@ -363,29 +371,13 @@ impl Page {
         self.last_used_offset() - ((self.header_size()) as u16 + self.len() * 2)
     }
 
-    // pub fn slot_array(&self) -> SlotArray {
-    //     let set_len_fn = Box::new(|len| self.set_len(len));
-    //     SlotArray::new(self., self.len(), set_len_fn);
-    // }
+    pub fn slot_array(&self) -> SlotArray {
+        SlotArray::new(self.as_ptr(), 3, self.header_size())
+    }
 
-    // /// Allocates space for cell and if operation was successfull, returns offset.
-    // pub fn try_insert(
-    //     &self,
-    //     slot_id: SlotNumber,
-    //     cell: BTreeCell,
-    // ) -> Result<SlotNumber, BTreeCell> {
-    //     assert!(cell_size < 4);
-
-    //     let free_space = self.free_space();
-    //     let last_used_offset = self.last_used_offset();
-
-    //     if free_space >= 2 {
-    //         if let Some(freeblock) = self.take_freeblock(cell_size) {
-    //             return Some(freeblock);
-    //         }
-    //     }
-    //     todo!()
-    // }
+    pub fn freeblock_list(&self) -> FreeblockList {
+        FreeblockList::new(self.as_ptr())
+    }
 
     /// Shifts cells to right to get rid off fragmentation.
     ///
@@ -414,8 +406,33 @@ impl Page {
     /// This makes sure that we don't write one cell on top of another or we
     /// corrupt the data otherwise.
     fn defragment(&self) {
+        let mut slots = self.slot_array();
 
-        // let min_heap = BinaryHeap::from_iter(iter)
+        let mut min_heap = BinaryHeap::from_iter(
+            slots
+                .slot_array()
+                .iter()
+                .enumerate()
+                .map(|(i, &val)| (val, i)),
+        );
+
+        let mut current_offset = self.buffer.size();
+
+        while let Some((offset, i)) = min_heap.pop() {
+            let cell_size = self.get_cell_size(offset);
+
+            let start = offset as usize;
+            let end = start + cell_size as usize;
+
+            current_offset -= cell_size as usize;
+
+            self.as_ptr().copy_within(start..end, current_offset);
+
+            slots.set(i, current_offset as u16);
+        }
+
+        self.set_last_used_offset(current_offset as u16);
+        self.set_first_freeblock(0);
     }
 
     /// Returns offset to Cell at given slot index. Note that in order to work correctly, valid index is needed otherwise it will return weird number.
@@ -424,28 +441,83 @@ impl Page {
         self.read_u16(slot_offset)
     }
 
-    pub fn cell_get(
-        &self,
-        idx: usize,
-        min_cell_size: usize,
-        max_cell_size: usize,
-        usable_space: usize,
-    ) -> StorageResult<BTreeCell> {
-        let buf = self.as_ptr();
+    fn get_cell_size(&self, offset: u16) -> u16 {
+        let min_cell_size = min_cell_size(self.usable_space());
+        let max_cell_size = max_cell_size(self.usable_space());
 
-        let offset_to_cell = self.slot_at(idx);
-
-        // buf lifetime is change to 'static to avoid later headache. But we need to be carefull with this reference.
-        let buf = unsafe { std::mem::transmute::<&[u8], &'static [u8]>(buf) };
-
-        read_btree_cell(
-            buf,
+        local_btree_cell_size(
+            &self.as_ptr(),
             self.page_type(),
-            offset_to_cell as u64,
+            offset,
             min_cell_size,
             max_cell_size,
-            usable_space,
+            self.usable_space(),
         )
+    }
+
+    pub fn cell_get(&self, index: usize) -> StorageResult<BTreeCell> {
+        let offset_to_cell = self.slot_array().get(index);
+
+        let min_cell_size = min_cell_size(self.usable_space());
+        let max_cell_size = max_cell_size(self.usable_space());
+
+        // buf lifetime is change to 'static to avoid later headache. But we need to be carefull with this reference.
+        let page_buffer = unsafe { std::mem::transmute::<&[u8], &'static [u8]>(&self.as_ptr()) };
+
+        read_btree_cell(
+            page_buffer,
+            self.page_type(),
+            offset_to_cell,
+            min_cell_size,
+            max_cell_size,
+            self.usable_space(),
+        )
+    }
+
+    pub fn try_insert_cell(
+        &self,
+        index: SlotNumber,
+        cell: BTreeCell,
+    ) -> Result<SlotNumber, BTreeCell> {
+        let cell_size = cell.local_storage_size();
+
+        // we can't fit new slot, so we can try defragmenting page to reclaim dead space.
+        if !self.can_fit_new_slot() {
+            self.defragment();
+        }
+
+        let mut slot_array = self.slot_array();
+        let mut freeblocks = self.freeblock_list();
+
+        let (_, local_payload_size) = cell_overflows(
+            cell_size,
+            self.min_cell_size(),
+            self.max_cell_size(),
+            self.usable_space(),
+        );
+
+        // look for free space between pages before allocating new one.
+        if let Some(offset) = freeblocks.take_freeblock(local_payload_size as u16) {
+            write_btree_cell(self.as_ptr(), offset, &cell).expect("Writting cell failed");
+
+            slot_array.insert(index as usize, offset);
+
+            return Ok(index);
+        }
+
+        if local_payload_size + SLOT_SIZE <= self.free_space() as usize {
+            let offset = self.last_used_offset() - local_payload_size as u16;
+
+            write_btree_cell(self.as_ptr(), offset, &cell).expect("Writting cell failed");
+
+            slot_array.insert(index as usize, offset);
+
+            self.set_last_used_offset(offset);
+
+            return Ok(index);
+        }
+
+        Err(cell)
     }
 }
 
@@ -468,16 +540,8 @@ impl<'a> SlotArray<'a> {
         }
     }
 
-    fn read_u8(&self, pos: usize) -> u8 {
-        self.mem[pos]
-    }
-
     fn read_u16(&self, pos: usize) -> u16 {
         u16::from_le_bytes([self.mem[pos], self.mem[pos + 1]])
-    }
-
-    fn write_u8(&mut self, pos: usize, value: u8) {
-        self.mem[pos] = value;
     }
 
     fn write_u16(&mut self, pos: usize, value: u16) {
@@ -498,6 +562,15 @@ impl<'a> SlotArray<'a> {
     }
 
     #[inline]
+    fn slot_array(&self) -> &[u16] {
+        let beginning = self.slot_array_offset;
+        let end = beginning + self.len() as usize * SLOT_SIZE;
+
+        let slot_array_region = &self.mem[beginning..end];
+        crate::utils::cast::cast_slice(slot_array_region)
+    }
+
+    #[inline]
     fn slot_array_mut(&mut self) -> &mut [u16] {
         let beginning = self.slot_array_offset;
         let end = beginning + self.len() as usize * SLOT_SIZE;
@@ -510,9 +583,7 @@ impl<'a> SlotArray<'a> {
     pub fn get(&self, index: usize) -> u16 {
         assert!(index < self.len() as usize, "Index out of range");
 
-        let offset = self.slot_array_offset + index * SLOT_SIZE;
-        let raw = self.read_u16(offset);
-
+        let raw = self.slot_array()[index];
         u16::from_le(raw)
     }
 
@@ -520,8 +591,7 @@ impl<'a> SlotArray<'a> {
     pub fn set(&mut self, index: usize, value: u16) {
         assert!(index < self.len() as usize, "Index out of range");
 
-        let offset = self.slot_array_offset + index * SLOT_SIZE;
-        self.write_u16(offset, value.to_le());
+        self.slot_array_mut()[index] = value.to_le();
     }
 
     /// Inserts new slot into array and extends length of it.
@@ -540,11 +610,23 @@ impl<'a> SlotArray<'a> {
             self.slot_array_mut().copy_within(index..end, index + 1);
         }
 
-        self.set(index, value);
+        self.slot_array_mut()[index] = value.to_le();
     }
 
     pub fn push(&mut self, value: u16) {
         self.insert(self.len() as usize, value);
+    }
+}
+
+impl Debug for SlotArray<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let slots = self.slot_array();
+
+        f.write_str(&format!(
+            "SlotArray {{ len: {}, slots: {:?} }}",
+            self.len(),
+            slots
+        ))
     }
 }
 
@@ -645,55 +727,205 @@ pub enum BTreeCell {
     TableLeafCell(TableLeafCell),
 }
 
+impl BTreeCell {
+    pub fn local_storage_size(&self) -> usize {
+        match self {
+            Self::IndexInternalCell(cell) => cell.local_storage_size(),
+            Self::IndexLeafCell(cell) => cell.local_storage_size(),
+            Self::TableInternalCell(cell) => cell.local_storage_size(),
+            Self::TableLeafCell(cell) => cell.local_storage_size(),
+        }
+    }
+}
+
+pub trait CellOps {
+    /// Size of cell including header, but only stored locally (not total)
+    fn local_storage_size(&self) -> usize;
+    // fn total_storage_size(&self) -> usize;
+}
+
 pub struct IndexInternalCell {
-    /// Left child of BTree Page
+    /// Left child of BTree Page.
     pub left_child: PageNumber,
-    /// Total size of Cell including overflow Pages
+    /// Total size of Cell including overflow Pages.
     payload_size: u64,
-    /// Pointer to content of cell living in Page. It doesn't include overflowing payload
+    /// Pointer to content of cell living in Page. It doesn't include overflowing payload.
     payload: &'static [u8],
-    /// If cell is overflowing then it points to first overflowing page
+    /// If cell is overflowing then it points to first overflowing page.
+    /// Placed at the end of cell (not in the `payload` field).
     first_overflow: Option<PageNumber>,
+}
+
+impl CellOps for IndexInternalCell {
+    fn local_storage_size(&self) -> usize {
+        let mut size = 0;
+        let temp = &mut [0; 9];
+
+        size += size_of_val(&self.left_child);
+        size += bytes::write_varint(temp, self.payload_size);
+
+        size += self.payload.len();
+
+        size
+    }
 }
 
 pub struct IndexLeafCell {
-    /// Total size of Cell including overflow Pages
+    /// Total size of Cell including overflow Pages.
     payload_size: u64,
-    /// Pointer to content of cell living in Page. It doesn't include overflowing payload
+    /// Pointer to content of cell living in Page. It doesn't include overflowing payload.
     payload: &'static [u8],
-    /// If cell is overflowing then it points to first overflowing page
+    /// If cell is overflowing then it points to first overflowing page.
+    /// Placed at the end of cell (not in the `payload` field).
     first_overflow: Option<PageNumber>,
+}
+
+impl CellOps for IndexLeafCell {
+    fn local_storage_size(&self) -> usize {
+        let mut size = 0;
+        let temp = &mut [0; 9];
+
+        size += bytes::write_varint(temp, self.payload_size);
+
+        size += self.payload.len();
+
+        size
+    }
 }
 
 pub struct TableInternalCell {
-    /// Unique ID of row
+    /// Unique ID of row.
     row_id: i64,
-    /// Left child of BTree Page
+    /// Left child of BTree Page.
     pub left_child: PageNumber,
 }
 
+impl CellOps for TableInternalCell {
+    fn local_storage_size(&self) -> usize {
+        let mut size = 0;
+        let temp = &mut [0; 9];
+
+        size += bytes::write_varint(temp, bytes::zigzag_encode(self.row_id));
+        size += size_of_val(&self.left_child);
+
+        size
+    }
+}
+
 pub struct TableLeafCell {
-    /// Unique ID of row
+    /// Unique ID of row.
     row_id: i64,
-    /// Total size of Cell including overflow Pages
+    /// Total size of Cell including overflow Pages.
     payload_size: u64,
-    /// Pointer to content of cell living in Page. It doesn't include overflowing payload
+    /// Pointer to content of cell living in Page. It doesn't include overflowing payload.
     payload: &'static [u8],
-    /// If cell is overflowing then it points to first overflowing page
+    /// If cell is overflowing then it points to first overflowing page.
+    /// Placed at the end of cell (not in the `payload` field).
     first_overflow: Option<PageNumber>,
 }
 
-/// Creates `BTreeCell` based on provided `PageType`.
-pub fn read_btree_cell(
-    buf: &'static [u8],
+impl CellOps for TableLeafCell {
+    fn local_storage_size(&self) -> usize {
+        let mut size = 0;
+        let temp = &mut [0; 9];
+
+        size += bytes::write_varint(temp, bytes::zigzag_encode(self.row_id));
+        size += bytes::write_varint(temp, self.payload_size);
+
+        size += self.payload.len();
+
+        size
+    }
+}
+
+pub fn local_btree_cell_size(
+    page_buffer: &'_ [u8],
     page_type: PageType,
-    pos: u64,
+    offset: u16,
+    min_cell_size: usize,
+    max_cell_size: usize,
+    usable_space: usize,
+) -> u16 {
+    let mut cursor = Cursor::new(page_buffer);
+    cursor.set_position(offset as u64);
+
+    let mut size = 0;
+    let temp = &mut [0; 9];
+
+    match page_type {
+        PageType::IndexInternal => {
+            let _ = bytes::get_u32(&mut cursor);
+            size += size_of::<PageNumber>();
+
+            // variable size, not payload size
+            let payload_size = bytes::read_varint(&mut cursor);
+            size += bytes::write_varint(temp, payload_size);
+
+            let (_, local_payload_size) = cell_overflows(
+                payload_size as usize,
+                min_cell_size,
+                max_cell_size,
+                usable_space,
+            );
+
+            size += local_payload_size;
+        }
+        PageType::IndexLeaf => {
+            // variable size, not payload size
+            let payload_size = bytes::read_varint(&mut cursor);
+            size += bytes::write_varint(temp, payload_size);
+
+            let (_, local_payload_size) = cell_overflows(
+                payload_size as usize,
+                min_cell_size,
+                max_cell_size,
+                usable_space,
+            );
+
+            size += local_payload_size;
+        }
+        PageType::TableInternal => {
+            // variable size, not row_id size
+            let row_id = bytes::read_varint(&mut cursor);
+            size += bytes::write_varint(temp, row_id);
+
+            size += size_of::<PageNumber>();
+        }
+        PageType::TableLeaf => {
+            // variable size, not row_id size
+            let row_id = bytes::read_varint(&mut cursor);
+            size += bytes::write_varint(temp, row_id);
+
+            // variable size, not payload size
+            let payload_size = bytes::read_varint(&mut cursor);
+            size += bytes::write_varint(temp, payload_size);
+
+            let (_, local_payload_size) = cell_overflows(
+                payload_size as usize,
+                min_cell_size,
+                max_cell_size,
+                usable_space,
+            );
+
+            size += local_payload_size;
+        }
+    }
+
+    size as u16
+}
+
+/// Creates `BTreeCell` based on provided `PageType`. `offset` param is offset
+/// to beginning of given cell.
+pub fn read_btree_cell(
+    page_buffer: &'static [u8],
+    page_type: PageType,
+    offset: u16,
     min_cell_size: usize,
     max_cell_size: usize,
     usable_space: usize,
 ) -> StorageResult<BTreeCell> {
-    let mut cursor = Cursor::new(buf);
-    cursor.set_position(pos as u64);
+    let mut cursor = Cursor::new(page_buffer);
+    cursor.set_position(offset as u64);
 
     match page_type {
         PageType::IndexInternal => {
@@ -707,16 +939,13 @@ pub fn read_btree_cell(
                 usable_space,
             );
 
-            let first_overflow = if is_overflowing {
-                Some(bytes::get_u32(&mut cursor)?)
-            } else {
-                None
-            };
-
             let start = cursor.position() as usize;
             let end = start + local_payload_size;
 
-            let payload = &cursor.into_inner()[start..end];
+            let payload_buffer = &cursor.into_inner()[start..end];
+
+            let (payload, first_overflow) =
+                read_local_payload(payload_buffer, local_payload_size, is_overflowing);
 
             let cell = IndexInternalCell {
                 left_child,
@@ -737,16 +966,13 @@ pub fn read_btree_cell(
                 usable_space,
             );
 
-            let first_overflow = if is_overflowing {
-                Some(bytes::get_u32(&mut cursor)?)
-            } else {
-                None
-            };
-
             let start = cursor.position() as usize;
             let end = start + local_payload_size;
 
-            let payload = &cursor.into_inner()[start..end];
+            let payload_buffer = &cursor.into_inner()[start..end];
+
+            let (payload, first_overflow) =
+                read_local_payload(payload_buffer, local_payload_size, is_overflowing);
 
             let cell = IndexLeafCell {
                 payload_size,
@@ -773,16 +999,13 @@ pub fn read_btree_cell(
                 usable_space,
             );
 
-            let first_overflow = if is_overflowing {
-                Some(bytes::get_u32(&mut cursor)?)
-            } else {
-                None
-            };
-
             let start = cursor.position() as usize;
             let end = start + local_payload_size;
 
-            let payload = &cursor.into_inner()[start..end];
+            let payload_buffer = &cursor.into_inner()[start..end];
+
+            let (payload, first_overflow) =
+                read_local_payload(payload_buffer, local_payload_size, is_overflowing);
 
             let cell = TableLeafCell {
                 row_id,
@@ -792,6 +1015,100 @@ pub fn read_btree_cell(
             };
             Ok(BTreeCell::TableLeafCell(cell))
         }
+    }
+}
+
+pub fn write_btree_cell(
+    page_buffer: &'_ mut [u8],
+    offset: u16,
+    cell: &BTreeCell,
+) -> StorageResult<()> {
+    let mut position = offset as usize;
+
+    match cell {
+        BTreeCell::IndexInternalCell(content) => {
+            page_buffer[position..position + 4].copy_from_slice(&content.left_child.to_le_bytes());
+
+            position += 4;
+
+            let written = bytes::write_varint(&mut page_buffer[position..], content.payload_size);
+
+            position += written;
+
+            page_buffer[position..position + content.payload.len()]
+                .copy_from_slice(content.payload);
+
+            position += content.payload.len();
+
+            if let Some(first_overflow) = content.first_overflow {
+                page_buffer[position..position + 4].copy_from_slice(&first_overflow.to_le_bytes());
+            }
+        }
+        BTreeCell::IndexLeafCell(content) => {
+            let written = bytes::write_varint(&mut page_buffer[position..], content.payload_size);
+
+            position += written;
+
+            page_buffer[position..position + content.payload.len()]
+                .copy_from_slice(content.payload);
+
+            position += content.payload.len();
+
+            if let Some(first_overflow) = content.first_overflow {
+                page_buffer[position..position + 4].copy_from_slice(&first_overflow.to_le_bytes());
+            }
+        }
+        BTreeCell::TableInternalCell(content) => {
+            let written = bytes::write_varint(
+                &mut page_buffer[position..],
+                bytes::zigzag_encode(content.row_id),
+            );
+
+            position += written;
+
+            page_buffer[position..position + 4].copy_from_slice(&content.left_child.to_le_bytes());
+        }
+        BTreeCell::TableLeafCell(content) => {
+            let written = bytes::write_varint(
+                &mut page_buffer[position..],
+                bytes::zigzag_encode(content.row_id),
+            );
+
+            position += written;
+
+            let written = bytes::write_varint(&mut page_buffer[position..], content.payload_size);
+
+            position += written;
+
+            page_buffer[position..position + content.payload.len()]
+                .copy_from_slice(content.payload);
+
+            if let Some(first_overflow) = content.first_overflow {
+                page_buffer[position..position + 4].copy_from_slice(&first_overflow.to_le_bytes());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Takes region where cell payload is stored, `payload_size` and `is_overflowing`
+/// and returns slice of payload (without next value! ==>) and **if exists, `first_overflow` page pointer**.
+pub fn read_local_payload(
+    payload_region: &'_ [u8],
+    payload_size: usize,
+    is_overflowing: bool,
+) -> (&'_ [u8], Option<PageNumber>) {
+    if is_overflowing {
+        let overflow_page = u32::from_le_bytes([
+            payload_region[payload_size - 1],
+            payload_region[payload_size - 2],
+            payload_region[payload_size - 3],
+            payload_region[payload_size - 4],
+        ]);
+        (&payload_region[..payload_size - 4], Some(overflow_page))
+    } else {
+        (&payload_region[..payload_size], None)
     }
 }
 
@@ -818,11 +1135,100 @@ mod tests {
 
     #[test]
     fn test_min_max() -> anyhow::Result<()> {
-        // let page = Page::alloc(4096, None);
-        // page.as_ptr()[0] = 5;
+        let page = Page::alloc(4096, None);
+        page.as_ptr()[0] = 5;
 
         // println!("Min cell size: {}", page.min_cell_size());
         // println!("Max cell size: {}", page.max_cell_size());
+
+        let mut slot_array = page.slot_array();
+        let mut sample = Vec::new();
+
+        slot_array.push(100);
+        slot_array.push(200);
+        slot_array.push(500);
+
+        sample.push(100);
+        sample.push(200);
+        sample.push(500);
+
+        slot_array.insert(1, 300);
+        sample.insert(1, 300);
+
+        println!("{:?}", slot_array);
+
+        assert!(slot_array.len() as usize == sample.len());
+        assert!(slot_array.slot_array() == &sample);
+
+        page.defragment();
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_defragment() -> anyhow::Result<()> {
+        let page = Page::alloc(512, None);
+        page.as_ptr()[0] = 5;
+        page.set_last_used_offset(100);
+
+        let mut slot_array = page.slot_array();
+
+        slot_array.push(100);
+
+        let mut buf = vec![];
+
+        let left_child: PageNumber = 10;
+        buf.extend_from_slice(&left_child.to_le_bytes());
+
+        let payload_size = 50;
+
+        let varint = &mut [0; 9];
+
+        let len = bytes::write_varint(varint, payload_size);
+
+        buf.extend_from_slice(&varint[..len]);
+
+        let start = 100 + 4 + len;
+        let end = start + payload_size as usize;
+
+        let temp = vec![1; end - start];
+
+        page.as_ptr()[100..start].copy_from_slice(&buf);
+
+        page.as_ptr()[start..end].copy_from_slice(&temp);
+
+        let mut buf = vec![];
+
+        slot_array.insert(0, 300);
+
+        let left_child: PageNumber = 30;
+        buf.extend_from_slice(&left_child.to_le_bytes());
+
+        let payload_size = 50;
+
+        let varint = &mut [0; 9];
+
+        let len = bytes::write_varint(varint, payload_size);
+
+        buf.extend_from_slice(&varint[..len]);
+
+        let start = 300 + 4 + len;
+        let end = start + payload_size as usize;
+
+        let temp = vec![1; end - start];
+
+        page.as_ptr()[300..start].copy_from_slice(&buf);
+
+        page.as_ptr()[start..end].copy_from_slice(&temp);
+
+        println!("{:?}", page.buffer);
+        page.defragment();
+        println!("{:?}", page.buffer);
+
+        // println!("{:?}", &page.as_ptr()[512 - 55..512]);
+
+        // println!("{}", page.last_used_offset());
+        // println!("{}", page.slot_array().get(0));
 
         Ok(())
     }
