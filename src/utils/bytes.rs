@@ -39,22 +39,23 @@ pub fn get_u64<T: Buf>(src: &mut T) -> Result<u64> {
     Ok(src.get_u64_le())
 }
 
-/// Takes `src` that implements [Buf] and advances position by 1-9, depending on size of varint. Returns u64 as varint.
-pub fn read_varint<T: Buf>(src: &mut T) -> u64 {
+/// Takes `src` that implements [Buf] and advances position by 1-9, depending
+/// on size of varint. Returns u64 as varint and it's length.
+pub fn read_varint<T: Buf>(src: &mut T) -> (u64, u8) {
     let mut v: u64 = 0;
-    for _ in 0..8 {
+    for i in 0..8 {
         match src.try_get_u8().ok() {
             Some(c) => {
                 v = (v << 7) + (c & 0x7f) as u64;
                 if (c & 0x80) == 0 {
-                    return v;
+                    return (v, i + 1);
                 }
             }
             None => {}
         }
     }
     v = (v << 8) + src.get_u8() as u64;
-    v
+    (v, 9)
 }
 
 /// Writes varint to beginning of a buffer. Takes 1-9 bytes. Returns how many bytes were written.
@@ -166,7 +167,7 @@ mod tests {
 
         write_varint(&mut buf, num);
 
-        assert!(num == read_varint(&mut buf.as_slice()));
+        assert!(num == read_varint(&mut buf.as_slice()).0);
 
         Ok(())
     }

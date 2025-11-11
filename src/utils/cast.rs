@@ -14,27 +14,27 @@ pub fn is_aligned_to(ptr: *const (), align: usize) -> bool {
 /// Casts type `A` to `B`. \
 ///
 /// # Requirements:
-/// 
+///
 /// * `size_of::<A>() == size_of::<B>`
-/// 
+///
 pub fn cast<A: Copy, B: Copy>(a: A) -> B {
     unsafe { try_cast(a).unwrap() }
 }
 
 /// Converts slice `&[A]` of type `A` to slice `&[B]` of type `B`. \
-/// 
+///
 /// # Panics:
 /// * if value is `Err` with message provided by `Err`.
-/// 
+///
 pub fn cast_slice<A, B>(a: &[A]) -> &[B] {
     unsafe { try_cast_slice(a).unwrap() }
 }
 
 /// Converts slice `&mut [A]` of type `A` to slice `&mut [B]` of type `B`. \
-/// 
+///
 /// # Panics:
 /// * if value is `Err` with message provided by `Err`.
-/// 
+///
 pub fn cast_slice_mut<A, B>(a: &mut [A]) -> &mut [B] {
     unsafe { try_cast_slice_mut(a).unwrap() }
 }
@@ -73,7 +73,7 @@ pub fn bytes_of_mut<T>(src: &mut T) -> &mut [u8] {
 ///
 /// # Requirements:
 /// * `size_of::<A>() == size_of::<B>`
-/// 
+///
 pub unsafe fn try_cast<A: Copy, B: Copy>(a: A) -> Result<B> {
     if size_of::<A>() == size_of::<B>() {
         Ok(unsafe { transmute!(a) })
@@ -83,7 +83,7 @@ pub unsafe fn try_cast<A: Copy, B: Copy>(a: A) -> Result<B> {
 }
 
 /// Converts slice `&[A]` of type `A` to slice `&[B]` of type `B` (output length can change). Returns `Result<B>`. \
-/// 
+///
 /// # Requirements:
 /// * `input.as_ptr() as usize == output.as_ptr() as usize`
 /// * `input.len() * size_of::<A>() == output.len() * size_of::<B>()`
@@ -174,6 +174,11 @@ pub unsafe fn try_bytes_of<T>(src: &T) -> Result<&[u8]> {
 /// Converts type `&mut T` into mutable slice of bytes. Returns `Result<&mut [u8]>`.
 pub unsafe fn try_bytes_of_mut<T>(src: &mut T) -> Result<&mut [u8]> {
     unsafe { try_cast_slice_mut::<T, u8>(std::slice::from_mut(src)) }
+}
+
+/// Converts given slice to 'static lifetime.
+pub unsafe fn cast_static<T>(src: &[T]) -> &'static [T] {
+    unsafe { core::mem::transmute(src) }
 }
 
 #[cfg(test)]
