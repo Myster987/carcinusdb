@@ -173,7 +173,7 @@ impl TryFrom<u8> for PageType {
 /// num_slots           - 2 bytes   - offset 3 - number of slots in slot array.
 /// last_used_offset    - 2 bytes   - offset 5 - offset to last used space. Used to calculate if new data can fit in Page.
 /// num_free_fragments  - 1 byte    - offset 7 - number of free fragments. Tiny gaps between cells, to small to fit new data.
-/// next_page           - 4 bytes   - offset 8 - present only in Internal Pages. Points to next B-Tree page.
+/// rigth_child         - 4 bytes   - offset 8 - present only in Internal Pages. Points to next B-Tree page > current.
 ///
 /// ```
 /// Total size: 12 bytes (Internal Pages) or 8 bytes (Lead Pages) bytes long.
@@ -324,7 +324,7 @@ impl Page {
     }
 
     /// Returns next `PageNumber` if `PageType` is internal or None if `Page` is Leaf.
-    pub fn try_next_page(&self) -> Option<PageNumber> {
+    pub fn try_rigth_child(&self) -> Option<PageNumber> {
         match self.page_type() {
             PageType::IndexInternal | PageType::TableInternal => Some(self.read_u32(8)),
             PageType::IndexLeaf | PageType::TableLeaf => None,
@@ -533,7 +533,11 @@ impl Page {
     /// Attempts to replace old cell with new cell at given slot index.
     /// On success, returns old cell that was replaced. Otherwise
     /// returns error and new cell, that wasn't inserted.
-    fn try_replace(&self, index: SlotNumber, new_cell: BTreeCell) -> Result<BTreeCell, BTreeCell> {
+    pub fn try_replace(
+        &self,
+        index: SlotNumber,
+        new_cell: BTreeCell,
+    ) -> Result<BTreeCell, BTreeCell> {
         let old_cell = self.get_cell(index).unwrap();
         let old_cell_size = old_cell.local_cell_size();
         let new_cell_size = new_cell.local_cell_size();
@@ -570,7 +574,7 @@ impl Page {
 
     /// Takes index of a cell to remove. Returns owned version of
     /// cell and removes this index from slot array.
-    fn remove(&self, index: SlotNumber) -> BTreeCell {
+    pub fn remove(&self, index: SlotNumber) -> BTreeCell {
         let removed_cell = self.get_cell(index).unwrap().to_owned();
         let offset = self.slot_array().remove(index);
 
@@ -578,6 +582,25 @@ impl Page {
             .push_freeblock(offset, removed_cell.local_cell_size() as u16);
 
         return removed_cell;
+    }
+
+    pub fn child(&self, index: SlotNumber) -> PageNumber {
+        assert!(
+            matches!(
+                self.page_type(),
+                PageType::IndexInternal | PageType::TableInternal
+            ),
+            "Invalid page type."
+        );
+        if index == self.len() {
+            self.try_rigth_child().unwrap()
+        } else {
+            match self.get_cell(index).unwrap() {
+                BTreeCell::IndexInternalCell(c) => c.left_child,
+                BTreeCell::TableInternalCell(c) => c.left_child,
+                _ => unreachable!(),
+            }
+        }
     }
 }
 
@@ -589,7 +612,7 @@ impl Debug for Page {
             .field("num_slots", &self.len())
             .field("last_used_offset", &self.last_used_offset())
             .field("num_free_fragments", &self.free_fragments())
-            .field("next_page", &self.try_next_page())
+            .field("rigth_child", &self.try_rigth_child())
             .field("slot_array", &self.slot_array())
             .field(
                 "cells",
