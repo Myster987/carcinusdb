@@ -6,6 +6,7 @@ pub mod parser;
 pub mod statement;
 pub mod token;
 pub mod tokenizer;
+pub mod record;
 
 pub type SqlResult<T> = std::result::Result<T, Error>;
 
