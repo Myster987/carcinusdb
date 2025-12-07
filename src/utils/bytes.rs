@@ -2,6 +2,8 @@ use bytes::Buf;
 
 use super::{Error, Result};
 
+pub type VarInt = u64;
+
 /// Takes `src` that implements [Buf] and advances current position by 1. Returns u8.
 pub fn get_u8<T: Buf>(src: &mut T) -> Result<u8> {
     if !src.has_remaining() {
@@ -41,7 +43,7 @@ pub fn get_u64<T: Buf>(src: &mut T) -> Result<u64> {
 
 /// Takes `src` that implements [Buf] and advances position by 1-9, depending
 /// on size of varint. Returns u64 as varint and it's length.
-pub fn read_varint<T: Buf>(src: &mut T) -> (u64, u8) {
+pub fn read_varint<T: Buf>(src: &mut T) -> (VarInt, u8) {
     let mut v: u64 = 0;
     for i in 0..8 {
         match src.try_get_u8().ok() {
@@ -58,8 +60,9 @@ pub fn read_varint<T: Buf>(src: &mut T) -> (u64, u8) {
     (v, 9)
 }
 
-/// Writes varint to beginning of a buffer. Takes 1-9 bytes. Returns how many bytes were written.
-pub fn write_varint(buf: &mut [u8], value: u64) -> usize {
+/// Writes number as varint to beginning of a buffer. Takes 1-9 bytes. Returns
+/// how many bytes were written.
+pub fn write_varint(buf: &mut [u8], value: VarInt) -> usize {
     if value <= 0x7f {
         buf[0] = (value & 0x7f) as u8;
         return 1;
