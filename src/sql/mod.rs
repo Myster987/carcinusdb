@@ -3,10 +3,11 @@ use thiserror::Error;
 use crate::sql::token::Token;
 
 pub mod parser;
+pub mod record;
 pub mod statement;
 pub mod token;
 pub mod tokenizer;
-pub mod record;
+pub mod types;
 
 pub type SqlResult<T> = std::result::Result<T, Error>;
 
@@ -20,15 +21,9 @@ pub enum Error {
     UnexpectedToken(char),
 
     #[error("expected: {expected} but found: {found}.")]
-    Expected {
-        expected: Token,
-        found: Token
-    },
+    Expected { expected: Token, found: Token },
     #[error("expected one of: {expected:?} but found: {found}.")]
-    ExpectedOneOf {
-        expected: Vec<Token>,
-        found: Token
-    },
+    ExpectedOneOf { expected: Vec<Token>, found: Token },
 
     #[error("number out of range")]
     NumberOutOfRange,

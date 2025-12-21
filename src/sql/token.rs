@@ -141,7 +141,7 @@ impl Display for Keyword {
             Self::Rollback => "ROLLBACK",
             Self::Commit => "COMMIT",
             Self::Explain => "EXPLAIN",
-            Self::None => "NONE"
+            Self::None => "NONE",
         })
     }
 }

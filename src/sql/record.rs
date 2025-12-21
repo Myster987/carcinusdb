@@ -1,14 +1,6 @@
-use std::{fmt::Debug, io::Cursor};
-
 use thiserror::Error;
 
-use crate::{
-    sql::statement::{Value, ValueRef},
-    utils::{
-        bytes::{self, VarInt, read_varint, write_varint},
-        debug_table::DebugTable,
-    },
-};
+use crate::sql::types::serial::SerialType;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -18,212 +10,120 @@ pub enum Error {
     InvalidSerialType,
 }
 
-/// Possible types of columns in record format. [Format details](https://www.sqlite.org/fileformat.html#record_format).
-#[derive(Debug)]
-pub enum SerialType {
-    /// N = 0
-    Null,
-    /// N = 1
-    Int8,
-    /// N = 2
-    Int16,
-    /// N = 3
-    Int32,
-    /// N = 4
-    Int64,
-    /// N >= 12 and even -> len = (N-12) / 2
-    Blob(usize),
-    /// N >= 13 and odd -> len = (N-13) / 2
-    String(usize),
-}
+// /// View to database record. By default `Record` is immutable and when you want
+// /// to mutate it, just call `to_mutable`.
+// ///
+// /// # Field description:
+// ///
+// /// - data -> reference to bytes containing whole record information
+// /// - header_size -> varint that stores whole size of header including itself in bytes
+// /// - column_types -> decoded serial types of values in record (see `SerialType`)
+// pub struct RecordCursor<'a> {
+//     data: Cow<'a, [u8]>,
+//     header_size: usize,
+//     serial_types: Vec<SerialType>,
+// }
 
-impl SerialType {
-    /// Creates type from given varint. If `value` doesn't match any type,
-    /// error is returned.
-    fn try_from_varint(value: VarInt) -> Result<Self> {
-        let serial_type = match value {
-            0 => Self::Null,
-            1 => Self::Int8,
-            2 => Self::Int16,
-            3 => Self::Int32,
-            4 => Self::Int64,
-            n if n >= 12 && n % 2 == 0 => Self::Blob(((n - 12) / 2) as usize),
-            n if n >= 13 && n % 2 != 0 => Self::String(((n - 13) / 2) as usize),
-            _ => return Err(Error::InvalidSerialType),
-        };
+// impl<'a> RecordCursor<'a> {
+//     /// Returns number of entires in record.
+//     pub fn len(&self) -> usize {
+//         self.serial_types.len()
+//     }
 
-        Ok(serial_type)
-    }
+//     /// Takes slice of bytes that contains record information and returns decoded value.
+//     pub fn try_from_bytes(data: &'a [u8]) -> Result<Self> {
+//         let mut cursor = Cursor::new(data);
 
-    /// Converts `&self` into varint with proper encoding that can be stored on disk.
-    fn to_type_code(&self) -> VarInt {
-        match self {
-            Self::Null => 0,
-            Self::Int8 => 1,
-            Self::Int16 => 2,
-            Self::Int32 => 3,
-            Self::Int64 => 4,
-            Self::Blob(len) => ((len * 2) + 12) as VarInt,
-            Self::String(len) => ((len * 2) + 13) as VarInt,
-        }
-    }
+//         let (header_size, n) = read_varint(&mut cursor);
+//         let header_size = header_size as usize;
+//         let mut to_read = header_size - n as usize;
 
-    /// Writtes type to beginning of a buffer and returns how many bytes were written.
-    fn write_to_buffer(&self, buffer: &mut [u8]) -> usize {
-        let type_code = self.to_type_code();
-        write_varint(buffer, type_code)
-    }
+//         let mut serial_types = vec![];
 
-    /// Returns size of given type in **bytes**.
-    fn size(&self) -> usize {
-        match self {
-            Self::Null => 0,
-            Self::Int8 => 1,
-            Self::Int16 => 2,
-            Self::Int32 => 4,
-            Self::Int64 => 8,
-            Self::Blob(n) => *n,
-            Self::String(n) => *n,
-        }
-    }
-}
+//         while to_read > 0 {
+//             let (type_code, n) = read_varint(&mut cursor);
+//             let serial_type = SerialType::try_from_varint(type_code)?;
+//             serial_types.push(serial_type);
+//             to_read -= n as usize;
+//         }
 
-/// Immutable view to database record. Record starts with `header_size` varint,
-/// that includes total size of header in bytes.
+//         Ok(Self {
+//             data: Cow::Borrowed(data),
+//             header_size,
+//             serial_types,
+//         })
+//     }
+
+//     /// Calculates offset to value at given offset.
+//     fn get_value_offset(&self, index: usize) -> usize {
+//         let offset = self.header_size
+//             + self.serial_types[..index]
+//                 .iter()
+//                 .map(|c| c.size())
+//                 .sum::<usize>();
+//         offset
+//     }
+
+//     /// Returns reference to raw bytes of value at given index.
+//     pub fn get_value_raw(&self, index: usize) -> &[u8] {
+//         let offset = self.get_value_offset(index);
+//         let type_size = self.serial_types[index].size();
+
+//         &self.data[offset..offset + type_size]
+//     }
+
+//     /// Returns reference to decoded value at given index.
+//     pub fn get_value(&self, index: usize) -> ValueRef<'_> {
+//         let offset = self.get_value_offset(index);
+//         let serial_type = &self.serial_types[index];
+
+//         value_ref_from_bytes(&self.data[offset..offset + serial_type.size()], serial_type)
+//     }
+
+//     pub fn to_mutable(self) -> RecordMutable {
+//         let mut values = Vec::with_capacity(self.len());
+
+//         for i in 0..self.len() {
+//             values.push(self.get_value(i).into());
+//         }
+
+//         RecordMutable { values }
+//     }
+// }
+
 pub struct Record<'a> {
-    data: &'a [u8],
+    payload: &'a [u8],
+}
+
+pub struct RecordCursor {
+    serial_types: Vec<SerialType>,
+    offsets: Vec<usize>,
     header_size: usize,
-    column_values: Vec<SerialType>,
 }
 
-impl<'a> Record<'a> {
-    /// Creates record from byte slice. Decoding is done in sqlite style.
-    pub fn try_from_bytes(data: &'a [u8]) -> Result<Self> {
-        let mut cursor = Cursor::new(data);
-
-        let (header_size, n) = read_varint(&mut cursor);
-        let header_size = header_size as usize;
-        let mut to_read = header_size - n as usize;
-
-        let mut column_values = vec![];
-
-        while to_read > 0 {
-            let (type_code, n) = read_varint(&mut cursor);
-            column_values.push(SerialType::try_from_varint(type_code)?);
-            to_read -= n as usize;
-        }
-
-        Ok(Self {
-            data,
-            header_size,
-            column_values,
-        })
+impl RecordCursor {
+    pub fn try_from_payload(payload: &[u8]) -> Result<Self> {
+        todo!()
     }
 
-    /// Calculates offset to value at given offset.
-    fn get_value_offset(&self, index: usize) -> usize {
-        let offset = self.header_size
-            + self.column_values[..index]
-                .iter()
-                .map(|c| c.size())
-                .sum::<usize>();
-        offset
-    }
-
-    /// Returns reference to raw bytes of value at given index.
-    pub fn get_value_raw(&self, index: usize) -> &[u8] {
-        let offset = self.get_value_offset(index);
-        let type_size = self.column_values[index].size();
-
-        &self.data[offset..offset + type_size]
-    }
-
-    /// Returns reference to decoded value at given index.
-    pub fn get_value(&self, index: usize) -> ValueRef<'_> {
-        let offset = self.get_value_offset(index);
-        let serial_type = &self.column_values[index];
-
-        value_ref_from_bytes(&self.data[offset..offset + serial_type.size()], serial_type)
-    }
-}
-
-/// Decodes record from raw bytes and given serial type.
-///
-/// # Panics
-///
-/// When given bytes doesn't match record encoding.
-fn value_ref_from_bytes<'a>(bytes: &'a [u8], serial_type: &SerialType) -> ValueRef<'a> {
-    let mut cursor = Cursor::new(bytes);
-    match serial_type {
-        SerialType::Null => ValueRef::Null,
-        SerialType::Int8 => {
-            ValueRef::Number(bytes::get_u8(&mut cursor).expect("This shouldn't be empty") as i128)
-        }
-        SerialType::Int16 => {
-            ValueRef::Number(bytes::get_u16(&mut cursor).expect("This shouldn't be empty") as i128)
-        }
-        SerialType::Int32 => {
-            ValueRef::Number(bytes::get_u32(&mut cursor).expect("This shouldn't be empty") as i128)
-        }
-        SerialType::Int64 => {
-            ValueRef::Number(bytes::get_u64(&mut cursor).expect("This shouldn't be empty") as i128)
-        }
-        SerialType::Blob(_) => ValueRef::Blob(bytes),
-        SerialType::String(_) => {
-            ValueRef::String(str::from_utf8(bytes).expect("This shouldn't panic"))
+    pub fn empty() -> Self {
+        Self {
+            serial_types: Vec::new(),
+            offsets: Vec::new(),
+            header_size: 0,
         }
     }
-}
 
-impl<'a> Debug for Record<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut dbg_table = DebugTable::new();
-        let mut header = Vec::new();
-        let mut row = Vec::new();
-
-        for i in 0..self.column_values.len() {
-            // let serial_type = &self.column_values[i];
-            let dyn_ref: Box<dyn Debug> = Box::new(self.get_value(i));
-            header.push(format!("column {} value", i + 2));
-            row.push(dyn_ref);
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            serial_types: Vec::with_capacity(capacity),
+            offsets: Vec::with_capacity(capacity),
+            header_size: 0,
         }
-
-        header.iter().for_each(|h| dbg_table.add_column(h));
-
-        dbg_table.insert_row(row.iter().map(|v| v.as_ref()).collect());
-
-        dbg_table.fmt(f)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_serial_type() -> anyhow::Result<()> {
-        let mut buffer = vec![0; 8];
-        let value = 15;
-
-        write_varint(&mut buffer, value);
-
-        let (type_code, _) = read_varint(&mut buffer.as_slice());
-
-        let serial_type = SerialType::try_from_varint(type_code)?;
-
-        assert!(serial_type.to_type_code() == value);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_record_debug() -> anyhow::Result<()> {
-        let buffer = &[4, 1, 0, 15, 15, 65];
-
-        let record = Record::try_from_bytes(buffer).unwrap();
-
-        println!("{:?}", record);
-
-        Ok(())
-    }
 }

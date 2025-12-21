@@ -101,6 +101,11 @@ pub fn write_varint(buf: &mut [u8], value: VarInt) -> usize {
     n
 }
 
+/// Returns number of bytes that were used to store varint.
+pub fn varint_size(value: VarInt) -> usize {
+    write_varint(&mut [0; 9], value)
+}
+
 pub fn zigzag_encode(value: i64) -> u64 {
     (value >> 63) as u64 ^ (value << 1) as u64
 }

@@ -1,6 +1,9 @@
 use std::cmp::Ordering;
 
-use crate::{sql::statement::DataType, storage::{PageNumber, pager::Pager}};
+use crate::{
+    sql::statement::DataType,
+    storage::{PageNumber, pager::Pager},
+};
 
 pub trait BytesCmp {
     /// Takes two byte slices and returns Ordering.
@@ -45,13 +48,13 @@ impl BytesCmp for FixedSizeMemCmp {
 
 impl TryFrom<DataType> for FixedSizeMemCmp {
     type Error = ();
-    
+
     fn try_from(value: DataType) -> Result<Self, Self::Error> {
         match value {
             DataType::VarChar(_) | DataType::Boolean => Err(()),
-            fixed_type => Ok(Self {
-                
-            })
+            // fixed_type => Ok(Self {
+            // })
+            _ => todo!(),
         }
     }
 }

@@ -1,4 +1,6 @@
-use std::fmt::{Display, Write, write};
+use std::fmt::{Display, Write};
+
+use crate::sql::types::Value;
 
 /// SQL statement.
 #[derive(Debug)]
@@ -148,60 +150,6 @@ impl Display for Expression {
             } => write!(f, "{left} {operator} {rigth}"),
             Self::UnaryOperation { operator, expr } => write!(f, "{operator}{expr}"),
             Self::Nested(expr) => write!(f, "({expr})"),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum Value {
-    Null,
-    Bool(bool),
-    Number(i128),
-    Blob(Vec<u8>),
-    String(String),
-}
-
-impl Display for Value {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Number(number) => write!(f, "{number}"),
-            Self::String(string) => write!(f, "\"{string}\""),
-            Self::Blob(_) => write!(f, "BLOB"),
-            Self::Bool(boolean) => f.write_str(if *boolean { "TRUE" } else { "FALSE" }),
-            Self::Null => write!(f, "NULL"),
-        }
-    }
-}
-
-impl<'a> From<ValueRef<'a>> for Value {
-    fn from(value_ref: ValueRef<'a>) -> Self {
-        match value_ref {
-            ValueRef::Null => Value::Null,
-            ValueRef::Bool(bool) => Value::Bool(bool),
-            ValueRef::Number(number) => Value::Number(number),
-            ValueRef::Blob(blob) => Value::Blob(blob.to_vec()),
-            ValueRef::String(string) => Value::String(string.to_string()),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum ValueRef<'a> {
-    Null,
-    Bool(bool),
-    Number(i128),
-    Blob(&'a [u8]),
-    String(&'a str),
-}
-
-impl<'a> Display for ValueRef<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Number(number) => write!(f, "{number}"),
-            Self::String(string) => write!(f, "\"{string}\""),
-            Self::Blob(_) => write!(f, "BLOB"),
-            Self::Bool(boolean) => f.write_str(if *boolean { "TRUE" } else { "FALSE" }),
-            Self::Null => write!(f, "NULL"),
         }
     }
 }

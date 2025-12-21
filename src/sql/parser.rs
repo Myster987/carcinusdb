@@ -4,10 +4,11 @@ use crate::sql::{
     Error, SqlResult,
     statement::{
         Assignment, BinaryOperator, Column, Constrains, Create, DataType, Drop, Expression,
-        Statement, UnaryOperator, Value,
+        Statement, UnaryOperator,
     },
     token::{Keyword, Token},
     tokenizer::Tokenizer,
+    types::{Value, text::Text},
 };
 
 /// Trait to implement all esential statements.
@@ -224,10 +225,10 @@ impl<'a> Parser<'a> {
             Token::Identifier(identifier) => Ok(Expression::Identifier(identifier)),
             Token::Mul => Ok(Expression::Wildcard),
 
-            Token::String(value) => Ok(Expression::Value(Value::String(value))),
+            Token::String(value) => Ok(Expression::Value(Value::Text(Text::new(value)))),
             Token::Keyword(Keyword::True) => Ok(Expression::Value(Value::Bool(true))),
             Token::Keyword(Keyword::False) => Ok(Expression::Value(Value::Bool(false))),
-            Token::Number(num) => Ok(Expression::Value(Value::Number(
+            Token::Number(num) => Ok(Expression::Value(Value::Int(
                 num.parse().map_err(|_| Error::NumberOutOfRange)?,
             ))),
 
@@ -358,7 +359,7 @@ impl<'a> Parser<'a> {
             Keyword::Varchar => {
                 self.expect_token(Token::LeftParen)?;
                 let length = match self.parse_expression()? {
-                    Expression::Value(Value::Number(val)) => val as usize,
+                    Expression::Value(Value::Int(val)) => val as usize,
                     _ => Err(Error::InvalidQuery(self.position))?,
                 };
                 self.expect_token(Token::RightParen)?;
