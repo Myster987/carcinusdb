@@ -13,12 +13,16 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error)]
 pub enum Error {
     // bytes
-    #[error("invalid aligment")]
+    #[error("invalid aligment. make sure to only cast types when each type is aligned")]
     InvalidAligment,
     #[error("size mismatch")]
     SizeMismatch,
     #[error("invalid bytes")]
     InvalidBytes,
+    #[error("varint is invalid, either overflowed or incompleted")]
+    InvalidVarInt,
+    #[error("attempted to access outside buffer. buffer overflow")]
+    OutOfSpace,
 
     // alloc
     #[error("invalid allocation. {0}")]

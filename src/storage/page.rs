@@ -3,7 +3,7 @@ use std::{
     cell::UnsafeCell,
     collections::{BinaryHeap, HashMap},
     fmt::Debug,
-    io::{Cursor, IoSlice},
+    io::IoSlice,
     sync::Arc,
 };
 
@@ -11,7 +11,8 @@ use crate::{
     storage::{Error, PageNumber, SLOT_SIZE, SlotNumber, StorageResult},
     utils::{
         buffer::{Buffer, DropFn},
-        bytes, cast,
+        bytes::{self, BytesCursor},
+        cast,
     },
 };
 
@@ -1142,19 +1143,19 @@ pub fn local_btree_cell_size(
     max_cell_size: usize,
     usable_space: usize,
 ) -> u16 {
-    let mut cursor = Cursor::new(page_buffer);
-    cursor.set_position(offset as u64);
+    let mut cursor = BytesCursor::new(page_buffer);
+    cursor.set_position(offset as usize);
 
     let mut size = 0;
 
     match page_type {
         PageType::IndexInternal => {
-            let _ = bytes::get_u32(&mut cursor);
+            let _ = cursor.read_u32_le();
             size += size_of::<PageNumber>();
 
             // variable size, not payload size
-            let (payload_size, n) = bytes::read_varint(&mut cursor);
-            size += n as usize;
+            let (payload_size, n) = cursor.read_varint();
+            size += n;
 
             let (_, local_payload_size) = cell_overflows(
                 payload_size as usize,
@@ -1167,8 +1168,8 @@ pub fn local_btree_cell_size(
         }
         PageType::IndexLeaf => {
             // variable size, not payload size
-            let (payload_size, n) = bytes::read_varint(&mut cursor);
-            size += n as usize;
+            let (payload_size, n) = cursor.read_varint();
+            size += n;
 
             let (_, local_payload_size) = cell_overflows(
                 payload_size as usize,
@@ -1181,19 +1182,19 @@ pub fn local_btree_cell_size(
         }
         PageType::TableInternal => {
             // variable size, not row_id size
-            let (_, n) = bytes::read_varint(&mut cursor);
-            size += n as usize;
+            let (_, n) = cursor.read_varint();
+            size += n;
 
             size += size_of::<PageNumber>();
         }
         PageType::TableLeaf => {
             // variable size, not row_id size
-            let (_, n) = bytes::read_varint(&mut cursor);
-            size += n as usize;
+            let (_, n) = cursor.read_varint();
+            size += n;
 
             // variable size, not payload size
-            let (payload_size, n) = bytes::read_varint(&mut cursor);
-            size += n as usize;
+            let (payload_size, n) = cursor.read_varint();
+            size += n;
 
             let (_, local_payload_size) = cell_overflows(
                 payload_size as usize,
@@ -1219,13 +1220,13 @@ pub fn read_btree_cell(
     max_cell_size: usize,
     usable_space: usize,
 ) -> StorageResult<BTreeCell> {
-    let mut cursor = Cursor::new(page_buffer);
-    cursor.set_position(offset as u64);
+    let mut cursor = BytesCursor::new(page_buffer);
+    cursor.set_position(offset as usize);
 
     match page_type {
         PageType::IndexInternal => {
-            let left_child = bytes::get_u32(&mut cursor)?;
-            let (payload_size, _) = bytes::read_varint(&mut cursor);
+            let left_child = cursor.try_read_u32_le()?;
+            let (payload_size, _) = cursor.try_read_varint()?;
 
             let (is_overflowing, local_payload_size) = cell_overflows(
                 payload_size as usize,
@@ -1234,7 +1235,7 @@ pub fn read_btree_cell(
                 usable_space,
             );
 
-            let start = cursor.position() as usize;
+            let start = cursor.position();
             let end = start + local_payload_size;
 
             let raw_buffer = cursor.into_inner();
@@ -1256,7 +1257,7 @@ pub fn read_btree_cell(
             Ok(BTreeCell::IndexInternalCell(cell))
         }
         PageType::IndexLeaf => {
-            let (payload_size, _) = bytes::read_varint(&mut cursor);
+            let (payload_size, _) = cursor.try_read_varint()?;
 
             let (is_overflowing, local_payload_size) = cell_overflows(
                 payload_size as usize,
@@ -1265,7 +1266,7 @@ pub fn read_btree_cell(
                 usable_space,
             );
 
-            let start = cursor.position() as usize;
+            let start = cursor.position();
             let end = start + local_payload_size;
 
             let raw_buffer = cursor.into_inner();
@@ -1286,10 +1287,10 @@ pub fn read_btree_cell(
             Ok(BTreeCell::IndexLeafCell(cell))
         }
         PageType::TableInternal => {
-            let row_id = bytes::zigzag_decode(bytes::read_varint(&mut cursor).0);
-            let left_child = bytes::get_u32(&mut cursor)?;
+            let row_id = bytes::zigzag_decode(cursor.try_read_varint()?.0);
+            let left_child = cursor.try_read_u32_le()?;
 
-            let end = cursor.position() as usize;
+            let end = cursor.position();
             let raw_cell = &cursor.into_inner()[offset as usize..end];
 
             let cell = TableInternalCell {
@@ -1300,8 +1301,8 @@ pub fn read_btree_cell(
             Ok(BTreeCell::TableInternalCell(cell))
         }
         PageType::TableLeaf => {
-            let row_id = bytes::zigzag_decode(bytes::read_varint(&mut cursor).0);
-            let (payload_size, _) = bytes::read_varint(&mut cursor);
+            let row_id = bytes::zigzag_decode(cursor.try_read_varint()?.0);
+            let (payload_size, _) = cursor.try_read_varint()?;
 
             let (is_overflowing, local_payload_size) = cell_overflows(
                 payload_size as usize,
@@ -1310,7 +1311,7 @@ pub fn read_btree_cell(
                 usable_space,
             );
 
-            let start = cursor.position() as usize;
+            let start = cursor.position();
             let end = start + local_payload_size;
 
             let raw_buffer = cursor.into_inner();
@@ -1442,9 +1443,7 @@ mod tests {
 
         raw_cell_content.extend_from_slice(&left_child.to_le_bytes());
 
-        let temp = &mut [0; 9];
-        let n = bytes::write_varint(temp, payload_size);
-        raw_cell_content.extend_from_slice(&temp[..n]);
+        raw_cell_content.extend_from_slice(&bytes::encode_to_varint(payload_size));
 
         let start = raw_cell_content.len();
         raw_cell_content.extend_from_slice(payload);
