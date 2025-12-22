@@ -9,10 +9,9 @@ pub mod token;
 pub mod tokenizer;
 pub mod types;
 
-pub type SqlResult<T> = std::result::Result<T, Error>;
-
 #[derive(Debug, Error)]
-pub enum Error {
+pub enum SqlError {
+    // parsing
     #[error("invalid query. Error near {0} character.")]
     InvalidQuery(usize),
     #[error("string was opened, but nerver closed.")]
@@ -29,4 +28,10 @@ pub enum Error {
     NumberOutOfRange,
     #[error("unexpected eof")]
     UnexpectedEof,
+
+    // types
+    #[error("given value doesn't match any serial type")]
+    InvalidSerialType,
+    #[error("invalid value of type {0}")]
+    InvalidValue(&'static str),
 }

@@ -1,5 +1,8 @@
 use crate::{
-    sql::types::{AsValueRef, ValueRef},
+    sql::{
+        SqlError,
+        types::{AsValueRef, ValueRef},
+    },
     utils::bytes::VarInt,
 };
 
@@ -127,5 +130,16 @@ impl<T: AsValueRef> From<T> for SerialType {
             ValueRef::Blob(v) => SerialType::blob(v.len() as VarInt),
             ValueRef::Text(v) => SerialType::text(v.len() as VarInt),
         }
+    }
+}
+
+impl TryFrom<u64> for SerialType {
+    type Error = SqlError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        if (7..12).contains(&value) {
+            return Err(Self::Error::InvalidSerialType);
+        }
+        Ok(Self(value))
     }
 }
