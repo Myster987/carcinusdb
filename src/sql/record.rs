@@ -1,112 +1,29 @@
-use thiserror::Error;
+use crate::{
+    sql::{
+        SqlError,
+        types::{ValueRef, parse_value, serial::SerialType},
+    },
+    utils::bytes::{BytesCursor, VarInt},
+};
 
-use crate::sql::types::serial::SerialType;
-
-pub type Result<T> = std::result::Result<T, Error>;
-
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("record contains unknown column serial type")]
-    InvalidSerialType,
-}
-
-// /// View to database record. By default `Record` is immutable and when you want
-// /// to mutate it, just call `to_mutable`.
-// ///
-// /// # Field description:
-// ///
-// /// - data -> reference to bytes containing whole record information
-// /// - header_size -> varint that stores whole size of header including itself in bytes
-// /// - column_types -> decoded serial types of values in record (see `SerialType`)
-// pub struct RecordCursor<'a> {
-//     data: Cow<'a, [u8]>,
-//     header_size: usize,
-//     serial_types: Vec<SerialType>,
-// }
-
-// impl<'a> RecordCursor<'a> {
-//     /// Returns number of entires in record.
-//     pub fn len(&self) -> usize {
-//         self.serial_types.len()
-//     }
-
-//     /// Takes slice of bytes that contains record information and returns decoded value.
-//     pub fn try_from_bytes(data: &'a [u8]) -> Result<Self> {
-//         let mut cursor = Cursor::new(data);
-
-//         let (header_size, n) = read_varint(&mut cursor);
-//         let header_size = header_size as usize;
-//         let mut to_read = header_size - n as usize;
-
-//         let mut serial_types = vec![];
-
-//         while to_read > 0 {
-//             let (type_code, n) = read_varint(&mut cursor);
-//             let serial_type = SerialType::try_from_varint(type_code)?;
-//             serial_types.push(serial_type);
-//             to_read -= n as usize;
-//         }
-
-//         Ok(Self {
-//             data: Cow::Borrowed(data),
-//             header_size,
-//             serial_types,
-//         })
-//     }
-
-//     /// Calculates offset to value at given offset.
-//     fn get_value_offset(&self, index: usize) -> usize {
-//         let offset = self.header_size
-//             + self.serial_types[..index]
-//                 .iter()
-//                 .map(|c| c.size())
-//                 .sum::<usize>();
-//         offset
-//     }
-
-//     /// Returns reference to raw bytes of value at given index.
-//     pub fn get_value_raw(&self, index: usize) -> &[u8] {
-//         let offset = self.get_value_offset(index);
-//         let type_size = self.serial_types[index].size();
-
-//         &self.data[offset..offset + type_size]
-//     }
-
-//     /// Returns reference to decoded value at given index.
-//     pub fn get_value(&self, index: usize) -> ValueRef<'_> {
-//         let offset = self.get_value_offset(index);
-//         let serial_type = &self.serial_types[index];
-
-//         value_ref_from_bytes(&self.data[offset..offset + serial_type.size()], serial_type)
-//     }
-
-//     pub fn to_mutable(self) -> RecordMutable {
-//         let mut values = Vec::with_capacity(self.len());
-
-//         for i in 0..self.len() {
-//             values.push(self.get_value(i).into());
-//         }
-
-//         RecordMutable { values }
-//     }
-// }
-
+/// Immutable view to database row.
 pub struct Record<'a> {
     payload: &'a [u8],
 }
 
+/// Lazly parses values when needed. Helps to optimize parsing,
+/// by reducing serializing that sometimes is just not needed.
 pub struct RecordCursor {
+    /// All parsed types in order. Length of vector represents, how many types
+    /// were parsed starting at the beginning.
     serial_types: Vec<SerialType>,
+    /// List of all offsets to types. This has the same properties as `serial_types`.
     offsets: Vec<usize>,
-    header_size: usize,
+    header_size: VarInt,
 }
 
 impl RecordCursor {
-    pub fn try_from_payload(payload: &[u8]) -> Result<Self> {
-        todo!()
-    }
-
-    pub fn empty() -> Self {
+    pub fn new() -> Self {
         Self {
             serial_types: Vec::new(),
             offsets: Vec::new(),
@@ -114,12 +31,52 @@ impl RecordCursor {
         }
     }
 
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            serial_types: Vec::with_capacity(capacity),
-            offsets: Vec::with_capacity(capacity),
-            header_size: 0,
+    pub fn parse_up_to(&mut self, payload: &[u8], index: usize) -> Result<(), SqlError> {
+        // type is already parsed, this is no-op
+        if self.serial_types.len() > index {
+            return Ok(());
         }
+
+        let mut cursor = BytesCursor::new(payload);
+
+        if self.serial_types.is_empty() && self.offsets.is_empty() {
+            let (header_size, _) = cursor.read_varint();
+            self.header_size = header_size;
+            self.offsets.push(self.header_size as usize);
+        }
+
+        while self.serial_types.len() <= index {
+            let (serial_type_code, _) = cursor.read_varint();
+
+            let serial_type = SerialType::try_from(serial_type_code)?;
+            let serial_type_size = serial_type.size();
+            self.serial_types.push(serial_type);
+
+            let prev_offset = *self.offsets.last().unwrap();
+            self.offsets.push(serial_type_size + prev_offset);
+        }
+
+        Ok(())
+    }
+
+    pub fn get_value<'a>(
+        &mut self,
+        payload: &'a [u8],
+        index: usize,
+    ) -> Result<ValueRef<'a>, SqlError> {
+        self.parse_up_to(payload, index)?;
+
+        if index >= self.serial_types.len() {
+            return Ok(ValueRef::Null);
+        }
+
+        let serial_type = &self.serial_types[index];
+        let start = self.offsets[index];
+        let end = self.offsets[index + 1];
+
+        let payload = &payload[start..end];
+
+        parse_value(payload, serial_type)
     }
 }
 
