@@ -1,6 +1,12 @@
 use std::fmt::Display;
 
-use crate::sql::types::text::{AnyText, Text, TextRef};
+use crate::sql::{
+    SqlError,
+    types::{
+        serial::{SerialType, SerialTypeKind},
+        text::{AnyText, Text, TextKind, TextRef},
+    },
+};
 
 pub mod blob;
 pub mod serial;
@@ -139,5 +145,68 @@ impl AsValueRef for &mut Value {
     #[inline]
     fn as_value_ref<'a>(&'a self) -> ValueRef<'a> {
         self.as_ref()
+    }
+}
+
+/// Takes buffer to beginning of a value and `serial_type`. Returns reference
+/// to a decoded value in result type.
+pub fn parse_value<'a>(
+    buffer: &'a [u8],
+    serial_type: &SerialType,
+) -> Result<ValueRef<'a>, SqlError> {
+    match serial_type.kind() {
+        SerialTypeKind::Null => Ok(ValueRef::Null),
+        SerialTypeKind::BoolFalse => Ok(ValueRef::Bool(false)),
+        SerialTypeKind::BoolTrue => Ok(ValueRef::Bool(true)),
+        SerialTypeKind::Int8 => {
+            if buffer.len() < 1 {
+                return Err(SqlError::InvalidValue("INT8"));
+            }
+            let val = buffer[0];
+            Ok(ValueRef::Int(val as i64))
+        }
+        SerialTypeKind::Int16 => {
+            if buffer.len() < 2 {
+                return Err(SqlError::InvalidValue("INT16"));
+            }
+            let val = u16::from_le_bytes([buffer[0], buffer[1]]);
+            Ok(ValueRef::Int(val as i64))
+        }
+        SerialTypeKind::Int32 => {
+            if buffer.len() < 4 {
+                return Err(SqlError::InvalidValue("INT32"));
+            }
+            let val = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
+            Ok(ValueRef::Int(val as i64))
+        }
+        SerialTypeKind::Int64 => {
+            if buffer.len() < 8 {
+                return Err(SqlError::InvalidValue("INT64"));
+            }
+            let val = i64::from_le_bytes([
+                buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5], buffer[6],
+                buffer[7],
+            ]);
+            Ok(ValueRef::Int(val))
+        }
+        SerialTypeKind::Blob => {
+            let size = serial_type.size();
+            if buffer.len() < size {
+                return Err(SqlError::InvalidValue("BLOB"));
+            }
+            let val = &buffer[..size];
+            Ok(ValueRef::Blob(val))
+        }
+        SerialTypeKind::Text => {
+            let size = serial_type.size();
+            if buffer.len() < size {
+                return Err(SqlError::InvalidValue("TEXT"));
+            }
+            // SAFETY: if value was encoded with type Text, then we can be sure.
+            // that it is a valid string and we can skip validation.
+            let text = unsafe { str::from_utf8_unchecked(&buffer[..size]) };
+            let val = TextRef::new(text, TextKind::PlainText);
+            Ok(ValueRef::Text(val))
+        }
     }
 }
