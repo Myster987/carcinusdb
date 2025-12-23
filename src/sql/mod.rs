@@ -34,4 +34,8 @@ pub enum SqlError {
     InvalidSerialType,
     #[error("invalid value of type {0}")]
     InvalidValue(&'static str),
+
+    // record
+    #[error("corrupted record")]
+    CorruptedRecord(#[from] crate::utils::Error),
 }
