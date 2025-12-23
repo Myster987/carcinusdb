@@ -3,10 +3,10 @@ use std::{cell::RefCell, fmt::Debug};
 use crate::{
     sql::{
         SqlError,
-        types::{ValueRef, parse_value, serial::SerialType},
+        types::{Value, ValueRef, parse_value, serial::SerialType},
     },
     utils::{
-        bytes::{BytesCursor, VarInt},
+        bytes::{BytesCursor, VarInt, varint_size},
         debug_table::DebugTable,
     },
 };
@@ -154,8 +154,95 @@ impl<'a> RecordCursor<'a> {
     }
 }
 
+pub struct RecordBuilder {
+    values: Vec<Value>,
+}
+
+impl RecordBuilder {
+    pub fn new() -> Self {
+        Self { values: Vec::new() }
+    }
+
+    pub fn add(&mut self, value: Value) {
+        self.values.push(value);
+    }
+
+    fn calculate_header_size(size_of_serial_types: usize) -> usize {
+        if size_of_serial_types < i8::MAX as usize {
+            return size_of_serial_types + 1;
+        }
+
+        size_of_serial_types + varint_size(size_of_serial_types as VarInt)
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut total_size = 0;
+        let mut size_of_serial_types = 0;
+
+        for value in &self.values {
+            let serial_type = SerialType::from(value);
+            let serial_type_varint_size = serial_type.to_varint().len();
+            size_of_serial_types += serial_type_varint_size;
+            total_size += serial_type_varint_size + serial_type.size();
+        }
+
+        let header_size = Self::calculate_header_size(size_of_serial_types);
+        total_size += varint_size(header_size as VarInt);
+
+        let buffer = vec![0; total_size];
+        let mut cursor = BytesCursor::new(buffer);
+        let mut offset_to_value = header_size;
+
+        cursor.write_varint(header_size as VarInt);
+
+        for value in &self.values {
+            let serial_type = SerialType::from(value);
+            match value {
+                Value::Null | Value::Bool(_) => cursor.write_u8(serial_type.code() as u8),
+                Value::Int(v) => {
+                    cursor.write_u8(serial_type.code() as u8);
+                    let pos = cursor.position();
+                    cursor.set_position(offset_to_value);
+
+                    let size = serial_type.size();
+                    cursor.write_bytes(&(*v).to_le_bytes()[..size]);
+                    offset_to_value += size;
+
+                    cursor.set_position(pos);
+                }
+                Value::Blob(v) => {
+                    cursor.write_varint(serial_type.code());
+                    let pos = cursor.position();
+                    cursor.set_position(offset_to_value);
+
+                    let size = v.len();
+                    cursor.write_bytes(v);
+                    offset_to_value += size;
+
+                    cursor.set_position(pos);
+                }
+                Value::Text(v) => {
+                    cursor.write_varint(serial_type.code());
+                    let pos = cursor.position();
+                    cursor.set_position(offset_to_value);
+
+                    let size = v.size();
+                    cursor.write_bytes(v.as_str().as_bytes());
+                    offset_to_value += size;
+
+                    cursor.set_position(pos);
+                }
+            }
+        }
+
+        cursor.into_inner()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::sql::types::text::Text;
+
     use super::*;
 
     #[test]
@@ -172,6 +259,26 @@ mod tests {
         let record = Record::new(&buffer);
 
         println!("{:?}", record);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_record_builder() -> anyhow::Result<()> {
+        let mut builder = RecordBuilder::new();
+
+        builder.add(Value::Text(Text::new("Sample text".repeat(5))));
+        builder.add(Value::Null);
+        builder.add(Value::Bool(false));
+        builder.add(Value::Bool(true));
+        builder.add(Value::Int(125));
+
+        let serialized = builder.serialize();
+        let record = Record::new(&serialized);
+
+        println!("{:?}", serialized);
+        println!("{:?}", record);
+        println!("{:?}", record.get_value(0));
 
         Ok(())
     }
