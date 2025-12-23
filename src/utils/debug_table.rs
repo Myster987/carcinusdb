@@ -131,7 +131,7 @@ impl<'a> Debug for DebugTable<'a> {
             f.write_char('\n')?;
         }
 
-        f.write_char('\n')
+        Ok(())
     }
 }
 
