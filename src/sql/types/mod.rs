@@ -141,6 +141,13 @@ impl AsValueRef for Value {
     }
 }
 
+impl AsValueRef for &Value {
+    #[inline]
+    fn as_value_ref<'a>(&'a self) -> ValueRef<'a> {
+        self.as_ref()
+    }
+}
+
 impl AsValueRef for &mut Value {
     #[inline]
     fn as_value_ref<'a>(&'a self) -> ValueRef<'a> {
