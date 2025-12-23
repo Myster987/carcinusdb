@@ -3,7 +3,7 @@ use crate::{
         SqlError,
         types::{AsValueRef, ValueRef},
     },
-    utils::bytes::VarInt,
+    utils::bytes::{VarInt, encode_to_varint},
 };
 
 #[derive(Debug)]
@@ -48,6 +48,10 @@ impl SerialType {
         Self(size * 2 + 13)
     }
 
+    pub fn code(&self) -> VarInt {
+        self.0
+    }
+
     pub fn kind(&self) -> SerialTypeKind {
         match self.0 {
             0 => SerialTypeKind::Null,
@@ -79,6 +83,10 @@ impl SerialType {
             SerialTypeKind::Text => (self.0 as usize - 13) / 2,
         }
     }
+
+    pub fn to_varint(&self) -> Vec<u8> {
+        encode_to_varint(self.0)
+    }
 }
 
 /// Possible types of columns in record format. Altered a bit, because why not.
@@ -106,9 +114,6 @@ pub enum SerialTypeKind {
     Text,
 }
 
-// impl SerialTypeKind {
-// }
-
 impl<T: AsValueRef> From<T> for SerialType {
     fn from(value: T) -> Self {
         let value = value.as_value_ref();
@@ -118,7 +123,7 @@ impl<T: AsValueRef> From<T> for SerialType {
                 if v {
                     SerialType::bool_true()
                 } else {
-                    SerialType::bool_true()
+                    SerialType::bool_false()
                 }
             }
             ValueRef::Int(v) => match v {
