@@ -1,3 +1,5 @@
+use std::borrow::BorrowMut;
+
 use super::{Error, Result};
 
 pub type VarInt = u64;
@@ -354,6 +356,29 @@ impl<T: AsRef<[u8]> + AsMut<[u8]>> BytesCursor<T> {
         let length = write_varint(self.chunk_mut(), value)?;
         self.advance(length);
         Ok(length)
+    }
+
+    /// Writes given `bytes` at current position. Advances position by
+    /// `bytes` length.
+    ///
+    /// # Safety
+    ///
+    /// If cursor is already at the end of buffer or bytes length doesn't
+    /// fit in remaining space, then this function will panic.
+    pub fn write_bytes(&mut self, bytes: &[u8]) {
+        self.try_write_bytes(bytes).unwrap();
+    }
+
+    /// Writes given `bytes` at current position. Returns result that indicates
+    /// if operation was successful. Advances position by `bytes` length.
+    pub fn try_write_bytes(&mut self, bytes: &[u8]) -> Result<()> {
+        let size = bytes.len();
+        if self.remaining() < size {
+            return Err(Error::OutOfSpace);
+        }
+        self.chunk_mut()[..size].copy_from_slice(bytes);
+        self.advance(size);
+        Ok(())
     }
 }
 
