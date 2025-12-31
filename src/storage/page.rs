@@ -4,11 +4,10 @@ use std::{
     collections::{BinaryHeap, HashMap},
     fmt::Debug,
     io::IoSlice,
-    sync::Arc,
 };
 
 use crate::{
-    storage::{Error, PageNumber, SLOT_SIZE, SlotNumber, StorageResult},
+    storage::{self, Error, PageNumber, SLOT_SIZE, SlotNumber},
     utils::{
         buffer::{Buffer, DropFn},
         bytes::{self, BytesCursor},
@@ -167,32 +166,43 @@ impl TryFrom<u8> for PageType {
 ///
 /// Depending on `PageType` header is either 8 (Leaf Pages) or 12 (Internal Pages).
 ///
+/// | Field Name        | Size  | Offset    | Description |
+/// | ----------------- | ----- | --------- | ----------- |
+/// | page_type         | 1     | 0         | represent PageType.
+/// | first_freeblock   | 2     | 1         |  points to start of first freeblock, if set to 0, then there are no freeblocks.
+/// | length            | 2     | 3         | number of slots in slot array.
+/// | last_used_offset  | 2     | 5         | offset to last used space. Used to calculate if new data can fit in Page.
+/// | free_fragments    | 1     | 7         | number of free fragments. Tiny gaps between cells, to small to fit new data.
+/// | rigth_sibling     | 4     | 8         | points to rigth sibling of this page (at the same level in B-Tree).
+/// | rigth_child       | 4     | 12        | present only in Internal Pages. Points to next B-Tree page > current.
 ///
-/// ```text
-/// page_type           - 1 byte    - offset 0 - represent PageType.
-/// first_freeblock     - 2 bytes   - offset 1 - points to start of first freeblock, if set to 0, then there are no freeblocks.
-/// num_slots           - 2 bytes   - offset 3 - number of slots in slot array.
-/// last_used_offset    - 2 bytes   - offset 5 - offset to last used space. Used to calculate if new data can fit in Page.
-/// num_free_fragments  - 1 byte    - offset 7 - number of free fragments. Tiny gaps between cells, to small to fit new data.
-/// rigth_child         - 4 bytes   - offset 8 - present only in Internal Pages. Points to next B-Tree page > current.
-///
-/// ```
-/// Total size: 12 bytes (Internal Pages) or 8 bytes (Lead Pages) bytes long.
+/// Total size: 16 bytes (Internal Pages) or 12 bytes (Lead Pages) bytes long.
 ///
 /// # Overflow:
 /// If `Page` contains `Cells` that overflow, it maintains hashmap of slots pointing to overflowing `Cells`.
 /// Only chunk of `Cell` is stored in `Page` and it needs to be reassembled by going over
 ///
 pub struct Page {
-    // Buffer that contains page content.
-    buffer: Arc<Buffer>,
+    /// Buffer that contains page content.
+    buffer: Buffer,
     // Map of overflowing cells. Wrapped in `UnsafeCell`
     // because concurrency is managed by pager.
     overflow: UnsafeCell<HashMap<SlotNumber, BTreeCell>>,
 }
 
 impl Page {
-    pub fn new(buffer: Arc<Buffer>) -> Self {
+    const PAGE_TYPE_OFFSET: usize = 0;
+    const FIRST_FREEBLOCK_OFFSET: usize = Self::PAGE_TYPE_OFFSET + size_of::<PageType>();
+    const LENGTH_OFFSET: usize = Self::FIRST_FREEBLOCK_OFFSET + size_of::<SlotNumber>();
+    const LAST_USED_OFFSET: usize = Self::LENGTH_OFFSET + size_of::<SlotNumber>();
+    const FREE_FRAGMENTS_OFFSET: usize = Self::LAST_USED_OFFSET + size_of::<SlotNumber>();
+    const RIGTH_SIBLING_OFFSET: usize = Self::FREE_FRAGMENTS_OFFSET + 1;
+    const RIGTH_CHILD_OFFSET: usize = Self::RIGTH_SIBLING_OFFSET + size_of::<PageNumber>();
+
+    const INDEX_PAGE_HEADER_SIZE: usize = 12;
+    const TABLE_PAGE_HEADER_SIZE: usize = 16;
+
+    pub fn new(buffer: Buffer) -> Self {
         Self {
             buffer,
             overflow: UnsafeCell::new(HashMap::new()),
@@ -202,14 +212,14 @@ impl Page {
     #[cfg(not(debug_assertions))]
     pub fn alloc(size: usize, drop: Option<DropFn>) -> Self {
         let buf = Buffer::alloc_page(size, drop);
-        Self::new(Arc::new(buf))
+        Self::new(buf)
     }
 
     #[cfg(debug_assertions)]
     pub fn alloc(size: usize, drop: Option<DropFn>) -> Self {
         // allow any page size
         let buf = Buffer::alloc(size, drop);
-        Self::new(Arc::new(buf))
+        Self::new(buf)
     }
 
     #[allow(clippy::mut_from_ref)]
@@ -232,7 +242,7 @@ impl Page {
     }
 
     fn total_free_space(&self) -> u16 {
-        let mut total = self.free_space() + self.free_fragments() as u16;
+        let total = self.free_space() + self.free_fragments() as u16;
 
         let freeblocks: u16 = self.freeblock_list().iter().sum();
 
@@ -242,105 +252,6 @@ impl Page {
     pub fn as_io_slice(&self) -> IoSlice {
         IoSlice::new(self.as_ptr())
     }
-
-    fn read_u8(&self, pos: usize) -> u8 {
-        self.as_ptr()[pos]
-    }
-
-    fn read_u16_no_offset(&self, pos: usize) -> u16 {
-        let buf = self.as_ptr();
-        u16::from_le_bytes([buf[pos], buf[pos + 1]])
-    }
-
-    fn read_u16(&self, pos: usize) -> u16 {
-        self.read_u16_no_offset(pos)
-    }
-
-    fn read_u32_no_offset(&self, pos: usize) -> u32 {
-        let buf = self.as_ptr();
-        u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]])
-    }
-
-    fn read_u32(&self, pos: usize) -> u32 {
-        self.read_u32_no_offset(pos)
-    }
-
-    fn write_u8(&self, pos: usize, value: u8) {
-        let buf = self.as_ptr();
-        buf[pos] = value;
-    }
-
-    fn write_u16_no_offset(&self, pos: usize, value: u16) {
-        let buf = self.as_ptr();
-        buf[pos..pos + 2].copy_from_slice(&value.to_le_bytes());
-    }
-
-    fn write_u16(&self, pos: usize, value: u16) {
-        self.write_u16_no_offset(pos, value);
-    }
-
-    fn write_u32_no_offset(&self, pos: usize, value: u32) {
-        let buf = self.as_ptr();
-        buf[pos..pos + 4].copy_from_slice(&value.to_le_bytes());
-    }
-
-    fn write_u32(&self, pos: usize, value: u32) {
-        self.write_u32_no_offset(pos, value);
-    }
-
-    pub fn try_page_type(&self) -> Option<PageType> {
-        self.read_u8(0).try_into().ok()
-    }
-
-    pub fn page_type(&self) -> PageType {
-        self.try_page_type().unwrap()
-    }
-
-    pub fn first_freeblock(&self) -> u16 {
-        self.read_u16(1)
-    }
-
-    pub fn set_first_freeblock(&self, value: u16) {
-        self.write_u16(1, value);
-    }
-
-    pub fn last_used_offset(&self) -> u16 {
-        self.read_u16(5)
-    }
-
-    pub fn set_last_used_offset(&self, value: u16) {
-        self.write_u16(5, value);
-    }
-
-    pub fn free_fragments(&self) -> u8 {
-        self.read_u8(7)
-    }
-
-    pub fn set_free_fragments(&self, value: u8) {
-        self.write_u8(7, value)
-    }
-
-    pub fn add_free_fragment(&self, value: u8) {
-        self.set_free_fragments(self.free_fragments() + value)
-    }
-
-    /// Returns next `PageNumber` if `PageType` is internal or None if `Page` is Leaf.
-    pub fn try_rigth_child(&self) -> Option<PageNumber> {
-        match self.page_type() {
-            PageType::IndexInternal | PageType::TableInternal => Some(self.read_u32(8)),
-            PageType::IndexLeaf | PageType::TableLeaf => None,
-        }
-    }
-
-    /// Returns number of slots in `Page`.
-    pub fn len(&self) -> u16 {
-        self.read_u16(3)
-    }
-
-    pub fn set_len(&self, value: u16) {
-        self.write_u16(3, value);
-    }
-
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -353,11 +264,15 @@ impl Page {
         !self.overflow_map().is_empty()
     }
 
+    pub fn cell_overflows(&self, index: SlotNumber) -> bool {
+        self.overflow_map().get(&index).is_some()
+    }
+
     /// Depending on `PageType`, this function returns 12 or 8.
     pub fn header_size(&self) -> usize {
         match self.page_type() {
-            PageType::IndexInternal | PageType::TableInternal => 12,
-            PageType::IndexLeaf | PageType::TableLeaf => 8,
+            PageType::IndexInternal | PageType::TableInternal => Self::TABLE_PAGE_HEADER_SIZE,
+            PageType::IndexLeaf | PageType::TableLeaf => Self::INDEX_PAGE_HEADER_SIZE,
         }
     }
 
@@ -377,7 +292,7 @@ impl Page {
     }
 
     pub fn slot_array(&self) -> SlotArray {
-        SlotArray::new(self.as_ptr(), 3, self.header_size())
+        SlotArray::new(self.as_ptr(), Self::LENGTH_OFFSET, self.header_size())
     }
 
     pub fn freeblock_list(&self) -> FreeblockList {
@@ -454,7 +369,7 @@ impl Page {
         )
     }
 
-    pub fn get_cell(&self, index: SlotNumber) -> StorageResult<BTreeCell> {
+    pub fn get_cell(&self, index: SlotNumber) -> storage::Result<BTreeCell> {
         let offset_to_cell = self.slot_array().get(index);
 
         let min_cell_size = min_cell_size(self.usable_space());
@@ -605,6 +520,110 @@ impl Page {
     }
 }
 
+impl Page {
+    fn read_u8(&self, pos: usize) -> u8 {
+        self.as_ptr()[pos]
+    }
+
+    fn read_u16_no_offset(&self, pos: usize) -> u16 {
+        let buf = self.as_ptr();
+        u16::from_le_bytes([buf[pos], buf[pos + 1]])
+    }
+
+    fn read_u16(&self, pos: usize) -> u16 {
+        self.read_u16_no_offset(pos)
+    }
+
+    fn read_u32_no_offset(&self, pos: usize) -> u32 {
+        let buf = self.as_ptr();
+        u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]])
+    }
+
+    fn read_u32(&self, pos: usize) -> u32 {
+        self.read_u32_no_offset(pos)
+    }
+
+    fn write_u8(&self, pos: usize, value: u8) {
+        let buf = self.as_ptr();
+        buf[pos] = value;
+    }
+
+    fn write_u16_no_offset(&self, pos: usize, value: u16) {
+        let buf = self.as_ptr();
+        buf[pos..pos + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u16(&self, pos: usize, value: u16) {
+        self.write_u16_no_offset(pos, value);
+    }
+
+    fn write_u32_no_offset(&self, pos: usize, value: u32) {
+        let buf = self.as_ptr();
+        buf[pos..pos + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u32(&self, pos: usize, value: u32) {
+        self.write_u32_no_offset(pos, value);
+    }
+}
+
+impl Page {
+    pub fn try_page_type(&self) -> Option<PageType> {
+        self.read_u8(Self::PAGE_TYPE_OFFSET).try_into().ok()
+    }
+
+    pub fn page_type(&self) -> PageType {
+        self.try_page_type().unwrap()
+    }
+
+    pub fn first_freeblock(&self) -> u16 {
+        self.read_u16(Self::FIRST_FREEBLOCK_OFFSET)
+    }
+
+    pub fn set_first_freeblock(&self, value: u16) {
+        self.write_u16(Self::FIRST_FREEBLOCK_OFFSET, value);
+    }
+
+    pub fn last_used_offset(&self) -> u16 {
+        self.read_u16(Self::LAST_USED_OFFSET)
+    }
+
+    pub fn set_last_used_offset(&self, value: u16) {
+        self.write_u16(Self::LAST_USED_OFFSET, value);
+    }
+
+    pub fn free_fragments(&self) -> u8 {
+        self.read_u8(Self::FREE_FRAGMENTS_OFFSET)
+    }
+
+    pub fn set_free_fragments(&self, value: u8) {
+        self.write_u8(Self::FREE_FRAGMENTS_OFFSET, value)
+    }
+
+    pub fn add_free_fragment(&self, value: u8) {
+        self.set_free_fragments(self.free_fragments() + value)
+    }
+
+    /// Returns next `PageNumber` if `PageType` is internal or None if `Page` is Leaf.
+    pub fn try_rigth_child(&self) -> Option<PageNumber> {
+        match self.page_type() {
+            PageType::IndexInternal | PageType::TableInternal => {
+                Some(self.read_u32(Self::RIGTH_CHILD_OFFSET))
+            }
+            PageType::IndexLeaf | PageType::TableLeaf => None,
+        }
+    }
+
+    /// Returns number of slots in `Page`.
+    pub fn len(&self) -> u16 {
+        self.read_u16(Self::LENGTH_OFFSET)
+    }
+
+    pub fn set_len(&self, value: u16) {
+        self.write_u16(Self::LENGTH_OFFSET, value);
+    }
+}
+
 impl Debug for Page {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Page")
@@ -632,17 +651,17 @@ impl Debug for Page {
 pub struct SlotArray<'a> {
     // Pointer to beginning of page.
     mem: &'a mut [u8],
-    /// Offset to `num_slots`.
-    num_slots_offset: usize,
+    /// Offset to `length` field in page.
+    length_offset: usize,
     /// Offset to slot array
     slot_array_offset: usize,
 }
 
 impl<'a> SlotArray<'a> {
-    pub fn new(mem: &'a mut [u8], num_slots_offset: usize, slot_array_offset: usize) -> Self {
+    pub fn new(mem: &'a mut [u8], length_offset: usize, slot_array_offset: usize) -> Self {
         Self {
             mem,
-            num_slots_offset,
+            length_offset,
             slot_array_offset,
         }
     }
@@ -656,11 +675,11 @@ impl<'a> SlotArray<'a> {
     }
 
     pub fn len(&self) -> u16 {
-        self.read_u16(self.num_slots_offset)
+        self.read_u16(self.length_offset)
     }
 
     pub fn set_len(&mut self, value: u16) {
-        self.write_u16(self.num_slots_offset, value);
+        self.write_u16(self.length_offset, value);
     }
 
     pub fn increment_len(&mut self) {
@@ -783,19 +802,19 @@ impl<'a> FreeblockList<'a> {
     }
 
     pub fn first_freeblock(&self) -> u16 {
-        self.read_u16(1)
+        self.read_u16(Page::FIRST_FREEBLOCK_OFFSET)
     }
 
     pub fn set_first_freeblock(&mut self, value: u16) {
-        self.write_u16(1, value);
+        self.write_u16(Page::FIRST_FREEBLOCK_OFFSET, value);
     }
 
     pub fn free_fragments(&self) -> u8 {
-        self.read_u8(7)
+        self.read_u8(Page::FREE_FRAGMENTS_OFFSET)
     }
 
     pub fn set_free_fragments(&mut self, value: u8) {
-        self.write_u8(7, value)
+        self.write_u8(Page::FREE_FRAGMENTS_OFFSET, value)
     }
 
     pub fn add_free_fragment(&mut self, value: u8) {
@@ -897,7 +916,6 @@ impl<'a> Iterator for FreeblockIterator<'a> {
 }
 
 /// Wraps possible types of cell stored in `Page`. On disk each variable is stored in little endian except varints.
-
 #[derive(Debug)]
 pub enum BTreeCell {
     IndexInternalCell(IndexInternalCell),
@@ -1219,7 +1237,7 @@ pub fn read_btree_cell(
     min_cell_size: usize,
     max_cell_size: usize,
     usable_space: usize,
-) -> StorageResult<BTreeCell> {
+) -> storage::Result<BTreeCell> {
     let mut cursor = BytesCursor::new(page_buffer);
     cursor.set_position(offset as usize);
 
@@ -1338,7 +1356,7 @@ pub fn write_btree_cell(
     page_buffer: &'_ mut [u8],
     offset: u16,
     cell: &BTreeCell,
-) -> StorageResult<()> {
+) -> storage::Result<()> {
     let position = offset as usize;
 
     match cell {
