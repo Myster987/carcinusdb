@@ -1,7 +1,7 @@
 use std::{iter::Peekable, str::Chars};
 
 use crate::sql::{
-    SqlError,
+    self,
     token::{Keyword, Token, Whitespace},
 };
 
@@ -56,13 +56,13 @@ impl<'a> Tokenizer<'a> {
     }
 
     /// Consumes character and returns next `Token`.
-    fn consume(&mut self, token: Token) -> Result<Token, SqlError> {
+    fn consume(&mut self, token: Token) -> sql::Result<Token> {
         self.stream.next();
         Ok(token)
     }
 
     /// Consumes number.
-    fn consume_number(&mut self) -> Result<Token, SqlError> {
+    fn consume_number(&mut self) -> sql::Result<Token> {
         let mut number = String::new();
 
         while let Some(digit) = self.stream.peek() {
@@ -77,7 +77,7 @@ impl<'a> Tokenizer<'a> {
     }
 
     /// Consumes string inside quotes.
-    fn consume_string(&mut self) -> Result<Token, SqlError> {
+    fn consume_string(&mut self) -> sql::Result<Token> {
         let quote = self.stream.next().unwrap();
         let mut string = String::new();
 
@@ -92,12 +92,12 @@ impl<'a> Tokenizer<'a> {
         if self.stream.next().is_some_and(|ch| ch == quote) {
             Ok(Token::String(string))
         } else {
-            Err(SqlError::StringNotClosed)
+            Err(sql::Error::StringNotClosed)
         }
     }
 
     /// Consumes some characters from stream and returns Keyword or Identifier Token.
-    fn consume_keyword_or_identifier(&mut self) -> Result<Token, SqlError> {
+    fn consume_keyword_or_identifier(&mut self) -> sql::Result<Token> {
         let mut to_consume = String::new();
 
         while let Some(ch) = self.stream.peek() {
@@ -153,8 +153,8 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    /// Parses part of the stream and returns `Result<Token>`
-    pub fn next_token(&mut self) -> Result<Token, SqlError> {
+    /// Parses part of the stream and returns `sql::Result<Token>`
+    pub fn next_token(&mut self) -> sql::Result<Token> {
         let Some(ch) = self.stream.peek() else {
             return Ok(Token::Eof);
         };
@@ -177,7 +177,7 @@ impl<'a> Tokenizer<'a> {
             },
             '!' => match self.stream.peek_next() {
                 Some('=') => self.consume(Token::Neq),
-                _ => return Err(SqlError::InvalidQuery(self.stream.position())),
+                _ => return Err(sql::Error::InvalidQuery(self.stream.position())),
             },
             '+' => self.consume(Token::Add),
             '-' => self.consume(Token::Sub),
@@ -190,13 +190,13 @@ impl<'a> Tokenizer<'a> {
             '0'..='9' => self.consume_number(),
             '"' | '\'' => self.consume_string(),
             _ if Token::is_part_keyword_or_identifier(ch) => self.consume_keyword_or_identifier(),
-            _ => Err(SqlError::UnexpectedToken(ch.to_owned())),
+            _ => Err(sql::Error::UnexpectedToken(ch.to_owned())),
         }
     }
 }
 
 impl<'a> Iterator for Tokenizer<'a> {
-    type Item = Result<Token, SqlError>;
+    type Item = sql::Result<Token>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let next_token = self.next_token();

@@ -2,7 +2,7 @@ use std::{cell::RefCell, fmt::Debug};
 
 use crate::{
     sql::{
-        SqlError,
+        self,
         types::{Value, ValueRef, parse_value, serial::SerialType},
     },
     utils::{
@@ -28,7 +28,7 @@ impl<'a> Record<'a> {
         self.try_get_value(index).unwrap()
     }
 
-    pub fn try_get_value(&self, index: usize) -> Result<ValueRef<'a>, SqlError> {
+    pub fn try_get_value(&self, index: usize) -> sql::Result<ValueRef<'a>> {
         self.cursor.borrow_mut().get_value(index)
     }
 
@@ -96,7 +96,7 @@ impl<'a> RecordCursor<'a> {
         }
     }
 
-    fn parse_up_to(&mut self, index: usize) -> Result<(), SqlError> {
+    fn parse_up_to(&mut self, index: usize) -> sql::Result<()> {
         // type is already parsed, this is no-op
         if self.serial_types.len() > index {
             return Ok(());
@@ -128,11 +128,11 @@ impl<'a> RecordCursor<'a> {
         Ok(())
     }
 
-    pub fn full_parse(&mut self) -> Result<(), SqlError> {
+    pub fn full_parse(&mut self) -> sql::Result<()> {
         self.parse_up_to(MAX_COLUMN_COUNT)
     }
 
-    pub fn get_value(&mut self, index: usize) -> Result<ValueRef<'a>, SqlError> {
+    pub fn get_value(&mut self, index: usize) -> sql::Result<ValueRef<'a>> {
         self.parse_up_to(index)?;
 
         if index >= self.serial_types.len() {

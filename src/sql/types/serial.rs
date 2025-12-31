@@ -1,6 +1,6 @@
 use crate::{
     sql::{
-        SqlError,
+        self,
         types::{AsValueRef, ValueRef},
     },
     utils::bytes::{VarInt, encode_to_varint},
@@ -139,7 +139,7 @@ impl<T: AsValueRef> From<T> for SerialType {
 }
 
 impl TryFrom<u64> for SerialType {
-    type Error = SqlError;
+    type Error = sql::Error;
 
     fn try_from(value: u64) -> Result<Self, Self::Error> {
         if (7..12).contains(&value) {

@@ -10,10 +10,10 @@ use thiserror::Error;
 
 use crate::storage::{PageNumber, pager::MemPageRef};
 
-pub type CacheResult<T> = Result<T, CacheError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Error)]
-pub enum CacheError {
+pub enum Error {
     #[error("key already exists in cache.")]
     KeyExists,
     #[error("page is currently locked.")]
@@ -90,15 +90,15 @@ impl<S: BuildHasher> ShardedLruCache<S> {
         self.get_shard(key).lock().get(key)
     }
 
-    pub fn insert(&self, key: PageCacheKey, page: MemPageRef) -> CacheResult<()> {
+    pub fn insert(&self, key: PageCacheKey, page: MemPageRef) -> Result<()> {
         self.get_shard(&key).lock().insert(key, page)
     }
 
-    pub fn delete(&self, key: PageCacheKey) -> CacheResult<()> {
+    pub fn delete(&self, key: PageCacheKey) -> Result<()> {
         self.get_shard(&key).lock().delete(key)
     }
 
-    pub fn clear(&self) -> CacheResult<()> {
+    pub fn clear(&self) -> Result<()> {
         for shard in &self.shards {
             shard.lock().clear()?;
         }
@@ -182,13 +182,13 @@ impl LruPageCache {
         self.peek(key, true)
     }
 
-    pub fn insert(&mut self, key: PageCacheKey, page: MemPageRef) -> CacheResult<()> {
+    pub fn insert(&mut self, key: PageCacheKey, page: MemPageRef) -> Result<()> {
         self.try_insert(key, page)
     }
 
-    fn try_insert(&mut self, key: PageCacheKey, page: MemPageRef) -> CacheResult<()> {
+    fn try_insert(&mut self, key: PageCacheKey, page: MemPageRef) -> Result<()> {
         if self.contains_key(&key) {
-            return Err(CacheError::KeyExists);
+            return Err(Error::KeyExists);
         }
 
         self.make_room_for(1)?;
@@ -203,11 +203,11 @@ impl LruPageCache {
         Ok(())
     }
 
-    pub fn delete(&mut self, key: PageCacheKey) -> CacheResult<()> {
+    pub fn delete(&mut self, key: PageCacheKey) -> Result<()> {
         self.try_delete(key, true)
     }
 
-    fn try_delete(&mut self, key: PageCacheKey, clean_page: bool) -> CacheResult<()> {
+    fn try_delete(&mut self, key: PageCacheKey, clean_page: bool) -> Result<()> {
         if !self.contains_key(&key) {
             return Ok(());
         }
@@ -226,22 +226,19 @@ impl LruPageCache {
     }
 
     /// Removes entry from linked list and eventiualy cleans up page from memory (returns `Buffer` to `BufferPool`).
-    fn detach(&mut self, mut entry: NonNull<PageCacheEntry>, clean_page: bool) -> CacheResult<()> {
+    fn detach(&mut self, mut entry: NonNull<PageCacheEntry>, clean_page: bool) -> Result<()> {
         let entry_mut = unsafe { entry.as_mut() };
 
-        if entry_mut.page.is_locked() {
-            return Err(CacheError::PageLocked);
-        }
         if entry_mut.page.is_dirty() {
-            return Err(CacheError::Dirty {
-                id: entry_mut.page.get().id,
+            return Err(Error::Dirty {
+                id: entry_mut.page.id(),
             });
         }
 
         if clean_page {
-            entry_mut.page.clear_loaded();
-            log::debug!("cleaining up page {}", entry_mut.page.get().id);
-            let _ = entry_mut.page.get().content.take();
+            let mut guard = entry_mut.page.lock_exclusive();
+            log::debug!("cleaining up page {}", entry_mut.page.id());
+            let _ = guard.take();
         }
 
         self.unlink(entry);
@@ -297,9 +294,9 @@ impl LruPageCache {
         self.head.replace(entry);
     }
 
-    fn make_room_for(&mut self, entries_num: usize) -> CacheResult<()> {
+    fn make_room_for(&mut self, entries_num: usize) -> Result<()> {
         if entries_num > self.capacity {
-            return Err(CacheError::Full);
+            return Err(Error::Full);
         }
 
         let len = self.len();
@@ -310,7 +307,7 @@ impl LruPageCache {
         }
 
         // Now we need to handle case when there are too many entires, so we need to delete oldest ones (closest to the tail)
-        let tail = self.tail.ok_or(CacheError::Internal(format!(
+        let tail = self.tail.ok_or(Error::Internal(format!(
             "Page cache of length {} exprected to have a tail",
             self.len()
         )))?;
@@ -328,14 +325,14 @@ impl LruPageCache {
         }
 
         if to_delete > 0 {
-            return Err(CacheError::Full);
+            return Err(Error::Full);
         }
 
         Ok(())
     }
 
     /// Deletes all entries. Sets head and tail to `None`.
-    pub fn clear(&mut self) -> CacheResult<()> {
+    pub fn clear(&mut self) -> Result<()> {
         let mut current = self.head;
 
         while let Some(mut c) = current {
@@ -410,7 +407,6 @@ mod tests {
         let entry = lry_cache.get(&2);
 
         if let Some(e) = entry {
-            println!("{:?}", e.get().flags);
             println!("{:?}", Arc::strong_count(&e));
         }
 

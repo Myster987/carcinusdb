@@ -8,7 +8,6 @@ pub mod buffer_pool;
 pub mod cache;
 pub mod page;
 pub mod pager;
-// pub mod schema;
 pub mod wal;
 
 /// Used for pages.
@@ -21,7 +20,7 @@ pub type FrameNumber = BlockNumber;
 pub const PAGE_NUMBER_SIZE: usize = std::mem::size_of::<PageNumber>();
 pub const SLOT_SIZE: usize = std::mem::size_of::<SlotNumber>();
 
-pub type StorageResult<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -41,7 +40,7 @@ pub enum Error {
 
     // cache
     #[error(transparent)]
-    Cache(#[from] cache::CacheError),
+    Cache(#[from] cache::Error),
 
     // utils
     #[error(transparent)]

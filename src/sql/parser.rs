@@ -1,5 +1,5 @@
 use crate::sql::{
-    SqlError,
+    self,
     statement::{
         Assignment, BinaryOperator, Column, Constrains, Create, DataType, Drop, Expression,
         Statement, UnaryOperator,
@@ -11,15 +11,15 @@ use crate::sql::{
 
 /// Trait to implement all esential statements.
 pub trait StatementParser {
-    fn parse_explain(&mut self) -> Result<Statement, SqlError>;
-    fn parse_select(&mut self) -> Result<Statement, SqlError>;
-    fn parse_create(&mut self) -> Result<Statement, SqlError>;
-    fn parse_drop(&mut self) -> Result<Statement, SqlError>;
-    fn parse_delete(&mut self) -> Result<Statement, SqlError>;
-    fn parse_insert(&mut self) -> Result<Statement, SqlError>;
-    fn parse_update(&mut self) -> Result<Statement, SqlError>;
-    fn parse_begin(&mut self) -> Result<Statement, SqlError>;
-    fn parse_commit(&mut self) -> Result<Statement, SqlError>;
+    fn parse_explain(&mut self) -> sql::Result<Statement>;
+    fn parse_select(&mut self) -> sql::Result<Statement>;
+    fn parse_create(&mut self) -> sql::Result<Statement>;
+    fn parse_drop(&mut self) -> sql::Result<Statement>;
+    fn parse_delete(&mut self) -> sql::Result<Statement>;
+    fn parse_insert(&mut self) -> sql::Result<Statement>;
+    fn parse_update(&mut self) -> sql::Result<Statement>;
+    fn parse_begin(&mut self) -> sql::Result<Statement>;
+    fn parse_commit(&mut self) -> sql::Result<Statement>;
 }
 
 /// Parser turns string into raw `Statement` (not yet optimized).
@@ -39,8 +39,8 @@ impl<'a> Parser<'a> {
     ///
     /// # Fails
     ///
-    /// If any `Token` in query is invalid, then it returns `SqlError`.
-    pub fn new(input: &'a str) -> Result<Self, SqlError> {
+    /// If any `Token` in query is invalid, then it returns `sql::Error`.
+    pub fn new(input: &'a str) -> sql::Result<Self> {
         let tokenzied = Tokenizer::new(input).into_iter().collect();
         let valid_tokens = Self::validate(tokenzied)?;
         Ok(Self {
@@ -50,8 +50,8 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Converts `Vec<Result<Token>>` into `Result<Vec<Token>>`, so it's easier to work with.
-    fn validate(token_stream: Vec<Result<Token, SqlError>>) -> Result<Vec<Token>, SqlError> {
+    /// Converts `Vec<sql::Result<Token>>` into `sql::Result<Vec<Token>>`, so it's easier to work with.
+    fn validate(token_stream: Vec<sql::Result<Token>>) -> sql::Result<Vec<Token>> {
         token_stream.into_iter().collect()
     }
 
@@ -90,54 +90,54 @@ impl<'a> Parser<'a> {
     }
 
     /// Returns reference to next non-whitespace `Token`.
-    fn peek_token(&mut self) -> Result<&Token, SqlError> {
+    fn peek_token(&mut self) -> sql::Result<&Token> {
         while let Some(token) = self.peek() {
             match token {
                 Token::Whitespace(_) => self.next(),
                 _ => break,
             };
         }
-        self.peek().ok_or(SqlError::UnexpectedEof)
+        self.peek().ok_or(sql::Error::UnexpectedEof)
     }
 
     /// Returns next token and skips all whitespaces. Assumes that user will stop calling when `Token::Semi` is returned. Otherwise it will constantly return `Token::Eof`.
-    fn next_token(&mut self) -> Result<Token, SqlError> {
+    fn next_token(&mut self) -> sql::Result<Token> {
         while let Some(token) = self.peek() {
             match token {
                 Token::Whitespace(_) => self.next(),
                 _ => break,
             };
         }
-        self.next().ok_or(SqlError::UnexpectedEof)
+        self.next().ok_or(sql::Error::UnexpectedEof)
     }
 
     /// Returns next `Keyword`. Skips whitespaces.
-    fn next_keyword(&mut self) -> Result<Keyword, SqlError> {
+    fn next_keyword(&mut self) -> sql::Result<Keyword> {
         match self.next_token()? {
             Token::Keyword(keyword) => Ok(keyword),
-            _ => Err(SqlError::InvalidQuery(self.position)),
+            _ => Err(sql::Error::InvalidQuery(self.position)),
         }
     }
 
-    /// Consumes and matches next token if it matches expected one. If next token == expected it returns Ok(token). Otherwise returns SqlError.
-    fn expect_token(&mut self, expected: Token) -> Result<Token, SqlError> {
+    /// Consumes and matches next token if it matches expected one. If next token == expected it returns Ok(token). Otherwise returns sql::Error.
+    fn expect_token(&mut self, expected: Token) -> sql::Result<Token> {
         match self.next_token() {
             Ok(token) => {
                 if token == expected {
                     Ok(token)
                 } else {
-                    Err(SqlError::Expected {
+                    Err(sql::Error::Expected {
                         expected,
                         found: token,
                     })
                 }
             }
-            _ => Err(SqlError::InvalidQuery(self.position)),
+            _ => Err(sql::Error::InvalidQuery(self.position)),
         }
     }
 
     /// The same as `exptected_token`, but for keywords.
-    fn expect_keyword(&mut self, expected: Keyword) -> Result<Keyword, SqlError> {
+    fn expect_keyword(&mut self, expected: Keyword) -> sql::Result<Keyword> {
         self.expect_token(Token::Keyword(expected))
             .map(|_| expected)
     }
@@ -169,13 +169,13 @@ impl<'a> Parser<'a> {
             .unwrap_or(&Keyword::None)
     }
 
-    /// Does the same thing as `Self::consume_one_of` but if no `Keyword` was consumed, then it returns SqlError.
-    fn expect_one_of<'k, K>(&mut self, keywords: &'k K) -> Result<Keyword, SqlError>
+    /// Does the same thing as `Self::consume_one_of` but if no `Keyword` was consumed, then it returns sql::Error.
+    fn expect_one_of<'k, K>(&mut self, keywords: &'k K) -> sql::Result<Keyword>
     where
         &'k K: IntoIterator<Item = &'k Keyword>,
     {
         match self.consume_one_of(keywords) {
-            Keyword::None => Err(SqlError::ExpectedOneOf {
+            Keyword::None => Err(sql::Error::ExpectedOneOf {
                 expected: keywords.into_iter().map(|k| Token::Keyword(*k)).collect(),
                 found: Token::Keyword(Keyword::None),
             }),
@@ -200,12 +200,12 @@ impl<'a> Parser<'a> {
     }
 
     /// Initialized TDOP descent. This function starts recursively calling other functions.
-    fn parse_expression(&mut self) -> Result<Expression, SqlError> {
+    fn parse_expression(&mut self) -> sql::Result<Expression> {
         self.parse_expr(0)
     }
 
     /// Core function that turs token stream into tree of `Expressions` with correct order.
-    fn parse_expr(&mut self, precedence: u8) -> Result<Expression, SqlError> {
+    fn parse_expr(&mut self, precedence: u8) -> sql::Result<Expression> {
         let mut expr = self.parse_prefix()?;
         let mut next_precedence = self.get_next_precedence();
 
@@ -218,7 +218,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses identifiers, values, parenthesis, etc.
-    fn parse_prefix(&mut self) -> Result<Expression, SqlError> {
+    fn parse_prefix(&mut self) -> sql::Result<Expression> {
         match self.next_token()? {
             Token::Identifier(identifier) => Ok(Expression::Identifier(identifier)),
             Token::Mul => Ok(Expression::Wildcard),
@@ -227,7 +227,7 @@ impl<'a> Parser<'a> {
             Token::Keyword(Keyword::True) => Ok(Expression::Value(Value::Bool(true))),
             Token::Keyword(Keyword::False) => Ok(Expression::Value(Value::Bool(false))),
             Token::Number(num) => Ok(Expression::Value(Value::Int(
-                num.parse().map_err(|_| SqlError::NumberOutOfRange)?,
+                num.parse().map_err(|_| sql::Error::NumberOutOfRange)?,
             ))),
 
             token @ (Token::Add | Token::Sub) => {
@@ -248,12 +248,12 @@ impl<'a> Parser<'a> {
                 Ok(Expression::Nested(Box::new(expression)))
             }
 
-            _ => Err(SqlError::InvalidQuery(self.position)),
+            _ => Err(sql::Error::InvalidQuery(self.position)),
         }
     }
 
-    /// Parses operations like `1 + 2` or `col == 4`. Returns `Result<Expression>`.
-    fn parse_infix(&mut self, left: Expression, precedence: u8) -> Result<Expression, SqlError> {
+    /// Parses operations like `1 + 2` or `col == 4`. Returns `sql::Result<Expression>`.
+    fn parse_infix(&mut self, left: Expression, precedence: u8) -> sql::Result<Expression> {
         let operator = match self.next_token()? {
             Token::Add => BinaryOperator::Add,
             Token::Sub => BinaryOperator::Sub,
@@ -267,7 +267,7 @@ impl<'a> Parser<'a> {
             Token::LtEq => BinaryOperator::LtEq,
             Token::Keyword(Keyword::Or) => BinaryOperator::Or,
             Token::Keyword(Keyword::And) => BinaryOperator::And,
-            _ => Err(SqlError::InvalidQuery(self.position))?,
+            _ => Err(sql::Error::InvalidQuery(self.position))?,
         };
 
         Ok(Expression::BinaryOperation {
@@ -278,19 +278,19 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses identifier (like column name is SELECT or FROM table).
-    fn parse_identifier(&mut self) -> Result<String, SqlError> {
+    fn parse_identifier(&mut self) -> sql::Result<String> {
         self.next_token().and_then(|token| match token {
             Token::Identifier(value) => Ok(value),
-            _ => Err(SqlError::InvalidQuery(self.position)),
+            _ => Err(sql::Error::InvalidQuery(self.position)),
         })
     }
 
     /// Parses with `custom_parse` function returning `Vec<T>` of values. If `required_parenthesis == true`, then it also checks if parethesis are closed correctly.
     fn parse_comma_separeted<T>(
         &mut self,
-        mut custom_parser: impl FnMut(&mut Self) -> Result<T, SqlError>,
+        mut custom_parser: impl FnMut(&mut Self) -> sql::Result<T>,
         required_parenthesis: bool,
-    ) -> Result<Vec<T>, SqlError> {
+    ) -> sql::Result<Vec<T>> {
         if required_parenthesis {
             self.expect_token(Token::LeftParen)?;
         }
@@ -310,16 +310,16 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses expressions that are separed by commas. Doesn't require parenthesis. Used for examples to parse SELECT columns...
-    fn parse_comma_separeted_values(&mut self) -> Result<Vec<Expression>, SqlError> {
+    fn parse_comma_separeted_values(&mut self) -> sql::Result<Vec<Expression>> {
         self.parse_comma_separeted(Self::parse_expression, false)
     }
 
     /// Parses identifiers separed by commas. Requires parenthesis. Used for example to parse INSERT INTO table (columns...)
-    fn parse_identifier_list(&mut self) -> Result<Vec<String>, SqlError> {
+    fn parse_identifier_list(&mut self) -> sql::Result<Vec<String>> {
         self.parse_comma_separeted(Self::parse_identifier, true)
     }
 
-    fn parse_optional_identifier_list(&mut self) -> Result<Option<Vec<String>>, SqlError> {
+    fn parse_optional_identifier_list(&mut self) -> sql::Result<Option<Vec<String>>> {
         if self
             .peek_token()
             .is_ok_and(|token| matches!(token, Token::LeftParen))
@@ -330,7 +330,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_assignment(&mut self) -> Result<Assignment, SqlError> {
+    fn parse_assignment(&mut self) -> sql::Result<Assignment> {
         let identifier = self.parse_identifier()?;
         self.expect_token(Token::Eq)?;
         let value = self.parse_expression()?;
@@ -338,14 +338,14 @@ impl<'a> Parser<'a> {
         Ok(Assignment { identifier, value })
     }
 
-    fn parse_data_type(&mut self) -> Result<DataType, SqlError> {
+    fn parse_data_type(&mut self) -> sql::Result<DataType> {
         match self.next_keyword()? {
             Keyword::Int => Ok(DataType::Int),
             Keyword::BigInt => Ok(DataType::BigInt),
             Keyword::Unsigned => match self.next_keyword()? {
                 Keyword::Int => Ok(DataType::UnsignedInt),
                 Keyword::BigInt => Ok(DataType::UnsignedBig),
-                bad => Err(SqlError::ExpectedOneOf {
+                bad => Err(sql::Error::ExpectedOneOf {
                     expected: vec![
                         Token::Keyword(Keyword::Int),
                         Token::Keyword(Keyword::BigInt),
@@ -358,24 +358,24 @@ impl<'a> Parser<'a> {
                 self.expect_token(Token::LeftParen)?;
                 let length = match self.parse_expression()? {
                     Expression::Value(Value::Int(val)) => val as usize,
-                    _ => Err(SqlError::InvalidQuery(self.position))?,
+                    _ => Err(sql::Error::InvalidQuery(self.position))?,
                 };
                 self.expect_token(Token::RightParen)?;
 
                 Ok(DataType::VarChar(length))
             }
-            _ => Err(SqlError::InvalidQuery(self.position)),
+            _ => Err(sql::Error::InvalidQuery(self.position)),
         }
     }
 
-    fn parse_constrains(&mut self) -> Result<Constrains, SqlError> {
+    fn parse_constrains(&mut self) -> sql::Result<Constrains> {
         match self.next_keyword()? {
             Keyword::Primary => {
                 self.expect_keyword(Keyword::Key)?;
                 Ok(Constrains::PrimaryKey)
             }
             Keyword::Unique => Ok(Constrains::Unique),
-            bad => Err(SqlError::ExpectedOneOf {
+            bad => Err(sql::Error::ExpectedOneOf {
                 expected: vec![
                     Token::Keyword(Keyword::Primary),
                     Token::Keyword(Keyword::Unique),
@@ -385,7 +385,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_column(&mut self) -> Result<Column, SqlError> {
+    fn parse_column(&mut self) -> sql::Result<Column> {
         let name = self.parse_identifier()?;
         let data_type = self.parse_data_type()?;
         let mut constrains = vec![];
@@ -412,7 +412,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_where(&mut self) -> Result<Option<Expression>, SqlError> {
+    fn parse_where(&mut self) -> sql::Result<Option<Expression>> {
         if self.consume_optional_keyword(Keyword::Where) {
             Ok(Some(self.parse_expression()?))
         } else {
@@ -420,7 +420,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_order_by(&mut self) -> Result<Option<Vec<Expression>>, SqlError> {
+    fn parse_order_by(&mut self) -> sql::Result<Option<Vec<Expression>>> {
         if self.consume_optional_keyword(Keyword::Order) {
             self.expect_keyword(Keyword::By)?;
             Ok(Some(self.parse_comma_separeted_values()?))
@@ -429,7 +429,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn parse_statement(&mut self) -> Result<Statement, SqlError> {
+    pub fn parse_statement(&mut self) -> sql::Result<Statement> {
         let statement = match self.next_keyword()? {
             Keyword::Select => {
                 self.prev_token();
@@ -472,16 +472,16 @@ impl<'a> Parser<'a> {
 }
 
 impl<'a> StatementParser for Parser<'a> {
-    fn parse_explain(&mut self) -> Result<Statement, SqlError> {
+    fn parse_explain(&mut self) -> sql::Result<Statement> {
         todo!()
     }
-    fn parse_begin(&mut self) -> Result<Statement, SqlError> {
+    fn parse_begin(&mut self) -> sql::Result<Statement> {
         todo!()
     }
-    fn parse_commit(&mut self) -> Result<Statement, SqlError> {
+    fn parse_commit(&mut self) -> sql::Result<Statement> {
         todo!()
     }
-    fn parse_create(&mut self) -> Result<Statement, SqlError> {
+    fn parse_create(&mut self) -> sql::Result<Statement> {
         self.expect_keyword(Keyword::Create)?;
 
         match self.next_keyword()? {
@@ -533,7 +533,7 @@ impl<'a> StatementParser for Parser<'a> {
 
                 Ok(Statement::Create(Create::Database(name)))
             }
-            keyword => Err(SqlError::ExpectedOneOf {
+            keyword => Err(sql::Error::ExpectedOneOf {
                 expected: vec![
                     Token::Keyword(Keyword::Table),
                     Token::Keyword(Keyword::Table),
@@ -542,7 +542,7 @@ impl<'a> StatementParser for Parser<'a> {
             })?,
         }
     }
-    fn parse_drop(&mut self) -> Result<Statement, SqlError> {
+    fn parse_drop(&mut self) -> sql::Result<Statement> {
         self.expect_keyword(Keyword::Drop)?;
 
         match self.next_keyword()? {
@@ -556,7 +556,7 @@ impl<'a> StatementParser for Parser<'a> {
 
                 Ok(Statement::Drop(Drop::Table(name)))
             }
-            bad => Err(SqlError::ExpectedOneOf {
+            bad => Err(sql::Error::ExpectedOneOf {
                 expected: vec![
                     Token::Keyword(Keyword::Database),
                     Token::Keyword(Keyword::Table),
@@ -565,7 +565,7 @@ impl<'a> StatementParser for Parser<'a> {
             }),
         }
     }
-    fn parse_delete(&mut self) -> Result<Statement, SqlError> {
+    fn parse_delete(&mut self) -> sql::Result<Statement> {
         self.expect_keyword(Keyword::Delete)?;
         self.expect_keyword(Keyword::From)?;
 
@@ -575,7 +575,7 @@ impl<'a> StatementParser for Parser<'a> {
 
         Ok(Statement::Delete { from, r#where })
     }
-    fn parse_insert(&mut self) -> Result<Statement, SqlError> {
+    fn parse_insert(&mut self) -> sql::Result<Statement> {
         self.expect_keyword(Keyword::Insert)?;
         self.expect_keyword(Keyword::Into)?;
 
@@ -598,7 +598,7 @@ impl<'a> StatementParser for Parser<'a> {
             values,
         })
     }
-    fn parse_select(&mut self) -> Result<Statement, SqlError> {
+    fn parse_select(&mut self) -> sql::Result<Statement> {
         self.expect_keyword(Keyword::Select)?;
 
         let columns = self.parse_comma_separeted_values()?;
@@ -618,7 +618,7 @@ impl<'a> StatementParser for Parser<'a> {
             order_by,
         })
     }
-    fn parse_update(&mut self) -> Result<Statement, SqlError> {
+    fn parse_update(&mut self) -> sql::Result<Statement> {
         self.expect_keyword(Keyword::Update)?;
 
         let table = self.parse_identifier()?;

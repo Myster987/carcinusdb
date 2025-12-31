@@ -9,8 +9,10 @@ pub mod token;
 pub mod tokenizer;
 pub mod types;
 
+pub type Result<T> = std::result::Result<T, Error>;
+
 #[derive(Debug, Error)]
-pub enum SqlError {
+pub enum Error {
     // parsing
     #[error("invalid query. Error near {0} character.")]
     InvalidQuery(usize),
