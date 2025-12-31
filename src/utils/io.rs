@@ -12,10 +12,7 @@ use std::{
 
 use libc::c_void;
 
-use crate::{
-    storage::{Error, StorageResult, pager::MemPageRef},
-    utils::buffer::Buffer,
-};
+use crate::utils::buffer::Buffer;
 
 pub type BlockNumber = u32;
 
@@ -303,9 +300,9 @@ impl<I> BlockIO<I> {
     }
 
     /// Calculates offset to block (starts at 1). Includes header size.
-    pub fn calculate_offset(&self, block_number: BlockNumber) -> StorageResult<usize> {
+    pub fn calculate_offset(&self, block_number: BlockNumber) -> io::Result<usize> {
         if block_number < 1 {
-            return Err(Error::PageNumberOutOfRange);
+            return Err(io::Error::from(io::ErrorKind::NotFound));
         }
         Ok(self.header_size + (block_number - 1) as usize * self.block_size)
     }
@@ -329,19 +326,12 @@ impl<I: IO> BlockIO<I> {
     pub fn read(
         &self,
         block_number: BlockNumber,
-        buffer: Arc<Buffer>,
-        job: Job<ReadJob>,
+        buffer: &mut Buffer,
         skip: usize,
-    ) -> StorageResult<Job<ReadJob>> {
+    ) -> io::Result<usize> {
         let offset = self.calculate_offset(block_number)? + skip;
 
-        let result = self
-            .raw_read(offset, buffer.as_mut_slice())
-            .map_err(|err| Arc::new(err.into()));
-
-        job.complete(result);
-
-        Ok(job)
+        self.raw_read(offset, buffer.as_mut_slice())
     }
 
     pub fn raw_write(&self, offset: usize, buffer: &[u8]) -> io::Result<usize> {
@@ -361,20 +351,13 @@ impl<I: IO> BlockIO<I> {
     pub fn write(
         &self,
         block_number: BlockNumber,
-        buffer: Arc<Buffer>,
-        job: Job<WriteJob>,
+        buffer: &Buffer,
         skip: usize,
-    ) -> StorageResult<Job<WriteJob>> {
+    ) -> io::Result<usize> {
         let offset = self.calculate_offset(block_number)? + skip;
 
-        let result = self
-            .raw_write(offset, buffer.as_slice())
-            .map_err(|err| Arc::new(err.into()))
-            .inspect(|_| self.increment_block_count(1));
-
-        job.complete(result);
-
-        Ok(job)
+        self.raw_write(offset, buffer.as_slice())
+            .inspect(|_| self.increment_block_count(1))
     }
 
     /// Writes sequence of block starting at `block_number`. Note that buffers
@@ -384,23 +367,16 @@ impl<I: IO> BlockIO<I> {
         &self,
         block_number: BlockNumber,
         buffers: &mut [IoSlice],
-        job: Job<GroupJob<WriteJob>>,
-    ) -> StorageResult<Job<GroupJob<WriteJob>>> {
+    ) -> io::Result<usize> {
         if buffers.len() % 2 != 0 {
-            return Err(Error::InvalidPageType);
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
         }
 
         let offset = self.calculate_offset(block_number)?;
 
-        let result = self
-            .get_io()
+        self.get_io()
             .pwrite_vec(offset, buffers)
-            .map_err(|err| Arc::new(err.into()))
-            .inspect(|_| self.increment_block_count(buffers.len() as u32 / 2));
-
-        job.complete(result);
-
-        Ok(job)
+            .inspect(|_| self.increment_block_count(buffers.len() as u32 / 2))
     }
 
     /// Truncates file to specific block length. If `to_block_len`
@@ -465,181 +441,4 @@ impl BlockIO<File> {
         self.flush()?;
         self.sync()
     }
-}
-
-pub type IoResult<T> = std::result::Result<T, Arc<Error>>;
-
-pub type ReadJobCallbackArgs = (MemPageRef, Arc<Buffer>);
-pub type ReadJobComplete = dyn Fn(IoResult<usize>, ReadJobCallbackArgs);
-
-pub type WriteJobCallbackArgs = MemPageRef;
-pub type WriteJobComplete = dyn Fn(IoResult<usize>, WriteJobCallbackArgs);
-
-pub type GroupJobCallbackArgs = MemPageRef;
-pub type GroupJobComplete = dyn Fn(IoResult<usize>, GroupJobCallbackArgs);
-
-/// Handler to construct read, write and group operations for IO.
-pub struct Job<J: JobOperations> {
-    inner: J,
-}
-
-impl<J: JobOperations> Job<J> {
-    pub fn new(inner: J) -> Self {
-        Self { inner }
-    }
-
-    pub fn ok(&self, bytes_read: usize) {
-        let result = Ok(bytes_read);
-        self.complete(result);
-    }
-
-    pub fn error(&self, err: Error) {
-        let error = Err(Arc::new(err));
-        self.complete(error);
-    }
-
-    /// Run this after io operation.
-    pub fn complete(&self, result: IoResult<usize>) {
-        self.inner.complete(result);
-    }
-
-    pub fn finish(self) -> J::Output {
-        self.inner.finish()
-    }
-
-    pub fn into_inner(self) -> J {
-        self.inner
-    }
-}
-
-impl<J: JobOperations> From<J> for Job<J> {
-    fn from(value: J) -> Self {
-        Self::new(value)
-    }
-}
-
-impl Job<ReadJob> {
-    pub fn new_read(
-        mem_page: MemPageRef,
-        buffer: Arc<Buffer>,
-        complete: Box<ReadJobComplete>,
-    ) -> Self {
-        let read_job = ReadJob::new(mem_page, buffer, complete);
-        Self::new(read_job)
-    }
-}
-
-impl Job<WriteJob> {
-    pub fn new_write(mem_page: MemPageRef, complete: Box<WriteJobComplete>) -> Self {
-        let write_job = WriteJob::new(mem_page, complete);
-        Self::new(write_job)
-    }
-}
-
-impl Job<GroupJob<ReadJob>> {
-    pub fn new_group_read() -> Self {
-        let group_job = GroupJob::new();
-        Self::new(group_job)
-    }
-
-    pub fn add(&mut self, job: ReadJob) {
-        self.inner.add(job);
-    }
-}
-impl Job<GroupJob<WriteJob>> {
-    pub fn new_group_write() -> Self {
-        let group_job = GroupJob::new();
-        Self::new(group_job)
-    }
-
-    pub fn add(&mut self, job: WriteJob) {
-        self.inner.add(job);
-    }
-}
-
-pub struct ReadJob {
-    mem_page: MemPageRef,
-    buffer: Arc<Buffer>,
-
-    complete: Box<ReadJobComplete>,
-}
-
-impl ReadJob {
-    pub fn new(mem_page: MemPageRef, buffer: Arc<Buffer>, complete: Box<ReadJobComplete>) -> Self {
-        Self {
-            mem_page,
-            buffer,
-            complete,
-        }
-    }
-}
-
-impl JobOperations for ReadJob {
-    type Output = ReadJobCallbackArgs;
-    fn complete(&self, bytes_read: IoResult<usize>) {
-        (self.complete)(bytes_read, (self.mem_page.clone(), self.buffer.clone()))
-    }
-
-    fn finish(self) -> Self::Output {
-        (self.mem_page, self.buffer)
-    }
-}
-
-pub struct WriteJob {
-    mem_page: MemPageRef,
-    complete: Box<WriteJobComplete>,
-}
-
-impl WriteJob {
-    pub fn new(mem_page: MemPageRef, complete: Box<WriteJobComplete>) -> Self {
-        Self { mem_page, complete }
-    }
-}
-
-impl JobOperations for WriteJob {
-    type Output = WriteJobCallbackArgs;
-    fn complete(&self, bytes_read: IoResult<usize>) {
-        (self.complete)(bytes_read, self.mem_page.clone())
-    }
-
-    fn finish(self) -> Self::Output {
-        self.mem_page
-    }
-}
-
-/// Handler for multiple jobs of the **same** type.
-/// Runs complete handler for all jobs inside.
-pub struct GroupJob<J: JobOperations> {
-    jobs: Vec<J>,
-}
-
-impl<J: JobOperations> GroupJob<J> {
-    /// Creates empty group job
-    pub fn new() -> Self {
-        Self { jobs: Vec::new() }
-    }
-
-    pub fn add(&mut self, job: J) {
-        self.jobs.push(job);
-    }
-}
-
-impl<J: JobOperations> JobOperations for GroupJob<J> {
-    type Output = Vec<J::Output>;
-
-    fn complete(&self, bytes_read: IoResult<usize>) {
-        for job in &self.jobs {
-            job.complete(bytes_read.clone());
-        }
-    }
-
-    fn finish(self) -> Self::Output {
-        self.jobs.into_iter().map(|job| job.finish()).collect()
-    }
-}
-
-pub trait JobOperations {
-    type Output;
-    fn complete(&self, bytes_read: IoResult<usize>);
-    fn finish(self) -> Self::Output;
 }

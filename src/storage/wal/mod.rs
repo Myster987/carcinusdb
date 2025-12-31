@@ -15,17 +15,17 @@ use parking_lot::{Mutex, RwLock};
 use crate::{
     os::{Open, OpenOptions},
     storage::{
-        Error, FrameNumber, PageNumber, StorageResult,
+        self, Error, FrameNumber, PageNumber,
         buffer_pool::LocalBufferPool,
         cache::ShardedLruCache,
-        page::MAX_PAGE_SIZE,
-        pager::{self, MemPageRef},
+        page::{MAX_PAGE_SIZE, Page},
+        pager::{self, ExclusivePageGuard, MemPageRef},
         wal::locks::{PackedU64, ReadGuard, ReadersPool, WriteGuard},
     },
     utils::{
         self,
         bytes::{byte_swap_u32, pack_u64},
-        io::{BlockIO, IO, Job},
+        io::{BlockIO, IO},
     },
 };
 
@@ -245,7 +245,7 @@ impl WalManager {
         db_file: Arc<BlockIO<File>>,
         page_size: u32,
         page_cache: Arc<ShardedLruCache>,
-    ) -> StorageResult<Self> {
+    ) -> storage::Result<Self> {
         // If WAL doesn't exist, then it creates header with default parameters
         let mut header = (!wal_file_path.exists())
             .then(|| WalHeader::default(page_size, db_file.get_block_count()));
@@ -331,7 +331,7 @@ impl GlobalWal {
         db_file: Arc<BlockIO<File>>,
         header: WalHeader,
         page_cache: Arc<ShardedLruCache>,
-    ) -> StorageResult<Self> {
+    ) -> storage::Result<Self> {
         let frame_size = header.page_size as usize + FRAME_HEADER_SIZE;
         // let backfilled_number = header.backfilled_number;
         // let checkpoint_seq_num = header.checkpoint_seq_num;
@@ -381,7 +381,7 @@ impl GlobalWal {
         })
     }
 
-    pub fn write_header(&self) -> StorageResult<()> {
+    pub fn write_header(&self) -> storage::Result<()> {
         let raw_header = self.header.into_raw_header();
 
         self.wal_file.write_header(&raw_header.to_bytes())?;
@@ -452,15 +452,18 @@ impl LocalWal {
         }
     }
 
-    fn calculate_frame_offset(&self, frame_number: FrameNumber) -> StorageResult<usize> {
-        self.global_wal.wal_file.calculate_offset(frame_number)
+    fn calculate_frame_offset(&self, frame_number: FrameNumber) -> storage::Result<usize> {
+        self.global_wal
+            .wal_file
+            .calculate_offset(frame_number)
+            .map_err(|err| err.into())
     }
 
     pub fn is_in_wal(&self, page_number: &PageNumber) -> bool {
         self.global_wal.index.contains(page_number)
     }
 
-    pub fn begin_read_tx(&mut self) -> StorageResult<ReadGuard<READERS_NUM>> {
+    pub fn begin_read_tx(&mut self) -> storage::Result<ReadGuard<READERS_NUM>> {
         let checkpoint_guard = self.global_wal.checkpoint_lock.read();
 
         let guard = self
@@ -476,7 +479,7 @@ impl LocalWal {
         Ok(guard)
     }
 
-    pub fn begin_write_tx(&mut self) -> StorageResult<WriteGuard> {
+    pub fn begin_write_tx(&mut self) -> storage::Result<WriteGuard> {
         let checkpoint_guard = self.global_wal.checkpoint_lock.read();
         let mutex_guard = self.global_wal.writer.lock();
 
@@ -489,7 +492,7 @@ impl LocalWal {
         Ok(guard)
     }
 
-    pub fn end_read_tx(&mut self, guard: ReadGuard<READERS_NUM>) -> StorageResult<()> {
+    pub fn end_read_tx(&mut self, guard: ReadGuard<READERS_NUM>) -> storage::Result<()> {
         self.min_frame = 0;
         self.max_frame = 0;
 
@@ -499,7 +502,7 @@ impl LocalWal {
     }
 
     /// Ends write transaction by dropping write locks and updates all
-    pub fn end_write_tx(&mut self, guard: WriteGuard) -> StorageResult<()> {
+    pub fn end_write_tx(&mut self, guard: WriteGuard) -> storage::Result<()> {
         self.global_wal.wal_file.persist()?;
 
         self.global_wal.set_last_checksum(self.last_checksum);
@@ -516,7 +519,7 @@ impl LocalWal {
     }
 
     /// Reads only page from WAL (skips header).
-    fn read_raw(&self, frame_number: FrameNumber, buffer: &mut [u8]) -> StorageResult<usize> {
+    fn read_raw(&self, frame_number: FrameNumber, buffer: &mut [u8]) -> storage::Result<usize> {
         let offset = self.calculate_frame_offset(frame_number)? + FRAME_HEADER_SIZE;
         self.global_wal
             .wal_file
@@ -529,15 +532,14 @@ impl LocalWal {
     pub fn read_frame(
         &mut self,
         page_number: PageNumber,
-        page: MemPageRef,
         buffer_pool: &LocalBufferPool,
-    ) -> StorageResult<Option<MemPageRef>> {
+    ) -> storage::Result<Option<Page>> {
         // if given page number is not present in WAL we can simply return OK(None)
         if !self.is_in_wal(&page_number) {
             return Ok(None);
         }
 
-        pager::begin_read_page(&page)?;
+        // pager::begin_read_page(&page)?;
 
         let visible_frame_number = self
             .global_wal
@@ -545,43 +547,47 @@ impl LocalWal {
             .get(&page_number, self.max_frame)
             .ok_or(Error::PageNotFoundInWal(page_number))?;
 
-        let complete = Box::new(|read_result, args| pager::complete_read_page(read_result, args));
+        let mut buffer = buffer_pool.get();
 
-        let buffer = Arc::new(buffer_pool.get());
+        let read_result =
+            self.global_wal
+                .wal_file
+                .read(visible_frame_number, &mut buffer, FRAME_HEADER_SIZE);
 
-        let job = Job::new_read(page, buffer.clone(), complete);
+        // complete_read_page(&read_result, &page, buffer);
 
-        let (page, _) = self
-            .global_wal
-            .wal_file
-            .read(visible_frame_number, buffer, job, FRAME_HEADER_SIZE)?
-            .finish();
-
-        Ok(Some(page))
+        match read_result {
+            Ok(bytes_read) => {
+                if bytes_read == buffer.size() {
+                    Ok(Some(Page::new(buffer)))
+                } else {
+                    Err(Error::PageNotFoundInWal(page_number))
+                }
+            }
+            Err(_) => Err(Error::PageNotFoundInWal(page_number)),
+        }
     }
 
-    pub fn append_frame(&mut self, page: MemPageRef, db_size: u32) -> StorageResult<MemPageRef> {
+    pub fn append_frame(&mut self, page: MemPageRef, db_size: u32) -> storage::Result<()> {
         self.append_vectored(vec![page], db_size)
-            .map(|mut res| res.pop().unwrap())
     }
 
-    pub fn append_vectored(
-        &mut self,
-        pages: Vec<MemPageRef>,
-        db_size: u32,
-    ) -> StorageResult<Vec<MemPageRef>> {
+    pub fn append_vectored(&mut self, pages: Vec<MemPageRef>, db_size: u32) -> storage::Result<()> {
         let mut io_buffers = Vec::with_capacity(pages.len() * 2);
         let mut header_buffers: Vec<Vec<u8>> = (0..pages.len())
             .map(|_| vec![0; FRAME_HEADER_SIZE])
             .collect();
 
+        // locks all pages for IO operation to prevent content from changing
+        let locked_pages: Vec<_> = pages.iter().map(|p| p.lock_exclusive()).collect();
+
         let mut running_checksum = self.last_checksum;
 
-        let mut group_job = Job::new_group_write();
+        for (i, page) in locked_pages.iter().enumerate() {
+            // begin_write_page(page)?;
 
-        for (i, page) in pages.iter().enumerate() {
-            let page_number = page.get().id;
-            let page_content = &page.get_content().as_ptr();
+            let page_number = page.id();
+            let page_content = page.as_ptr();
             let checksum = checksum_bytes(page_content, Some(running_checksum));
 
             running_checksum = checksum;
@@ -594,24 +600,23 @@ impl LocalWal {
             };
 
             frame_header.to_bytes(&mut header_buffers[i][..]);
-
-            let complete =
-                Box::new(|write_result, args| pager::complete_write_page(write_result, args));
-
-            let job = Job::new_write(page.clone(), complete).into_inner();
-            group_job.add(job);
         }
 
-        for (i, page) in pages.iter().enumerate() {
+        for (i, page) in locked_pages.iter().enumerate() {
             io_buffers.push(IoSlice::new(&header_buffers[i]));
-            io_buffers.push(page.get_content().as_io_slice());
+            io_buffers.push(page.as_io_slice());
         }
 
         let frame_number = self.max_frame + 1;
 
-        self.global_wal
+        let write_result = self
+            .global_wal
             .wal_file
-            .write_vectored(frame_number, &mut io_buffers, group_job)?;
+            .write_vectored(frame_number, &mut io_buffers);
+
+        for page in locked_pages {
+            pager::complete_write_page(&write_result, page, false);
+        }
 
         self.last_checksum = running_checksum;
         self.max_frame = self.max_frame + pages.len() as FrameNumber;
@@ -619,10 +624,10 @@ impl LocalWal {
         for (i, page) in pages.iter().enumerate() {
             self.global_wal
                 .index
-                .insert(page.get().id, frame_number + i as FrameNumber);
+                .insert(page.id(), frame_number + i as FrameNumber);
         }
 
-        Ok(pages)
+        Ok(())
     }
 
     fn should_checkpoint(&self) -> bool {
@@ -633,7 +638,7 @@ impl LocalWal {
         max_frame > self.global_wal.checkpoint_size + backfilled_number
     }
 
-    pub fn checkpoint(&mut self) -> StorageResult<()> {
+    pub fn checkpoint(&mut self) -> storage::Result<()> {
         if !self.should_checkpoint() {
             return Ok(());
         }
@@ -652,11 +657,10 @@ impl LocalWal {
         for (page_number, frame_number) in frames_to_checkpoint {
             let offset = self.global_wal.db_file.calculate_offset(page_number)?;
             if let Some(mem_page) = self.global_wal.page_cache.get(&page_number) {
-                if mem_page.is_dirty() {
-                    self.global_wal
-                        .db_file
-                        .raw_write(offset, &mem_page.get_content().as_ptr())?;
-                    mem_page.clear_dirty();
+                let guard = mem_page.lock_exclusive();
+                if guard.is_dirty() {
+                    self.global_wal.db_file.raw_write(offset, guard.as_ptr())?;
+                    guard.clear_dirty();
                 }
             } else {
                 self.read_raw(frame_number, &mut temp_buffer)?;
@@ -775,7 +779,7 @@ fn validate_frame(
     frame_number: FrameNumber,
     running_checksum: &mut Checksum,
     buffer: &mut [u8],
-) -> StorageResult<(bool, bool, PageNumber)> {
+) -> storage::Result<(bool, bool, PageNumber)> {
     let offset = wal_file.calculate_offset(frame_number)?;
     if wal_file.raw_read(offset, buffer).is_err() {
         return Ok((false, false, 0));
