@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
 use crate::sql::{
-    SqlError,
+    self,
     types::{
         serial::{SerialType, SerialTypeKind},
         text::{AnyText, Text, TextKind, TextRef},
@@ -60,66 +60,11 @@ impl Value {
             Value::Text(_) => ValueType::Text,
         }
     }
-
-    pub fn as_blob(&self) -> &[u8] {
-        self.try_as_blob()
-            .expect("Must be called for only Value::Blob")
-    }
-
-    pub fn as_mut_blob(&mut self) -> &mut [u8] {
-        self.try_as_blob_mut()
-            .expect("Must be called for only Value::Blob")
-    }
-
-    pub fn try_as_blob(&self) -> Option<&[u8]> {
-        match self {
-            Self::Blob(v) => Some(v.as_slice()),
-            _ => None,
-        }
-    }
-
-    pub fn try_as_blob_mut(&mut self) -> Option<&mut [u8]> {
-        match self {
-            Self::Blob(v) => Some(v.as_mut_slice()),
-            _ => None,
-        }
-    }
-
-    pub fn as_text(&self) -> &str {
-        self.try_as_text().expect("Called on value that type ")
-    }
-
-    pub fn try_as_text(&self) -> Option<&str> {
-        match self {
-            Self::Text(v) => Some(v.as_str()),
-            _ => None,
-        }
-    }
-
-    pub fn try_as_bool(&self) -> Option<bool> {
-        match self {
-            Self::Bool(v) => Some(*v),
-            _ => None,
-        }
-    }
-
-    pub fn try_as_int(&self) -> Option<i64> {
-        match self {
-            Self::Int(v) => Some(*v),
-            _ => None,
-        }
-    }
 }
 
 impl Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Null => write!(f, "NULL"),
-            Self::Bool(v) => f.write_str(if *v { "TRUE" } else { "FALSE" }),
-            Self::Int(v) => write!(f, "{v}"),
-            Self::Text(v) => write!(f, "\"{}\"", v.as_str()),
-            Self::Blob(v) => write!(f, "BLOB_BYTES({})", v.len()),
-        }
+        write!(f, "{}", self.as_value_ref())
     }
 }
 
@@ -157,38 +102,35 @@ impl AsValueRef for &mut Value {
 
 /// Takes buffer to beginning of a value and `serial_type`. Returns reference
 /// to a decoded value in result type.
-pub fn parse_value<'a>(
-    buffer: &'a [u8],
-    serial_type: &SerialType,
-) -> Result<ValueRef<'a>, SqlError> {
+pub fn parse_value<'a>(buffer: &'a [u8], serial_type: &SerialType) -> sql::Result<ValueRef<'a>> {
     match serial_type.kind() {
         SerialTypeKind::Null => Ok(ValueRef::Null),
         SerialTypeKind::BoolFalse => Ok(ValueRef::Bool(false)),
         SerialTypeKind::BoolTrue => Ok(ValueRef::Bool(true)),
         SerialTypeKind::Int8 => {
             if buffer.len() < 1 {
-                return Err(SqlError::InvalidValue("INT8"));
+                return Err(sql::Error::InvalidValue("INT8"));
             }
             let val = buffer[0];
             Ok(ValueRef::Int(val as i64))
         }
         SerialTypeKind::Int16 => {
             if buffer.len() < 2 {
-                return Err(SqlError::InvalidValue("INT16"));
+                return Err(sql::Error::InvalidValue("INT16"));
             }
             let val = u16::from_le_bytes([buffer[0], buffer[1]]);
             Ok(ValueRef::Int(val as i64))
         }
         SerialTypeKind::Int32 => {
             if buffer.len() < 4 {
-                return Err(SqlError::InvalidValue("INT32"));
+                return Err(sql::Error::InvalidValue("INT32"));
             }
             let val = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
             Ok(ValueRef::Int(val as i64))
         }
         SerialTypeKind::Int64 => {
             if buffer.len() < 8 {
-                return Err(SqlError::InvalidValue("INT64"));
+                return Err(sql::Error::InvalidValue("INT64"));
             }
             let val = i64::from_le_bytes([
                 buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5], buffer[6],
@@ -199,7 +141,7 @@ pub fn parse_value<'a>(
         SerialTypeKind::Blob => {
             let size = serial_type.size();
             if buffer.len() < size {
-                return Err(SqlError::InvalidValue("BLOB"));
+                return Err(sql::Error::InvalidValue("BLOB"));
             }
             let val = &buffer[..size];
             Ok(ValueRef::Blob(val))
@@ -207,7 +149,7 @@ pub fn parse_value<'a>(
         SerialTypeKind::Text => {
             let size = serial_type.size();
             if buffer.len() < size {
-                return Err(SqlError::InvalidValue("TEXT"));
+                return Err(sql::Error::InvalidValue("TEXT"));
             }
             // SAFETY: if value was encoded with type Text, then we can be sure.
             // that it is a valid string and we can skip validation.
@@ -215,5 +157,99 @@ pub fn parse_value<'a>(
             let val = TextRef::new(text, TextKind::PlainText);
             Ok(ValueRef::Text(val))
         }
+    }
+}
+
+impl<'a> ValueRef<'a> {
+    pub fn to_owned(&self) -> Value {
+        match self {
+            Self::Null => Value::Null,
+            Self::Bool(v) => Value::Bool(*v),
+            Self::Int(v) => Value::Int(*v),
+            Self::Blob(v) => Value::Blob(v.to_vec()),
+            Self::Text(v) => Value::Text(Text::new(v.to_string())),
+        }
+    }
+
+    pub fn to_value_type(&self) -> ValueType {
+        match self {
+            Self::Null => ValueType::Null,
+            Self::Bool(_) => ValueType::Bool,
+            Self::Int(_) => ValueType::Int,
+            Self::Blob(_) => ValueType::Blob,
+            Self::Text(_) => ValueType::Text,
+        }
+    }
+}
+
+impl<'a> Display for ValueRef<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Null => write!(f, "NULL"),
+            Self::Bool(v) => f.write_str(if *v { "TRUE" } else { "FALSE" }),
+            Self::Int(v) => write!(f, "{v}"),
+            Self::Text(v) => write!(f, "\"{}\"", v.as_str()),
+            Self::Blob(v) => write!(f, "{}", String::from_utf8_lossy(v)),
+        }
+    }
+}
+
+impl<'a> PartialEq<ValueRef<'a>> for ValueRef<'a> {
+    fn eq(&self, other: &ValueRef<'a>) -> bool {
+        match (self, other) {
+            (Self::Bool(bool_left), Self::Bool(bool_rigth)) => bool_left == bool_rigth,
+            (Self::Bool(bool_left), Self::Int(int_right)) => &(*bool_left as i64) == int_right,
+            (Self::Int(int_left), Self::Bool(bool_rigth)) => int_left == &(*bool_rigth as i64),
+            (Self::Int(int_left), Self::Int(int_right)) => int_left == int_right,
+            (Self::Int(_) | Self::Bool(_), Self::Text(_) | Self::Blob(_)) => false,
+            (Self::Text(_) | Self::Blob(_), Self::Int(_) | Self::Bool(_)) => false,
+            (Self::Text(text_left), Self::Text(text_right)) => {
+                text_left.as_bytes() == text_right.as_bytes()
+            }
+            (Self::Blob(blob_left), Self::Blob(blob_right)) => blob_left.eq(blob_right),
+            (Self::Null, Self::Null) => true,
+            _ => false,
+        }
+    }
+}
+
+impl<'a> Eq for ValueRef<'a> {}
+
+impl<'a> PartialOrd<ValueRef<'a>> for ValueRef<'a> {
+    fn partial_cmp(&self, other: &ValueRef<'a>) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (Self::Bool(bool_left), Self::Bool(bool_rigth)) => bool_left.partial_cmp(bool_rigth),
+            (Self::Bool(bool_left), Self::Int(int_rigth)) => {
+                (*bool_left as i64).partial_cmp(int_rigth)
+            }
+            (Self::Int(int_left), Self::Bool(bool_rigth)) => {
+                int_left.partial_cmp(&(*bool_rigth as i64))
+            }
+            (Self::Int(int_left), Self::Int(int_rigth)) => int_left.partial_cmp(int_rigth),
+            // Numeric to Text/Blob
+            (Self::Int(_) | Self::Bool(_), Self::Text(_) | Self::Blob(_)) => {
+                Some(std::cmp::Ordering::Less)
+            }
+            (Self::Text(_) | Self::Blob(_), Self::Int(_) | Self::Bool(_)) => {
+                Some(std::cmp::Ordering::Greater)
+            }
+            (Self::Text(text_left), Self::Text(text_rigth)) => {
+                text_left.as_bytes().partial_cmp(text_rigth.as_bytes())
+            }
+            // Text to Blob
+            (Self::Text(_), Self::Blob(_)) => Some(std::cmp::Ordering::Less),
+            (Self::Blob(_), Self::Text(_)) => Some(std::cmp::Ordering::Greater),
+
+            (Self::Blob(blob_left), Self::Blob(blob_rigth)) => blob_left.partial_cmp(blob_rigth),
+            (Self::Null, Self::Null) => Some(std::cmp::Ordering::Equal),
+            (Self::Null, _) => Some(std::cmp::Ordering::Less),
+            (_, Self::Null) => Some(std::cmp::Ordering::Greater),
+        }
+    }
+}
+
+impl<'a> Ord for ValueRef<'a> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap()
     }
 }
