@@ -19,7 +19,7 @@ use crate::{
         buffer_pool::LocalBufferPool,
         cache::ShardedLruCache,
         page::{MAX_PAGE_SIZE, Page},
-        pager::{self, ExclusivePageGuard, MemPageRef},
+        pager::{self, MemPageRef},
         wal::locks::{PackedU64, ReadGuard, ReadersPool, WriteGuard},
     },
     utils::{
@@ -559,7 +559,8 @@ impl LocalWal {
         match read_result {
             Ok(bytes_read) => {
                 if bytes_read == buffer.size() {
-                    Ok(Some(Page::new(buffer)))
+                    let offset = if page_number == 1 { WAL_HEADER_SIZE } else { 0 };
+                    Ok(Some(Page::new(offset, buffer)))
                 } else {
                     Err(Error::PageNotFoundInWal(page_number))
                 }

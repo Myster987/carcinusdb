@@ -16,8 +16,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("key already exists in cache.")]
     KeyExists,
-    #[error("page is currently locked.")]
-    PageLocked,
+    #[error("page is currently pinned.")]
+    PagePinned,
     #[error("page {id} is dirty.")]
     Dirty { id: PageNumber },
     #[error("cache is already full.")]
@@ -233,6 +233,10 @@ impl LruPageCache {
             return Err(Error::Dirty {
                 id: entry_mut.page.id(),
             });
+        }
+
+        if entry_mut.page.pin_count() > 0 {
+            return Err(Error::PagePinned);
         }
 
         if clean_page {
