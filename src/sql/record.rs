@@ -1,4 +1,4 @@
-use std::{cell::RefCell, fmt::Debug};
+use std::{cell::RefCell, fmt::Debug, rc::Rc};
 
 use crate::{
     sql::{
@@ -14,13 +14,14 @@ use crate::{
 pub const MAX_COLUMN_COUNT: usize = 2000;
 
 /// Immutable view to database row.
+#[derive(Clone)]
 pub struct Record<'a> {
-    cursor: RefCell<RecordCursor<'a>>,
+    cursor: Rc<RefCell<RecordCursor<'a>>>,
 }
 
 impl<'a> Record<'a> {
     pub fn new(payload: &'a [u8]) -> Self {
-        let cursor = RefCell::new(RecordCursor::new(payload));
+        let cursor = Rc::new(RefCell::new(RecordCursor::new(payload)));
         Self { cursor }
     }
 
@@ -236,6 +237,31 @@ impl RecordBuilder {
         }
 
         cursor.into_inner()
+    }
+
+    pub fn get(&self, index: usize) -> &Value {
+        &self.values[index]
+    }
+}
+
+impl Debug for RecordBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut dbg_table = DebugTable::new();
+        let mut header = Vec::new();
+        let mut row = Vec::new();
+
+        for (i, val) in self.values.iter().enumerate() {
+            // let serial_type = &self.column_values[i];
+            let dyn_ref: Box<dyn Debug> = Box::new(val);
+            header.push(format!("column {} value", i + 1));
+            row.push(dyn_ref);
+        }
+
+        header.iter().for_each(|h| dbg_table.add_column(h));
+
+        dbg_table.insert_row(row.iter().map(|v| v.as_ref()).collect());
+
+        dbg_table.fmt(f)
     }
 }
 
