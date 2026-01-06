@@ -164,7 +164,7 @@ impl TryFrom<u8> for PageType {
 /// ```
 /// # Header
 ///
-/// Depending on `PageType` header is either 8 (Leaf Pages) or 12 (Internal Pages).
+/// Depending on `PageType` header is either 12 (Leaf Pages) or 16 (Internal Pages).
 ///
 /// | Field Name        | Size  | Offset    | Description |
 /// | ----------------- | ----- | --------- | ----------- |
@@ -183,6 +183,18 @@ impl TryFrom<u8> for PageType {
 /// Only chunk of `Cell` is stored in `Page` and it needs to be reassembled by going over
 ///
 pub struct Page {
+    /// Offset for something like `DatabaseHeader` so actual page structure
+    /// looks like this:
+    ///
+    /// ```
+    /// +-----------------+------------------------------------+
+    /// | Some content... | Rest of Page                       |
+    /// +-----------------+------------------------------------+
+    ///                   ^
+    ///                   |
+    ///                   +--- offset
+    /// ```
+    offset: usize,
     /// Buffer that contains page content.
     buffer: Buffer,
     // Map of overflowing cells. Wrapped in `UnsafeCell`
@@ -199,11 +211,17 @@ impl Page {
     const RIGTH_SIBLING_OFFSET: usize = Self::FREE_FRAGMENTS_OFFSET + 1;
     const RIGTH_CHILD_OFFSET: usize = Self::RIGTH_SIBLING_OFFSET + size_of::<PageNumber>();
 
+    // overflow page
+    const NEXT_OVERFLOW_OFFSET: usize = 0;
+    const PAYLOAD_SIZE_OFFSET: usize = Self::NEXT_OVERFLOW_OFFSET + size_of::<PageNumber>();
+    const PAYLOAD_OFFSET: usize = Self::PAYLOAD_SIZE_OFFSET + size_of::<SlotNumber>();
+
     const INDEX_PAGE_HEADER_SIZE: usize = 12;
     const TABLE_PAGE_HEADER_SIZE: usize = 16;
 
-    pub fn new(buffer: Buffer) -> Self {
+    pub fn new(offset: usize, buffer: Buffer) -> Self {
         Self {
+            offset,
             buffer,
             overflow: UnsafeCell::new(HashMap::new()),
         }
@@ -212,19 +230,19 @@ impl Page {
     #[cfg(not(debug_assertions))]
     pub fn alloc(size: usize, drop: Option<DropFn>) -> Self {
         let buf = Buffer::alloc_page(size, drop);
-        Self::new(buf)
+        Self::new(0, buf)
     }
 
     #[cfg(debug_assertions)]
     pub fn alloc(size: usize, drop: Option<DropFn>) -> Self {
         // allow any page size
         let buf = Buffer::alloc(size, drop);
-        Self::new(buf)
+        Self::new(0, buf)
     }
 
-    #[allow(clippy::mut_from_ref)]
+    // #[allow(clippy::mut_from_ref)]
     pub fn as_ptr(&self) -> &mut [u8] {
-        self.buffer.as_mut_slice()
+        &mut self.buffer.as_mut_slice()[self.offset..]
     }
 
     fn usable_space(&self) -> usize {
@@ -250,10 +268,17 @@ impl Page {
     }
 
     pub fn as_io_slice(&self) -> IoSlice {
-        IoSlice::new(self.as_ptr())
+        IoSlice::new(self.buffer.as_slice())
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    pub fn is_leaf(&self) -> bool {
+        match self.page_type() {
+            PageType::IndexLeaf | PageType::TableLeaf => true,
+            _ => false,
+        }
     }
 
     fn overflow_map(&self) -> &mut HashMap<SlotNumber, BTreeCell> {
@@ -262,10 +287,6 @@ impl Page {
 
     pub fn is_overflow(&self) -> bool {
         !self.overflow_map().is_empty()
-    }
-
-    pub fn cell_overflows(&self, index: SlotNumber) -> bool {
-        self.overflow_map().get(&index).is_some()
     }
 
     /// Depending on `PageType`, this function returns 12 or 8.
@@ -292,7 +313,7 @@ impl Page {
     }
 
     pub fn slot_array(&self) -> SlotArray {
-        SlotArray::new(self.as_ptr(), Self::LENGTH_OFFSET, self.header_size())
+        SlotArray::new(self.as_ptr(), self.header_size())
     }
 
     pub fn freeblock_list(&self) -> FreeblockList {
@@ -525,22 +546,14 @@ impl Page {
         self.as_ptr()[pos]
     }
 
-    fn read_u16_no_offset(&self, pos: usize) -> u16 {
+    fn read_u16(&self, pos: usize) -> u16 {
         let buf = self.as_ptr();
         u16::from_le_bytes([buf[pos], buf[pos + 1]])
     }
 
-    fn read_u16(&self, pos: usize) -> u16 {
-        self.read_u16_no_offset(pos)
-    }
-
-    fn read_u32_no_offset(&self, pos: usize) -> u32 {
+    fn read_u32(&self, pos: usize) -> u32 {
         let buf = self.as_ptr();
         u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]])
-    }
-
-    fn read_u32(&self, pos: usize) -> u32 {
-        self.read_u32_no_offset(pos)
     }
 
     fn write_u8(&self, pos: usize, value: u8) {
@@ -548,22 +561,14 @@ impl Page {
         buf[pos] = value;
     }
 
-    fn write_u16_no_offset(&self, pos: usize, value: u16) {
+    fn write_u16(&self, pos: usize, value: u16) {
         let buf = self.as_ptr();
         buf[pos..pos + 2].copy_from_slice(&value.to_le_bytes());
     }
 
-    fn write_u16(&self, pos: usize, value: u16) {
-        self.write_u16_no_offset(pos, value);
-    }
-
-    fn write_u32_no_offset(&self, pos: usize, value: u32) {
+    fn write_u32(&self, pos: usize, value: u32) {
         let buf = self.as_ptr();
         buf[pos..pos + 4].copy_from_slice(&value.to_le_bytes());
-    }
-
-    fn write_u32(&self, pos: usize, value: u32) {
-        self.write_u32_no_offset(pos, value);
     }
 }
 
@@ -604,6 +609,12 @@ impl Page {
         self.set_free_fragments(self.free_fragments() + value)
     }
 
+    pub fn try_rigth_sibling(&self) -> Option<PageNumber> {
+        let next = self.read_u32(Self::RIGTH_SIBLING_OFFSET);
+
+        if next != 0 { Some(next) } else { None }
+    }
+
     /// Returns next `PageNumber` if `PageType` is internal or None if `Page` is Leaf.
     pub fn try_rigth_child(&self) -> Option<PageNumber> {
         match self.page_type() {
@@ -621,6 +632,27 @@ impl Page {
 
     pub fn set_len(&self, value: u16) {
         self.write_u16(Self::LENGTH_OFFSET, value);
+    }
+}
+
+// Overflow Pages
+impl Page {
+    /// Use only when page is overflow.
+    pub fn next_overflow(&self) -> Option<PageNumber> {
+        let next = self.read_u32(Self::NEXT_OVERFLOW_OFFSET);
+
+        if next == 0 { None } else { Some(next) }
+    }
+
+    /// Use only when page is overflow.
+    pub fn payload_size(&self) -> u16 {
+        self.read_u16(Self::PAYLOAD_SIZE_OFFSET)
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        let start = Self::PAYLOAD_OFFSET;
+        let end = start + self.payload_size() as usize;
+        &self.as_ptr()[start..end]
     }
 }
 
@@ -649,19 +681,16 @@ impl Debug for Page {
 
 /// View to slot array to make operations on it easier.
 pub struct SlotArray<'a> {
-    // Pointer to beginning of page.
+    // Pointer to beginning of page content.
     mem: &'a mut [u8],
-    /// Offset to `length` field in page.
-    length_offset: usize,
-    /// Offset to slot array
+    /// Offset to slot array.
     slot_array_offset: usize,
 }
 
 impl<'a> SlotArray<'a> {
-    pub fn new(mem: &'a mut [u8], length_offset: usize, slot_array_offset: usize) -> Self {
+    pub fn new(mem: &'a mut [u8], slot_array_offset: usize) -> Self {
         Self {
             mem,
-            length_offset,
             slot_array_offset,
         }
     }
@@ -675,11 +704,11 @@ impl<'a> SlotArray<'a> {
     }
 
     pub fn len(&self) -> u16 {
-        self.read_u16(self.length_offset)
+        self.read_u16(Page::LENGTH_OFFSET)
     }
 
     pub fn set_len(&mut self, value: u16) {
-        self.write_u16(self.length_offset, value);
+        self.write_u16(Page::LENGTH_OFFSET, value);
     }
 
     pub fn increment_len(&mut self) {
@@ -943,6 +972,24 @@ impl BTreeCell {
             Self::TableLeafCell(cell) => cell.as_ref(),
         }
     }
+
+    pub fn is_overflowing(&self) -> bool {
+        match self {
+            Self::IndexInternalCell(cell) => cell.is_overflowing(),
+            Self::IndexLeafCell(cell) => cell.is_overflowing(),
+            Self::TableInternalCell(cell) => cell.is_overflowing(),
+            Self::TableLeafCell(cell) => cell.is_overflowing(),
+        }
+    }
+
+    pub fn local_payload(&self) -> &[u8] {
+        match self {
+            Self::IndexInternalCell(cell) => cell.payload(),
+            Self::IndexLeafCell(cell) => cell.payload(),
+            Self::TableInternalCell(cell) => cell.payload(),
+            Self::TableLeafCell(cell) => cell.payload(),
+        }
+    }
 }
 
 impl ToOwned for BTreeCell {
@@ -1008,6 +1055,14 @@ pub trait CellOps {
     /// # Safety
     /// **Cell content is written at the beginning!**
     fn write_to_buffer(&self, buffer: &mut [u8]);
+    /// Returns true if cell is overflowing.
+    fn is_overflowing(&self) -> bool;
+    /// Returns slice to whole cell payload including overflow pages.
+    ///
+    /// # Safety
+    ///
+    /// If cell overflows, then it needs to be reassembled first.
+    fn payload(&self) -> &[u8];
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1056,6 +1111,16 @@ impl CellOps for IndexInternalCell {
         let end = self.raw.len();
         buffer[..end].copy_from_slice(&self.raw);
     }
+
+    fn is_overflowing(&self) -> bool {
+        self.first_overflow.is_some()
+    }
+
+    fn payload(&self) -> &[u8] {
+        let start = self.payload_ref.offset;
+        let end = start + self.payload_size as usize;
+        &self.as_ref()[start..end]
+    }
 }
 
 #[derive(Debug)]
@@ -1090,6 +1155,16 @@ impl CellOps for IndexLeafCell {
         let end = self.raw.len();
         buffer[..end].copy_from_slice(&self.raw);
     }
+
+    fn is_overflowing(&self) -> bool {
+        self.first_overflow.is_some()
+    }
+
+    fn payload(&self) -> &[u8] {
+        let start = self.payload_ref.offset;
+        let end = start + self.payload_size as usize;
+        &self.as_ref()[start..end]
+    }
 }
 
 #[derive(Debug)]
@@ -1114,6 +1189,15 @@ impl CellOps for TableInternalCell {
     fn write_to_buffer(&self, buffer: &mut [u8]) {
         let end = self.raw.len();
         buffer[..end].copy_from_slice(&self.raw);
+    }
+
+    #[inline(always)]
+    fn is_overflowing(&self) -> bool {
+        false
+    }
+
+    fn payload(&self) -> &[u8] {
+        &self.raw[..self.raw.len() - size_of::<PageNumber>()]
     }
 }
 
@@ -1150,6 +1234,16 @@ impl CellOps for TableLeafCell {
     fn write_to_buffer(&self, buffer: &mut [u8]) {
         let end = self.raw.len();
         buffer[..end].copy_from_slice(&self.raw);
+    }
+
+    fn is_overflowing(&self) -> bool {
+        self.first_overflow.is_some()
+    }
+
+    fn payload(&self) -> &[u8] {
+        let start = self.payload_ref.offset;
+        let end = start + self.payload_size as usize;
+        &self.as_ref()[start..end]
     }
 }
 
