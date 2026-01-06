@@ -68,6 +68,26 @@ impl Display for Value {
     }
 }
 
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_value_ref().eq(&other.as_value_ref())
+    }
+}
+
+impl Eq for Value {}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.as_value_ref().partial_cmp(&other.as_value_ref())
+    }
+}
+
+impl Ord for Value {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_value_ref().cmp(&other.as_value_ref())
+    }
+}
+
 pub trait AsValueRef {
     fn as_value_ref<'a>(&'a self) -> ValueRef<'a>;
 }
@@ -251,5 +271,38 @@ impl<'a> PartialOrd<ValueRef<'a>> for ValueRef<'a> {
 impl<'a> Ord for ValueRef<'a> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.partial_cmp(other).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::sql::record::RecordBuilder;
+
+    use super::*;
+
+    #[test]
+    fn test_value_comparison() -> anyhow::Result<()> {
+        let mut test_record = RecordBuilder::new();
+
+        test_record.add(Value::Int(123));
+        test_record.add(Value::Bool(true));
+        test_record.add(Value::Text(Text::new("123".into())));
+
+        println!("{:?}", test_record);
+
+        println!("{:?}", test_record.get(0));
+        println!("{:?}", test_record.get(1));
+        println!("{:?}", test_record.get(2));
+
+        assert!(*test_record.get(0) == Value::Int(123));
+        println!("{:?}", test_record.get(0).cmp(&Value::Int(125)));
+        println!(
+            "{:?}",
+            test_record
+                .get(2)
+                .cmp(&Value::Text(Text::new("124".into())))
+        );
+
+        Ok(())
     }
 }
