@@ -1,5 +1,6 @@
 use std::cell::UnsafeCell;
 use std::fs::File;
+use std::mem::{self, ManuallyDrop};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -7,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::database::MemDatabaseHeader;
 use crate::storage::buffer_pool::LocalBufferPool;
 use crate::storage::cache::ShardedLruCache;
+use crate::storage::page::DATABASE_HEADER_SIZE;
 use crate::storage::wal::LocalWal;
 use crate::utils::io::BlockIO;
 
@@ -43,7 +45,7 @@ impl MemPage {
     ///
     /// This is very unsafe, so don't use this function directly.
     /// Use safe wrappers insted.
-    fn inner(&self) -> &mut MemPageInner {
+    pub(super) fn inner(&self) -> &mut MemPageInner {
         unsafe { self.inner.get().as_mut().unwrap() }
     }
 
@@ -210,7 +212,7 @@ impl MemPage {
 
 pub struct MemPageInner {
     id: PageNumber,
-    content: Option<Page>,
+    pub(super) content: Option<Page>,
 }
 
 pub struct SharedPageGuard {
@@ -224,6 +226,14 @@ impl SharedPageGuard {
             .content
             .as_ref()
             .expect("Page shouldn't be None")
+    }
+
+    pub fn into_pin<T>(self, inner: T) -> PagePin<T, SharedPin> {
+        let manual = ManuallyDrop::new(self);
+        // SAFETY: we prevent drop, so PagePin can take of that
+        let page = unsafe { std::ptr::read(&manual.page) };
+
+        PagePin::shared(page, inner)
     }
 
     pub fn id(&self) -> PageNumber {
@@ -310,6 +320,14 @@ impl ExclusivePageGuard {
         self.page.inner().content.take()
     }
 
+    pub fn into_pin<T>(self, inner: T) -> PagePin<T, ExclusivePin> {
+        let manual = ManuallyDrop::new(self);
+        // SAFETY: we prevent drop, so PagePin can take of that
+        let page = unsafe { std::ptr::read(&manual.page) };
+
+        PagePin::exclusive(page, inner)
+    }
+
     pub fn id(&self) -> PageNumber {
         self.page.id()
     }
@@ -368,6 +386,82 @@ impl DerefMut for ExclusivePageGuard {
 impl Drop for ExclusivePageGuard {
     fn drop(&mut self) {
         self.page.unlock_exclusive();
+    }
+}
+
+struct SharedPin;
+struct ExclusivePin;
+
+trait PinKind {
+    fn unlock(page: &MemPageRef);
+}
+
+impl PinKind for SharedPin {
+    fn unlock(page: &MemPageRef) {
+        page.unlock_shared();
+    }
+}
+
+impl PinKind for ExclusivePin {
+    fn unlock(page: &MemPageRef) {
+        page.unlock_exclusive();
+    }
+}
+
+/// Wrapper that will hold lock to page until it's dropped.
+pub struct PagePin<Inner, Kind: PinKind = SharedPin> {
+    pub page: MemPageRef,
+    inner: Inner,
+    kind: std::marker::PhantomData<Kind>,
+}
+
+impl<Inner, Kind: PinKind> PagePin<Inner, Kind> {
+    pub fn new(page: MemPageRef, inner: Inner) -> Self {
+        Self {
+            page,
+            inner,
+            kind: std::marker::PhantomData::default(),
+        }
+    }
+}
+
+impl<Inner> PagePin<Inner, SharedPin> {
+    pub fn shared(page: MemPageRef, inner: Inner) -> Self {
+        Self {
+            page,
+            inner,
+            kind: std::marker::PhantomData::<SharedPin>,
+        }
+    }
+}
+
+impl<Inner> PagePin<Inner, ExclusivePin> {
+    pub fn exclusive(page: MemPageRef, inner: Inner) -> Self {
+        Self {
+            page,
+            inner,
+            kind: std::marker::PhantomData::<ExclusivePin>,
+        }
+    }
+}
+
+impl<Inner, Kind: PinKind> Drop for PagePin<Inner, Kind> {
+    fn drop(&mut self) {
+        Kind::unlock(&self.page);
+    }
+}
+
+impl<Inner, Kind: PinKind> Deref for PagePin<Inner, Kind> {
+    type Target = Inner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<Inner> DerefMut for PagePin<Inner, ExclusivePin> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }
 
@@ -538,7 +632,12 @@ impl Pager {
         match read_result {
             Ok(bytes_read) => {
                 if bytes_read == buffer.size() {
-                    Ok(Page::new(buffer))
+                    let offset = if page_number == 1 {
+                        DATABASE_HEADER_SIZE
+                    } else {
+                        0
+                    };
+                    Ok(Page::new(offset, buffer))
                 } else {
                     Err(storage::Error::PageNotFound(page_number))
                 }
