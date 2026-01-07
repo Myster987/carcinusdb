@@ -1,4 +1,4 @@
-use std::{cell::RefCell, fmt::Debug, rc::Rc};
+use std::{borrow::Cow, cell::RefCell, fmt::Debug, rc::Rc};
 
 use crate::{
     sql::{
@@ -16,29 +16,38 @@ pub const MAX_COLUMN_COUNT: usize = 2000;
 /// Immutable view to database row.
 #[derive(Clone)]
 pub struct Record<'a> {
-    cursor: Rc<RefCell<RecordCursor<'a>>>,
+    payload: Cow<'a, [u8]>,
+    cursor: Rc<RefCell<RecordCursor>>,
 }
 
 impl<'a> Record<'a> {
-    pub fn new(payload: &'a [u8]) -> Self {
-        let cursor = Rc::new(RefCell::new(RecordCursor::new(payload)));
-        Self { cursor }
+    pub fn new(payload: Cow<'a, [u8]>) -> Self {
+        let cursor = Rc::new(RefCell::new(RecordCursor::new()));
+        Self { payload, cursor }
     }
 
-    pub fn get_value(&self, index: usize) -> ValueRef<'a> {
+    pub fn from_borrowed(payload: &'a [u8]) -> Self {
+        Self::new(Cow::Borrowed(payload))
+    }
+
+    pub fn from_owned(payload: Vec<u8>) -> Self {
+        Self::new(Cow::Owned(payload))
+    }
+
+    pub fn get_value(&'a self, index: usize) -> ValueRef<'a> {
         self.try_get_value(index).unwrap()
     }
 
-    pub fn try_get_value(&self, index: usize) -> sql::Result<ValueRef<'a>> {
-        self.cursor.borrow_mut().get_value(index)
+    pub fn try_get_value(&'a self, index: usize) -> sql::Result<ValueRef<'a>> {
+        self.cursor.borrow_mut().get_value(&self.payload, index)
     }
 
     pub fn count(&self) -> usize {
-        self.cursor.borrow_mut().len()
+        self.cursor.borrow_mut().len(&self.payload)
     }
 
     pub fn len(&self) -> usize {
-        self.cursor.borrow_mut().len()
+        self.cursor.borrow_mut().len(&self.payload)
     }
 }
 
@@ -65,8 +74,7 @@ impl<'a> Debug for Record<'a> {
 
 /// Lazly parses values when needed. Helps to optimize parsing,
 /// by reducing serializing that sometimes is just not needed.
-pub struct RecordCursor<'a> {
-    payload: &'a [u8],
+pub struct RecordCursor {
     /// All parsed types in order. Length of vector represents, how many types
     /// were parsed starting at the beginning.
     serial_types: Vec<SerialType>,
@@ -76,10 +84,9 @@ pub struct RecordCursor<'a> {
     parsed_bytes: usize,
 }
 
-impl<'a> RecordCursor<'a> {
-    pub fn new(payload: &'a [u8]) -> Self {
+impl RecordCursor {
+    pub fn new() -> Self {
         Self {
-            payload,
             serial_types: Vec::new(),
             offsets: Vec::new(),
             header_size: 0,
@@ -87,9 +94,8 @@ impl<'a> RecordCursor<'a> {
         }
     }
 
-    pub fn with_capacity(payload: &'a [u8], capacity: usize) -> Self {
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            payload,
             serial_types: Vec::with_capacity(capacity),
             offsets: Vec::with_capacity(capacity + 1),
             header_size: 0,
@@ -97,13 +103,13 @@ impl<'a> RecordCursor<'a> {
         }
     }
 
-    fn parse_up_to(&mut self, index: usize) -> sql::Result<()> {
+    fn parse_up_to(&mut self, payload: &[u8], index: usize) -> sql::Result<()> {
         // type is already parsed, this is no-op
         if self.serial_types.len() > index {
             return Ok(());
         }
 
-        let mut cursor = BytesCursor::new(self.payload);
+        let mut cursor = BytesCursor::new(payload);
 
         if self.serial_types.is_empty() && self.offsets.is_empty() {
             let (header_size, bytes_read) = cursor.read_varint();
@@ -129,12 +135,12 @@ impl<'a> RecordCursor<'a> {
         Ok(())
     }
 
-    pub fn full_parse(&mut self) -> sql::Result<()> {
-        self.parse_up_to(MAX_COLUMN_COUNT)
+    pub fn full_parse(&mut self, payload: &[u8]) -> sql::Result<()> {
+        self.parse_up_to(payload, MAX_COLUMN_COUNT)
     }
 
-    pub fn get_value(&mut self, index: usize) -> sql::Result<ValueRef<'a>> {
-        self.parse_up_to(index)?;
+    pub fn get_value<'a>(&mut self, payload: &'a [u8], index: usize) -> sql::Result<ValueRef<'a>> {
+        self.parse_up_to(payload, index)?;
 
         if index >= self.serial_types.len() {
             return Ok(ValueRef::Null);
@@ -144,13 +150,13 @@ impl<'a> RecordCursor<'a> {
         let start = self.offsets[index];
         let end = self.offsets[index + 1];
 
-        let payload = &self.payload[start..end];
+        let payload = &payload[start..end];
 
         parse_value(payload, serial_type)
     }
 
-    pub fn len(&mut self) -> usize {
-        let _ = self.full_parse();
+    pub fn len(&mut self, payload: &[u8]) -> usize {
+        let _ = self.full_parse(payload);
         self.serial_types.len()
     }
 }
@@ -265,6 +271,47 @@ impl Debug for RecordBuilder {
     }
 }
 
+/// Comparison of two records. They are compared field by field and when not
+/// equal field is found `false` is returned. Otherwise `true` is returned.
+pub fn records_equal(r1: &Record, r2: &Record) -> bool {
+    let len1 = r1.len();
+    let len2 = r2.len();
+
+    if len1 != len2 {
+        return false;
+    }
+
+    for i in 0..len1 {
+        if r1.get_value(i) != r2.get_value(i) {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Comparison of two records. They are compared field by field and when not
+/// equal field is found given ordering is returned.
+pub fn compare_records(r1: &Record, r2: &Record) -> std::cmp::Ordering {
+    let len1 = r1.len();
+    let len2 = r2.len();
+    let min_len = len1.min(len2);
+
+    // Compare field by field (lexicographic order)
+    for i in 0..min_len {
+        let v1 = r1.get_value(i);
+        let v2 = r2.get_value(i);
+
+        match v1.cmp(&v2) {
+            std::cmp::Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+
+    // If all compared fields are equal, shorter record comes first
+    len1.cmp(&len2)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::sql::types::text::Text;
@@ -282,7 +329,7 @@ mod tests {
 
         buffer.extend_from_slice(&crate::utils::bytes::encode_to_varint(125));
 
-        let record = Record::new(&buffer);
+        let record = Record::from_owned(buffer);
 
         println!("{:?}", record);
 
@@ -300,7 +347,7 @@ mod tests {
         builder.add(Value::Int(125));
 
         let serialized = builder.serialize();
-        let record = Record::new(&serialized);
+        let record = Record::from_borrowed(&serialized);
 
         println!("{:?}", serialized);
         println!("{:?}", record);
