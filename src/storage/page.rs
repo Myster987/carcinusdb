@@ -7,7 +7,11 @@ use std::{
 };
 
 use crate::{
-    storage::{self, Error, PageNumber, SLOT_SIZE, SlotNumber},
+    sql::{
+        record::Record,
+        types::{parse_value, serial::SerialType},
+    },
+    storage::{self, Error, PageNumber, SLOT_SIZE, SlotNumber, btree::BTreeKey, pager::Pager},
     utils::{
         buffer::{Buffer, DropFn},
         bytes::{self, BytesCursor},
@@ -173,10 +177,11 @@ impl TryFrom<u8> for PageType {
 /// | length            | 2     | 3         | number of slots in slot array.
 /// | last_used_offset  | 2     | 5         | offset to last used space. Used to calculate if new data can fit in Page.
 /// | free_fragments    | 1     | 7         | number of free fragments. Tiny gaps between cells, to small to fit new data.
-/// | rigth_sibling     | 4     | 8         | points to rigth sibling of this page (at the same level in B-Tree).
-/// | rigth_child       | 4     | 12        | present only in Internal Pages. Points to next B-Tree page > current.
+/// | high_key_offset   | 2     | 8         | offset to cell that contains high key (biggest possible value in this cell).
+/// | rigth_sibling     | 4     | 10         | points to rigth sibling of this page (at the same level in B-Tree).
+/// | rigth_child       | 4     | 14        | present only in Internal Pages. Points to next B-Tree page > current.
 ///
-/// Total size: 16 bytes (Internal Pages) or 12 bytes (Lead Pages) bytes long.
+/// Total size: 18 bytes (Internal Pages) or 14 bytes (Lead Pages) bytes long.
 ///
 /// # Overflow:
 /// If `Page` contains `Cells` that overflow, it maintains hashmap of slots pointing to overflowing `Cells`.
@@ -208,7 +213,8 @@ impl Page {
     const LENGTH_OFFSET: usize = Self::FIRST_FREEBLOCK_OFFSET + size_of::<SlotNumber>();
     const LAST_USED_OFFSET: usize = Self::LENGTH_OFFSET + size_of::<SlotNumber>();
     const FREE_FRAGMENTS_OFFSET: usize = Self::LAST_USED_OFFSET + size_of::<SlotNumber>();
-    const RIGTH_SIBLING_OFFSET: usize = Self::FREE_FRAGMENTS_OFFSET + 1;
+    const HIGH_KEY_OFFSET: usize = Self::FREE_FRAGMENTS_OFFSET + 1;
+    const RIGTH_SIBLING_OFFSET: usize = Self::HIGH_KEY_OFFSET + size_of::<SlotNumber>();
     const RIGTH_CHILD_OFFSET: usize = Self::RIGTH_SIBLING_OFFSET + size_of::<PageNumber>();
 
     // overflow page
@@ -216,8 +222,8 @@ impl Page {
     const PAYLOAD_SIZE_OFFSET: usize = Self::NEXT_OVERFLOW_OFFSET + size_of::<PageNumber>();
     const PAYLOAD_OFFSET: usize = Self::PAYLOAD_SIZE_OFFSET + size_of::<SlotNumber>();
 
-    const INDEX_PAGE_HEADER_SIZE: usize = 12;
-    const TABLE_PAGE_HEADER_SIZE: usize = 16;
+    const INDEX_PAGE_HEADER_SIZE: usize = 14;
+    const TABLE_PAGE_HEADER_SIZE: usize = 18;
 
     pub fn new(offset: usize, buffer: Buffer) -> Self {
         Self {
@@ -390,9 +396,12 @@ impl Page {
         )
     }
 
-    pub fn get_cell(&self, index: SlotNumber) -> storage::Result<BTreeCell> {
-        let offset_to_cell = self.slot_array().get(index);
-
+    /// Returns cell at given offset.
+    ///
+    /// # Fails
+    ///
+    ///  If there is no cell at this offset, this function will return error.
+    fn get_cell_at_offset(&self, offset: u16) -> storage::Result<BTreeCell> {
         let min_cell_size = min_cell_size(self.usable_space());
         let max_cell_size = max_cell_size(self.usable_space());
 
@@ -402,11 +411,17 @@ impl Page {
         read_btree_cell(
             page_buffer,
             self.page_type(),
-            offset_to_cell,
+            offset,
             min_cell_size,
             max_cell_size,
             self.usable_space(),
         )
+    }
+
+    pub fn get_cell(&self, index: SlotNumber) -> storage::Result<BTreeCell> {
+        let offset_to_cell = self.slot_array().get(index);
+
+        self.get_cell_at_offset(offset_to_cell)
     }
 
     pub fn insert_cell(&self, index: SlotNumber, cell: BTreeCell) {
@@ -539,6 +554,25 @@ impl Page {
             }
         }
     }
+
+    pub fn high_key<'a>(&'a self, pager: &mut Pager) -> storage::Result<Option<BTreeKey<'a>>> {
+        let Some(offset) = self.try_high_key_offset() else {
+            return Ok(None);
+        };
+
+        let cell = self.get_cell_at_offset(offset)?;
+        let key = unsafe { std::mem::transmute(cell.key(pager)) };
+
+        Ok(Some(key))
+    }
+
+    pub fn key_in_range(&self, pager: &mut Pager, key: &BTreeKey) -> storage::Result<bool> {
+        if let Some(high_key) = self.high_key(pager)? {
+            Ok(*key <= high_key)
+        } else {
+            Ok(true)
+        }
+    }
 }
 
 impl Page {
@@ -609,6 +643,15 @@ impl Page {
         self.set_free_fragments(self.free_fragments() + value)
     }
 
+    pub fn try_high_key_offset(&self) -> Option<u16> {
+        let offset = self.read_u16(Self::HIGH_KEY_OFFSET);
+        if offset != 0 { Some(offset) } else { None }
+    }
+
+    pub fn set_high_key_offset(&self, value: u16) {
+        self.write_u16(Self::HIGH_KEY_OFFSET, value);
+    }
+
     pub fn try_rigth_sibling(&self) -> Option<PageNumber> {
         let next = self.read_u32(Self::RIGTH_SIBLING_OFFSET);
 
@@ -637,21 +680,22 @@ impl Page {
 
 // Overflow Pages
 impl Page {
-    /// Use only when page is overflow.
+    /// Use only when page type is overflow.
     pub fn next_overflow(&self) -> Option<PageNumber> {
         let next = self.read_u32(Self::NEXT_OVERFLOW_OFFSET);
 
         if next == 0 { None } else { Some(next) }
     }
 
-    /// Use only when page is overflow.
-    pub fn payload_size(&self) -> u16 {
+    /// Use only when page type is overflow.
+    pub fn overflow_payload_size(&self) -> u16 {
         self.read_u16(Self::PAYLOAD_SIZE_OFFSET)
     }
 
-    pub fn payload(&self) -> &[u8] {
+    /// Use only when page type is overflow.
+    pub fn overflow_payload(&self) -> &[u8] {
         let start = Self::PAYLOAD_OFFSET;
-        let end = start + self.payload_size() as usize;
+        let end = start + self.overflow_payload_size() as usize;
         &self.as_ptr()[start..end]
     }
 }
@@ -988,6 +1032,35 @@ impl BTreeCell {
             Self::IndexLeafCell(cell) => cell.payload(),
             Self::TableInternalCell(cell) => cell.payload(),
             Self::TableLeafCell(cell) => cell.payload(),
+        }
+    }
+
+    /// Returns whole cell payload including overflow pages. In best case it
+    /// just returns borrowed local payload, but if needed it will reassemble
+    /// cell content.
+    pub fn whole_payload(&self, pager: &mut Pager) -> storage::Result<Cow<'_, [u8]>> {
+        reassemble_payload(pager, self)
+    }
+
+    /// Returns B-tree key from this cell. Pager is needed, because payload
+    /// migth be reassembled.
+    fn key(&self, pager: &mut Pager) -> storage::Result<BTreeKey<'_>> {
+        let reassembled_cell = reassemble_payload(pager, self)?;
+
+        match self {
+            Self::IndexInternalCell(_) => {
+                let record = Record::new(reassembled_cell);
+                Ok(BTreeKey::new_index_key(record))
+            }
+            Self::IndexLeafCell(_) => {
+                let record = Record::new(reassembled_cell);
+                Ok(BTreeKey::new_index_key(record))
+            }
+            Self::TableInternalCell(cell) => Ok(BTreeKey::new_table_row_id(cell.row_id, None)),
+            Self::TableLeafCell(cell) => {
+                let record = Record::new(reassembled_cell);
+                Ok(BTreeKey::new_table_row_id(cell.row_id, Some(record)))
+            }
         }
     }
 }
@@ -1502,6 +1575,66 @@ pub fn cell_overflows(
         to_store = min_cell_size
     }
     (true, to_store + 4)
+}
+
+/// Returns whole cell payload including overflow pages. Takes mutable reference
+/// to pager and cell that you want to reassemble. Returns [Cow], which is
+/// `Borrowed` when cell isn't overflowing and `Owned` when cell needed to be
+/// reconstructed. Returned slice can be directly used as record.
+pub fn reassemble_payload<'a>(
+    pager: &mut Pager,
+    cell: &'a BTreeCell,
+) -> storage::Result<Cow<'a, [u8]>> {
+    if !cell.is_overflowing() {
+        return Ok(Cow::Borrowed(cell.local_payload()));
+    }
+
+    let (first_overflow, total_size, local_payload) = match cell {
+        BTreeCell::IndexInternalCell(c) => (
+            c.first_overflow.unwrap(),
+            c.payload_size as usize,
+            c.payload(),
+        ),
+        BTreeCell::IndexLeafCell(c) => (
+            c.first_overflow.unwrap(),
+            c.payload_size as usize,
+            c.payload(),
+        ),
+        BTreeCell::TableLeafCell(c) => (
+            c.first_overflow.unwrap(),
+            c.payload_size as usize,
+            c.payload(),
+        ),
+        BTreeCell::TableInternalCell(_) => {
+            // Internal cells don't overflow
+            return Ok(Cow::Borrowed(cell.local_payload()));
+        }
+    };
+
+    let mut result = Vec::with_capacity(total_size);
+
+    result.extend_from_slice(local_payload);
+
+    let mut current_overflow = first_overflow;
+
+    while result.len() < total_size {
+        let overflow_page = pager.read_page(current_overflow)?;
+        let guard = overflow_page.lock_shared();
+
+        result.extend_from_slice(guard.overflow_payload());
+
+        if let Some(next) = guard.next_overflow() {
+            current_overflow = next;
+        } else {
+            break;
+        }
+    }
+
+    if result.len() != total_size {
+        return Err(storage::Error::Corruped);
+    }
+
+    Ok(Cow::Owned(result))
 }
 
 #[cfg(test)]
