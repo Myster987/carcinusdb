@@ -135,6 +135,19 @@ pub enum PageType {
     TableLeaf = 20,
 }
 
+impl PageType {
+    pub fn is_leaf(&self) -> bool {
+        match self {
+            Self::IndexLeaf | Self::TableLeaf => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_internal(&self) -> bool {
+        !self.is_leaf()
+    }
+}
+
 impl TryFrom<u8> for PageType {
     type Error = Error;
     fn try_from(value: u8) -> Result<Self, Self::Error> {
@@ -177,11 +190,10 @@ impl TryFrom<u8> for PageType {
 /// | length            | 2     | 3         | number of slots in slot array.
 /// | last_used_offset  | 2     | 5         | offset to last used space. Used to calculate if new data can fit in Page.
 /// | free_fragments    | 1     | 7         | number of free fragments. Tiny gaps between cells, to small to fit new data.
-/// | high_key_offset   | 2     | 8         | offset to cell that contains high key (biggest possible value in this cell).
-/// | rigth_sibling     | 4     | 10         | points to rigth sibling of this page (at the same level in B-Tree).
-/// | rigth_child       | 4     | 14        | present only in Internal Pages. Points to next B-Tree page > current.
+/// | rigth_sibling     | 4     | 8         | points to rigth sibling of this page (at the same level in B-Tree).
+/// | rigth_child       | 4     | 12        | present only in Internal Pages. Points to next B-Tree page > current.
 ///
-/// Total size: 18 bytes (Internal Pages) or 14 bytes (Lead Pages) bytes long.
+/// Total size: 16 bytes (Internal Pages) or 12 bytes (Leaf Pages) bytes long.
 ///
 /// # Overflow:
 /// If `Page` contains `Cells` that overflow, it maintains hashmap of slots pointing to overflowing `Cells`.
@@ -213,17 +225,19 @@ impl Page {
     const LENGTH_OFFSET: usize = Self::FIRST_FREEBLOCK_OFFSET + size_of::<SlotNumber>();
     const LAST_USED_OFFSET: usize = Self::LENGTH_OFFSET + size_of::<SlotNumber>();
     const FREE_FRAGMENTS_OFFSET: usize = Self::LAST_USED_OFFSET + size_of::<SlotNumber>();
-    const HIGH_KEY_OFFSET: usize = Self::FREE_FRAGMENTS_OFFSET + 1;
-    const RIGTH_SIBLING_OFFSET: usize = Self::HIGH_KEY_OFFSET + size_of::<SlotNumber>();
+    const RIGTH_SIBLING_OFFSET: usize = Self::FREE_FRAGMENTS_OFFSET + size_of::<u8>();
     const RIGTH_CHILD_OFFSET: usize = Self::RIGTH_SIBLING_OFFSET + size_of::<PageNumber>();
+
+    const HIGH_KEY_SLOT: SlotNumber = 0;
 
     // overflow page
     const NEXT_OVERFLOW_OFFSET: usize = 0;
     const PAYLOAD_SIZE_OFFSET: usize = Self::NEXT_OVERFLOW_OFFSET + size_of::<PageNumber>();
     const PAYLOAD_OFFSET: usize = Self::PAYLOAD_SIZE_OFFSET + size_of::<SlotNumber>();
 
-    const INDEX_PAGE_HEADER_SIZE: usize = 14;
-    const TABLE_PAGE_HEADER_SIZE: usize = 18;
+    // header sizes
+    pub const LEAF_PAGE_HEADER_SIZE: usize = 12;
+    pub const INTERNAL_PAGE_HEADER_SIZE: usize = 16;
 
     pub fn new(offset: usize, buffer: Buffer) -> Self {
         Self {
@@ -298,8 +312,8 @@ impl Page {
     /// Depending on `PageType`, this function returns 12 or 8.
     pub fn header_size(&self) -> usize {
         match self.page_type() {
-            PageType::IndexInternal | PageType::TableInternal => Self::TABLE_PAGE_HEADER_SIZE,
-            PageType::IndexLeaf | PageType::TableLeaf => Self::INDEX_PAGE_HEADER_SIZE,
+            PageType::IndexInternal | PageType::TableInternal => Self::INTERNAL_PAGE_HEADER_SIZE,
+            PageType::IndexLeaf | PageType::TableLeaf => Self::LEAF_PAGE_HEADER_SIZE,
         }
     }
 
@@ -419,7 +433,8 @@ impl Page {
     }
 
     pub fn get_cell(&self, index: SlotNumber) -> storage::Result<BTreeCell> {
-        let offset_to_cell = self.slot_array().get(index);
+        let slot_number = index + if self.has_high_key() { 1 } else { 0 };
+        let offset_to_cell = self.slot_array().get(slot_number);
 
         self.get_cell_at_offset(offset_to_cell)
     }
@@ -438,6 +453,8 @@ impl Page {
     }
 
     fn try_insert_cell(&self, index: SlotNumber, cell: BTreeCell) -> Result<SlotNumber, BTreeCell> {
+        assert!(index < self.count(), "Index out of range");
+
         let cell_size = cell.local_cell_size();
         let storage_cell_size = cell_size + SLOT_SIZE;
 
@@ -446,6 +463,8 @@ impl Page {
         if storage_cell_size > total_free_space {
             return Err(cell);
         }
+
+        let physical_slot = index + self.has_high_key() as SlotNumber;
 
         let mut slot_array = self.slot_array();
         let mut freeblocks = self.freeblock_list();
@@ -461,9 +480,9 @@ impl Page {
         if let Some(offset) = freeblocks.take_freeblock(local_payload_size as u16) {
             write_btree_cell(self.as_ptr(), offset, &cell).expect("writting cell failed");
 
-            slot_array.insert(index, offset);
+            slot_array.insert(physical_slot, offset);
 
-            return Ok(index);
+            return Ok(physical_slot);
         }
 
         // defragment if needed
@@ -475,11 +494,11 @@ impl Page {
 
         write_btree_cell(self.as_ptr(), offset, &cell).expect("writting cell failed");
 
-        slot_array.insert(index, offset);
+        slot_array.insert(physical_slot, offset);
 
         self.set_last_used_offset(offset);
 
-        Ok(index)
+        Ok(physical_slot)
     }
 
     /// Attempts to replace old cell with new cell at given slot index.
@@ -512,14 +531,14 @@ impl Page {
             // copy old cell
             let owned_old_cell = old_cell.to_owned();
 
-            write_btree_cell(self.as_ptr(), offset, &new_cell);
+            let _ = write_btree_cell(self.as_ptr(), offset, &new_cell);
 
             return Ok(owned_old_cell);
         }
 
         let owned_old_cell = self.remove(index);
 
-        self.try_insert_cell(index, new_cell);
+        self.try_insert_cell(index, new_cell)?;
 
         Ok(owned_old_cell)
     }
@@ -544,7 +563,7 @@ impl Page {
             ),
             "Invalid page type."
         );
-        if index == self.len() {
+        if index == self.count() {
             self.try_rigth_child().unwrap()
         } else {
             match self.get_cell(index).unwrap() {
@@ -555,13 +574,22 @@ impl Page {
         }
     }
 
-    pub fn high_key<'a>(&'a self, pager: &mut Pager) -> storage::Result<Option<BTreeKey<'a>>> {
-        let Some(offset) = self.try_high_key_offset() else {
-            return Ok(None);
-        };
+    #[inline]
+    fn has_high_key(&self) -> bool {
+        self.try_rigth_sibling().is_some()
+    }
 
+    pub fn high_key(&self, pager: &mut Pager) -> storage::Result<Option<BTreeKey<'_>>> {
+        if !self.has_high_key() {
+            return Ok(None);
+        }
+
+        // High key is always at slot 0
+        let offset = self.slot_array().get(Self::HIGH_KEY_SLOT);
         let cell = self.get_cell_at_offset(offset)?;
-        let key = unsafe { std::mem::transmute(cell.key(pager)) };
+
+        // SAFETY: key borrows from page, transmute to extend lifetime to page's lifetime
+        let key = unsafe { std::mem::transmute(cell.key(pager)?) };
 
         Ok(Some(key))
     }
@@ -573,6 +601,34 @@ impl Page {
             Ok(true)
         }
     }
+
+    // /// Set the high key (insert as first cell)
+    // pub fn set_high_key(&self, pager: &mut Pager, key: BTreeKey<'static>) -> storage::Result<()> {
+    //     if !self.has_high_key() {
+    //         return Err(StorageError::InvalidOperation("Page has no right sibling"));
+    //     }
+
+    //     // Create a minimal separator cell
+    //     let cell = create_separator_cell(key, self.page_type())?;
+
+    //     // If high key already exists, replace it
+    //     if self.len() > 0 {
+    //         // Remove old high key at slot 0
+    //         let old_offset = self.slot_array().get(Self::HIGH_KEY_SLOT);
+    //         let old_cell = self.get_cell_at_offset(old_offset)?;
+
+    //         self.slot_array().remove(Self::HIGH_KEY_SLOT);
+
+    //         // Mark old cell space as free
+    //         self.freeblock_list()
+    //             .push_freeblock(old_offset, old_cell.local_cell_size() as u16);
+    //     }
+
+    //     // Insert new high key at slot 0
+    //     self.insert_cell(Self::HIGH_KEY_SLOT, cell);
+
+    //     Ok(())
+    // }
 }
 
 impl Page {
@@ -643,14 +699,14 @@ impl Page {
         self.set_free_fragments(self.free_fragments() + value)
     }
 
-    pub fn try_high_key_offset(&self) -> Option<u16> {
-        let offset = self.read_u16(Self::HIGH_KEY_OFFSET);
-        if offset != 0 { Some(offset) } else { None }
-    }
+    // pub fn try_high_key_offset(&self) -> Option<u16> {
+    //     let offset = self.read_u16(Self::HIGH_KEY_OFFSET);
+    //     if offset != 0 { Some(offset) } else { None }
+    // }
 
-    pub fn set_high_key_offset(&self, value: u16) {
-        self.write_u16(Self::HIGH_KEY_OFFSET, value);
-    }
+    // pub fn set_high_key_offset(&self, value: u16) {
+    //     self.write_u16(Self::HIGH_KEY_OFFSET, value);
+    // }
 
     pub fn try_rigth_sibling(&self) -> Option<PageNumber> {
         let next = self.read_u32(Self::RIGTH_SIBLING_OFFSET);
@@ -668,13 +724,18 @@ impl Page {
         }
     }
 
-    /// Returns number of slots in `Page`.
+    /// Returns number of slots in `Page`. Includes high key cell.
     pub fn len(&self) -> u16 {
         self.read_u16(Self::LENGTH_OFFSET)
     }
 
     pub fn set_len(&self, value: u16) {
         self.write_u16(Self::LENGTH_OFFSET, value);
+    }
+
+    /// Returns number of slots in `Page`. Doesn't include high key cell.
+    pub fn count(&self) -> u16 {
+        self.len() - if self.has_high_key() { 1 } else { 0 }
     }
 }
 
@@ -998,6 +1059,26 @@ pub enum BTreeCell {
 }
 
 impl BTreeCell {
+    // pub fn dummy_cell(key: BTreeKey<'_>, page_type: PageType) -> storage::Result<Self> {
+    //     match (key, page_type) {
+    //         (BTreeKey::TableRowId((row_id, _)), PageType::TableInternal) => {
+    //             // Create minimal table internal cell (row_id + dummy left_child)
+    //             Ok(BTreeCell::TableInternalCell(TableInternalCell {
+    //                 left_child: 0,
+    //                 row_id
+    //             }))
+    //         }
+    //         (BTreeKey::IndexKey(record), PageType::IndexInternal) => {
+    //             // Create minimal index internal cell (record + dummy left_child)
+    //             Ok(BTreeCell::IndexInternalCell(IndexInternalCell::new(
+    //                 record,
+    //                 PageNumber::from(0),
+    //             )))
+    //         }
+    //         _ => Err(storage::Error::InvalidPageType),
+    //     }
+    // }
+
     /// Returns local size of cell. **No overflow pages included**.
     pub fn local_cell_size(&self) -> usize {
         match self {
