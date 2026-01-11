@@ -1,7 +1,7 @@
-use std::borrow::BorrowMut;
-
 use super::{Error, Result};
 
+/// Used to represent varints. (this is quite missleading because it's used to
+/// encode unsigned int, but you can use `zigzag_decode` and signed ints work too).
 pub type VarInt = u64;
 
 macro_rules! bytes_try_read_int_impl {
@@ -382,6 +382,49 @@ impl<T: AsRef<[u8]> + AsMut<[u8]>> BytesCursor<T> {
     }
 }
 
+impl<T: AsRef<[u8]> + AsMut<[u8]> + Extend<u8>> BytesCursor<T> {
+    /// Extends buffer with single byte. It is added at the ***end*** of current buffer.
+    /// If you want to write byte at current position, then use `write_u8`.
+    pub fn put_u8(&mut self, value: u8) {
+        self.buffer.extend([value].into_iter());
+    }
+
+    /// Extends buffer with u16 in little-endian. It is added at the ***end***
+    /// of current buffer. If you want to write u16 at current position,
+    /// then use `write_u16`.
+    pub fn put_u16_le(&mut self, value: u16) {
+        self.buffer.extend(value.to_le_bytes().into_iter());
+    }
+
+    /// Extends buffer with u32 in little-endian. It is added at the ***end***
+    /// of current buffer. If you want to write u32 at current position,
+    /// then use `write_u32`.
+    pub fn put_u32_le(&mut self, value: u32) {
+        self.buffer.extend(value.to_le_bytes().into_iter());
+    }
+
+    /// Extends buffer with u64 in little-endian. It is added at the ***end***
+    /// of current buffer. If you want to write u64 at current position,
+    /// then use `write_u64`.
+    pub fn put_u64_le(&mut self, value: u64) {
+        self.buffer.extend(value.to_le_bytes().into_iter());
+    }
+
+    /// Extends buffer with varint in little-endian. It is added at the ***end***
+    /// of current buffer. If you want to write varint at current position,
+    /// then use `write_varint`.
+    pub fn put_varint(&mut self, value: VarInt) {
+        self.buffer.extend(encode_to_varint(value).into_iter());
+    }
+
+    /// Extends buffer with slice of bytes. It is added at the ***end***
+    /// of current buffer. If you want to write bytes at current position,
+    /// then use `write_bytes`.
+    pub fn put_bytes(&mut self, value: &[u8]) {
+        self.buffer.extend(value.iter().copied());
+    }
+}
+
 /// Returns number of bytes that were used to store varint.
 pub fn varint_size(value: VarInt) -> usize {
     encode_to_varint(value).len()
@@ -512,6 +555,19 @@ mod tests {
         // println!("{:?}", flip_n_bits(&mut n, 2));
 
         println!("{:08b}", n);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_bytes_cursor() -> anyhow::Result<()> {
+        let buffer = vec![1, 2, 3];
+        let mut cursor = BytesCursor::new(buffer);
+
+        cursor.put_u16_le(10);
+        cursor.put_u8(123);
+
+        assert!(vec![1, 2, 3, 10, 0, 123] == cursor.into_inner());
 
         Ok(())
     }
