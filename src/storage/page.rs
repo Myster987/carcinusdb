@@ -7,15 +7,11 @@ use std::{
 };
 
 use crate::{
-    sql::{
-        record::Record,
-        types::{parse_value, serial::SerialType},
-    },
+    sql::record::Record,
     storage::{self, Error, PageNumber, SLOT_SIZE, SlotNumber, btree::BTreeKey, pager::Pager},
     utils::{
         buffer::{Buffer, DropFn},
-        bytes::{self, BytesCursor},
-        cast,
+        bytes::{self, BytesCursor, VarInt},
     },
 };
 
@@ -228,7 +224,7 @@ impl Page {
     const RIGTH_SIBLING_OFFSET: usize = Self::FREE_FRAGMENTS_OFFSET + size_of::<u8>();
     const RIGTH_CHILD_OFFSET: usize = Self::RIGTH_SIBLING_OFFSET + size_of::<PageNumber>();
 
-    const HIGH_KEY_SLOT: SlotNumber = 0;
+    pub const HIGH_KEY_SLOT: SlotNumber = 0;
 
     // overflow page
     const NEXT_OVERFLOW_OFFSET: usize = 0;
@@ -397,17 +393,9 @@ impl Page {
     }
 
     fn get_cell_size(&self, offset: u16) -> u16 {
-        let min_cell_size = min_cell_size(self.usable_space());
-        let max_cell_size = max_cell_size(self.usable_space());
-
-        local_btree_cell_size(
-            &self.as_ptr(),
-            self.page_type(),
-            offset,
-            min_cell_size,
-            max_cell_size,
-            self.usable_space(),
-        )
+        self.get_cell_at_offset(offset)
+            .unwrap()
+            .local_storage_size() as u16
     }
 
     /// Returns cell at given offset.
@@ -415,15 +403,15 @@ impl Page {
     /// # Fails
     ///
     ///  If there is no cell at this offset, this function will return error.
-    fn get_cell_at_offset(&self, offset: u16) -> storage::Result<BTreeCell> {
+    fn get_cell_at_offset(&self, offset: u16) -> storage::Result<BTreeCellRef> {
         let min_cell_size = min_cell_size(self.usable_space());
         let max_cell_size = max_cell_size(self.usable_space());
 
         // buf lifetime is change to 'static to avoid later headache. But we need to be carefull with this reference.
-        let page_buffer = unsafe { cast::cast_static(&self.as_ptr()) };
+        // let page_buffer = unsafe { cast::cast_static(&self.as_ptr()) };
 
-        read_btree_cell(
-            page_buffer,
+        read_btree_cell_ref(
+            self.as_ptr(),
             self.page_type(),
             offset,
             min_cell_size,
@@ -432,8 +420,8 @@ impl Page {
         )
     }
 
-    pub fn get_cell(&self, index: SlotNumber) -> storage::Result<BTreeCell> {
-        let slot_number = index + if self.has_high_key() { 1 } else { 0 };
+    pub fn get_cell(&self, index: SlotNumber) -> storage::Result<BTreeCellRef> {
+        let slot_number = index;
         let offset_to_cell = self.slot_array().get(slot_number);
 
         self.get_cell_at_offset(offset_to_cell)
@@ -441,7 +429,7 @@ impl Page {
 
     pub fn insert_cell(&self, index: SlotNumber, cell: BTreeCell) {
         assert!(
-            cell.local_cell_size() <= self.max_cell_size(),
+            cell.local_storage_size() <= self.max_cell_size(),
             "can't fit cell"
         );
 
@@ -453,9 +441,9 @@ impl Page {
     }
 
     fn try_insert_cell(&self, index: SlotNumber, cell: BTreeCell) -> Result<SlotNumber, BTreeCell> {
-        assert!(index < self.count(), "Index out of range");
+        assert!(index <= self.count(), "Index out of range");
 
-        let cell_size = cell.local_cell_size();
+        let cell_size = cell.local_storage_size();
         let storage_cell_size = cell_size + SLOT_SIZE;
 
         let total_free_space = self.total_free_space() as usize;
@@ -510,8 +498,8 @@ impl Page {
         new_cell: BTreeCell,
     ) -> Result<BTreeCell, BTreeCell> {
         let old_cell = self.get_cell(index).unwrap();
-        let old_cell_size = old_cell.local_cell_size();
-        let new_cell_size = new_cell.local_cell_size();
+        let old_cell_size = old_cell.local_storage_size();
+        let new_cell_size = new_cell.local_storage_size();
 
         let total_free_space = self.total_free_space();
 
@@ -550,7 +538,7 @@ impl Page {
         let offset = self.slot_array().remove(index);
 
         self.freeblock_list()
-            .push_freeblock(offset, removed_cell.local_cell_size() as u16);
+            .push_freeblock(offset, removed_cell.local_storage_size() as u16);
 
         return removed_cell;
     }
@@ -567,40 +555,40 @@ impl Page {
             self.try_rigth_child().unwrap()
         } else {
             match self.get_cell(index).unwrap() {
-                BTreeCell::IndexInternalCell(c) => c.left_child,
-                BTreeCell::TableInternalCell(c) => c.left_child,
+                BTreeCellRef::IndexInternal(cell) => cell.left_child,
+                BTreeCellRef::TableInternal(cell) => cell.left_child,
                 _ => unreachable!(),
             }
         }
     }
 
     #[inline]
-    fn has_high_key(&self) -> bool {
+    pub fn has_high_key(&self) -> bool {
         self.try_rigth_sibling().is_some()
     }
 
-    pub fn high_key(&self, pager: &mut Pager) -> storage::Result<Option<BTreeKey<'_>>> {
-        if !self.has_high_key() {
-            return Ok(None);
-        }
+    // pub fn high_key(&self, pager: &mut Pager) -> storage::Result<Option<BTreeKey<'_>>> {
+    //     if !self.has_high_key() {
+    //         return Ok(None);
+    //     }
 
-        // High key is always at slot 0
-        let offset = self.slot_array().get(Self::HIGH_KEY_SLOT);
-        let cell = self.get_cell_at_offset(offset)?;
+    //     // High key is always at slot 0
+    //     let offset = self.slot_array().get(Self::HIGH_KEY_SLOT);
+    //     let cell = self.get_cell_at_offset(offset)?;
 
-        // SAFETY: key borrows from page, transmute to extend lifetime to page's lifetime
-        let key = unsafe { std::mem::transmute(cell.key(pager)?) };
+    //     // SAFETY: key borrows from page, transmute to extend lifetime to page's lifetime
+    //     let key = unsafe { std::mem::transmute(cell.key(pager)?) };
 
-        Ok(Some(key))
-    }
+    //     Ok(Some(key))
+    // }
 
-    pub fn key_in_range(&self, pager: &mut Pager, key: &BTreeKey) -> storage::Result<bool> {
-        if let Some(high_key) = self.high_key(pager)? {
-            Ok(*key <= high_key)
-        } else {
-            Ok(true)
-        }
-    }
+    // pub fn key_in_range(&self, pager: &mut Pager, key: &BTreeKey) -> storage::Result<bool> {
+    //     if let Some(high_key) = self.high_key(pager)? {
+    //         Ok(*key <= high_key)
+    //     } else {
+    //         Ok(true)
+    //     }
+    // }
 
     // /// Set the high key (insert as first cell)
     // pub fn set_high_key(&self, pager: &mut Pager, key: BTreeKey<'static>) -> storage::Result<()> {
@@ -773,12 +761,12 @@ impl Debug for Page {
             .field("slot_array", &self.slot_array())
             .field(
                 "cells",
-                &(0..self.len())
+                &(0..self.count())
                     .map(|i| {
                         let cell = self.get_cell(i).unwrap();
                         cell
                     })
-                    .collect::<Vec<BTreeCell>>(),
+                    .collect::<Vec<BTreeCellRef>>(),
             )
             .finish()
     }
@@ -1049,174 +1037,24 @@ impl<'a> Iterator for FreeblockIterator<'a> {
     }
 }
 
-/// Wraps possible types of cell stored in `Page`. On disk each variable is stored in little endian except varints.
-#[derive(Debug)]
-pub enum BTreeCell {
-    IndexInternalCell(IndexInternalCell),
-    IndexLeafCell(IndexLeafCell),
-    TableInternalCell(TableInternalCell),
-    TableLeafCell(TableLeafCell),
-}
-
-impl BTreeCell {
-    // pub fn dummy_cell(key: BTreeKey<'_>, page_type: PageType) -> storage::Result<Self> {
-    //     match (key, page_type) {
-    //         (BTreeKey::TableRowId((row_id, _)), PageType::TableInternal) => {
-    //             // Create minimal table internal cell (row_id + dummy left_child)
-    //             Ok(BTreeCell::TableInternalCell(TableInternalCell {
-    //                 left_child: 0,
-    //                 row_id
-    //             }))
-    //         }
-    //         (BTreeKey::IndexKey(record), PageType::IndexInternal) => {
-    //             // Create minimal index internal cell (record + dummy left_child)
-    //             Ok(BTreeCell::IndexInternalCell(IndexInternalCell::new(
-    //                 record,
-    //                 PageNumber::from(0),
-    //             )))
-    //         }
-    //         _ => Err(storage::Error::InvalidPageType),
-    //     }
-    // }
-
-    /// Returns local size of cell. **No overflow pages included**.
-    pub fn local_cell_size(&self) -> usize {
-        match self {
-            Self::IndexInternalCell(cell) => cell.local_storage_size(),
-            Self::IndexLeafCell(cell) => cell.local_storage_size(),
-            Self::TableInternalCell(cell) => cell.local_storage_size(),
-            Self::TableLeafCell(cell) => cell.local_storage_size(),
-        }
-    }
-
-    pub fn as_ref(&self) -> &[u8] {
-        match self {
-            Self::IndexInternalCell(cell) => cell.as_ref(),
-            Self::IndexLeafCell(cell) => cell.as_ref(),
-            Self::TableInternalCell(cell) => cell.as_ref(),
-            Self::TableLeafCell(cell) => cell.as_ref(),
-        }
-    }
-
-    pub fn is_overflowing(&self) -> bool {
-        match self {
-            Self::IndexInternalCell(cell) => cell.is_overflowing(),
-            Self::IndexLeafCell(cell) => cell.is_overflowing(),
-            Self::TableInternalCell(cell) => cell.is_overflowing(),
-            Self::TableLeafCell(cell) => cell.is_overflowing(),
-        }
-    }
-
-    pub fn local_payload(&self) -> &[u8] {
-        match self {
-            Self::IndexInternalCell(cell) => cell.payload(),
-            Self::IndexLeafCell(cell) => cell.payload(),
-            Self::TableInternalCell(cell) => cell.payload(),
-            Self::TableLeafCell(cell) => cell.payload(),
-        }
-    }
-
-    /// Returns whole cell payload including overflow pages. In best case it
-    /// just returns borrowed local payload, but if needed it will reassemble
-    /// cell content.
-    pub fn whole_payload(&self, pager: &mut Pager) -> storage::Result<Cow<'_, [u8]>> {
-        reassemble_payload(pager, self)
-    }
-
-    /// Returns B-tree key from this cell. Pager is needed, because payload
-    /// migth be reassembled.
-    fn key(&self, pager: &mut Pager) -> storage::Result<BTreeKey<'_>> {
-        let reassembled_cell = reassemble_payload(pager, self)?;
-
-        match self {
-            Self::IndexInternalCell(_) => {
-                let record = Record::new(reassembled_cell);
-                Ok(BTreeKey::new_index_key(record))
-            }
-            Self::IndexLeafCell(_) => {
-                let record = Record::new(reassembled_cell);
-                Ok(BTreeKey::new_index_key(record))
-            }
-            Self::TableInternalCell(cell) => Ok(BTreeKey::new_table_row_id(cell.row_id, None)),
-            Self::TableLeafCell(cell) => {
-                let record = Record::new(reassembled_cell);
-                Ok(BTreeKey::new_table_row_id(cell.row_id, Some(record)))
-            }
-        }
-    }
-}
-
-impl ToOwned for BTreeCell {
-    type Owned = BTreeCell;
-
-    fn to_owned(&self) -> Self::Owned {
-        let owned: Cow<'static, [u8]> = Cow::Owned(self.as_ref().to_vec());
-
-        let cell = match self {
-            BTreeCell::IndexInternalCell(c) => {
-                let index_internal_cell = IndexInternalCell {
-                    raw: owned,
-                    left_child: c.left_child,
-                    payload_size: c.payload_size,
-                    payload_ref: c.payload_ref,
-                    first_overflow: c.first_overflow,
-                };
-
-                BTreeCell::IndexInternalCell(index_internal_cell)
-            }
-            BTreeCell::IndexLeafCell(c) => {
-                let index_leaf_cell = IndexLeafCell {
-                    raw: owned,
-                    payload_size: c.payload_size,
-                    payload_ref: c.payload_ref,
-                    first_overflow: c.first_overflow,
-                };
-
-                BTreeCell::IndexLeafCell(index_leaf_cell)
-            }
-            BTreeCell::TableInternalCell(c) => {
-                let table_internal_cell = TableInternalCell {
-                    raw: owned,
-                    row_id: c.row_id,
-                    left_child: c.left_child,
-                };
-
-                BTreeCell::TableInternalCell(table_internal_cell)
-            }
-            BTreeCell::TableLeafCell(c) => {
-                let table_leaf_cell = TableLeafCell {
-                    raw: owned,
-                    row_id: c.row_id,
-                    payload_size: c.payload_size,
-                    payload_ref: c.payload_ref,
-                    first_overflow: c.first_overflow,
-                };
-
-                BTreeCell::TableLeafCell(table_leaf_cell)
-            }
-        };
-
-        cell
-    }
-}
-
 pub trait CellOps {
     /// Size of cell including header, but only stored locally (not total)
     fn local_storage_size(&self) -> usize;
     /// Returns reference to whole cell content.
-    fn as_ref(&self) -> &[u8];
+    fn raw(&self) -> &[u8];
     /// Takes buffer and writtes cell content to it.
     /// # Safety
     /// **Cell content is written at the beginning!**
     fn write_to_buffer(&self, buffer: &mut [u8]);
     /// Returns true if cell is overflowing.
     fn is_overflowing(&self) -> bool;
-    /// Returns slice to whole cell payload including overflow pages.
-    ///
-    /// # Safety
-    ///
-    /// If cell overflows, then it needs to be reassembled first.
+    /// Returns slice to local cell payload. Doesn't including overflow pages.
     fn payload(&self) -> &[u8];
+    /// Returns number of overflow page, that is needed during reassembly.
+    fn first_overflow(&self) -> Option<PageNumber>;
+    /// Returns total size of cell including header and all overflow pages.
+    fn payload_size(&self) -> VarInt;
+    fn payload_ref(&self) -> PayloadRef;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1231,14 +1069,128 @@ impl PayloadRef {
     }
 }
 
+/// Wraps possible types of cell stored in `Page`. On disk each variable is stored in little endian except varints.
+#[derive(Debug)]
+pub enum BTreeCell {
+    IndexInternal(IndexInternalCell),
+    IndexLeaf(IndexLeafCell),
+    TableInternal(TableInternalCell),
+    TableLeaf(TableLeafCell),
+}
+
+impl BTreeCell {
+    /// Returns whole cell payload including overflow pages. In best case it
+    /// just returns borrowed local payload, but if needed it will reassemble
+    /// cell content.
+    pub fn whole_payload(&self, pager: &mut Pager) -> storage::Result<Cow<'_, [u8]>> {
+        reassemble_payload(pager, self)
+    }
+
+    /// Returns B-tree key from this cell. Pager is needed, because payload
+    /// migth be reassembled.
+    pub fn key(&self, pager: &mut Pager) -> storage::Result<BTreeKey<'_>> {
+        let reassembled_cell = reassemble_payload(pager, self)?;
+
+        match self {
+            Self::IndexInternal(_) => {
+                let record = Record::new(reassembled_cell);
+                Ok(BTreeKey::new_index_key(record))
+            }
+            Self::IndexLeaf(_) => {
+                let record = Record::new(reassembled_cell);
+                Ok(BTreeKey::new_index_key(record))
+            }
+            Self::TableInternal(cell) => Ok(BTreeKey::new_table_row_id(cell.row_id, None)),
+            Self::TableLeaf(cell) => {
+                let record = Record::new(reassembled_cell);
+                Ok(BTreeKey::new_table_row_id(cell.row_id, Some(record)))
+            }
+        }
+    }
+}
+
+impl CellOps for BTreeCell {
+    fn local_storage_size(&self) -> usize {
+        match self {
+            Self::IndexInternal(cell) => cell.local_storage_size(),
+            Self::IndexLeaf(cell) => cell.local_storage_size(),
+            Self::TableInternal(cell) => cell.local_storage_size(),
+            Self::TableLeaf(cell) => cell.local_storage_size(),
+        }
+    }
+
+    fn raw(&self) -> &[u8] {
+        match self {
+            Self::IndexInternal(cell) => cell.raw(),
+            Self::IndexLeaf(cell) => cell.raw(),
+            Self::TableInternal(cell) => cell.raw(),
+            Self::TableLeaf(cell) => cell.raw(),
+        }
+    }
+
+    fn write_to_buffer(&self, buffer: &mut [u8]) {
+        match self {
+            Self::IndexInternal(cell) => cell.write_to_buffer(buffer),
+            Self::IndexLeaf(cell) => cell.write_to_buffer(buffer),
+            Self::TableInternal(cell) => cell.write_to_buffer(buffer),
+            Self::TableLeaf(cell) => cell.write_to_buffer(buffer),
+        }
+    }
+
+    fn is_overflowing(&self) -> bool {
+        match self {
+            Self::IndexInternal(cell) => cell.is_overflowing(),
+            Self::IndexLeaf(cell) => cell.is_overflowing(),
+            Self::TableInternal(cell) => cell.is_overflowing(),
+            Self::TableLeaf(cell) => cell.is_overflowing(),
+        }
+    }
+
+    fn payload(&self) -> &[u8] {
+        match self {
+            Self::IndexInternal(cell) => cell.payload(),
+            Self::IndexLeaf(cell) => cell.payload(),
+            Self::TableInternal(cell) => cell.payload(),
+            Self::TableLeaf(cell) => cell.payload(),
+        }
+    }
+
+    fn first_overflow(&self) -> Option<PageNumber> {
+        match self {
+            Self::IndexInternal(cell) => cell.first_overflow(),
+            Self::IndexLeaf(cell) => cell.first_overflow(),
+            Self::TableInternal(cell) => cell.first_overflow(),
+            Self::TableLeaf(cell) => cell.first_overflow(),
+        }
+    }
+
+    fn payload_size(&self) -> VarInt {
+        match self {
+            Self::IndexInternal(cell) => cell.payload_size(),
+            Self::IndexLeaf(cell) => cell.payload_size(),
+            Self::TableInternal(cell) => cell.payload_size(),
+            Self::TableLeaf(cell) => cell.payload_size(),
+        }
+    }
+
+    fn payload_ref(&self) -> PayloadRef {
+        match self {
+            Self::IndexInternal(cell) => cell.payload_ref(),
+            Self::IndexLeaf(cell) => cell.payload_ref(),
+            Self::TableInternal(cell) => cell.payload_ref(),
+            Self::TableLeaf(cell) => cell.payload_ref(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct IndexInternalCell {
     /// Pointer to whole cell content. (used for copying cell).
-    raw: Cow<'static, [u8]>,
+    raw: Vec<u8>,
     /// Left child of BTree Page.
     pub left_child: PageNumber,
     /// Total size of Cell including overflow Pages.
-    payload_size: u64,
+    payload_size: VarInt,
     /// Pointer to content of cell living in Page. It doesn't include overflowing payload.
     payload_ref: PayloadRef,
     /// If cell is overflowing then it points to first overflowing page.
@@ -1247,6 +1199,40 @@ pub struct IndexInternalCell {
 }
 
 impl IndexInternalCell {
+    /// Creates owned version of cell. Caller must ensure that payload overflow
+    /// is handled first, because this function will put everything in single buffer.
+    pub fn new(
+        left_child: PageNumber,
+        payload_size: VarInt,
+        payload: &[u8],
+        first_overflow: Option<PageNumber>,
+    ) -> Self {
+        let raw = Vec::new();
+        let mut cursor = BytesCursor::new(raw);
+
+        cursor.put_u32_le(left_child);
+        cursor.put_varint(payload_size);
+
+        let payload_ref = PayloadRef {
+            len: payload.len(),
+            offset: cursor.position(),
+        };
+
+        cursor.put_bytes(payload);
+
+        if let Some(overflow_page) = first_overflow {
+            cursor.put_u32_le(overflow_page);
+        }
+
+        Self {
+            raw: cursor.into_inner(),
+            left_child,
+            payload_size,
+            payload_ref,
+            first_overflow,
+        }
+    }
+
     pub fn payload(&self) -> &[u8] {
         self.payload_ref.as_slice(&self.raw)
     }
@@ -1257,7 +1243,7 @@ impl CellOps for IndexInternalCell {
         self.raw.len()
     }
 
-    fn as_ref(&self) -> &[u8] {
+    fn raw(&self) -> &[u8] {
         &self.raw
     }
 
@@ -1273,16 +1259,28 @@ impl CellOps for IndexInternalCell {
     fn payload(&self) -> &[u8] {
         let start = self.payload_ref.offset;
         let end = start + self.payload_size as usize;
-        &self.as_ref()[start..end]
+        &self.raw()[start..end]
+    }
+
+    fn first_overflow(&self) -> Option<PageNumber> {
+        self.first_overflow
+    }
+
+    fn payload_size(&self) -> VarInt {
+        self.payload_size
+    }
+
+    fn payload_ref(&self) -> PayloadRef {
+        self.payload_ref
     }
 }
 
 #[derive(Debug)]
 pub struct IndexLeafCell {
     /// Pointer to whole cell content. (used for copying cell).
-    raw: Cow<'static, [u8]>,
+    raw: Vec<u8>,
     /// Total size of Cell including overflow Pages.
-    payload_size: u64,
+    payload_size: VarInt,
     /// Pointer to content of cell living in Page. It doesn't include overflowing payload.
     payload_ref: PayloadRef,
     /// If cell is overflowing then it points to first overflowing page.
@@ -1291,9 +1289,36 @@ pub struct IndexLeafCell {
 }
 
 impl IndexLeafCell {
-    pub fn payload(&self) -> &[u8] {
-        self.payload_ref.as_slice(&self.raw)
+    /// Creates owned version of cell. Caller must ensure that payload overflow
+    /// is handled first, because this function will put everything in single buffer.
+    pub fn new(payload_size: VarInt, payload: &[u8], first_overflow: Option<PageNumber>) -> Self {
+        let raw = Vec::new();
+        let mut cursor = BytesCursor::new(raw);
+
+        cursor.put_varint(payload_size);
+
+        let payload_ref = PayloadRef {
+            len: payload.len(),
+            offset: cursor.position(),
+        };
+
+        cursor.put_bytes(payload);
+
+        if let Some(overflow_page) = first_overflow {
+            cursor.put_u32_le(overflow_page);
+        }
+
+        Self {
+            raw: cursor.into_inner(),
+            payload_size,
+            payload_ref,
+            first_overflow,
+        }
     }
+
+    // pub fn payload(&self) -> &[u8] {
+    //     self.payload_ref.as_slice(&self.raw)
+    // }
 }
 
 impl CellOps for IndexLeafCell {
@@ -1301,7 +1326,7 @@ impl CellOps for IndexLeafCell {
         self.raw.len()
     }
 
-    fn as_ref(&self) -> &[u8] {
+    fn raw(&self) -> &[u8] {
         &self.raw
     }
 
@@ -1317,18 +1342,48 @@ impl CellOps for IndexLeafCell {
     fn payload(&self) -> &[u8] {
         let start = self.payload_ref.offset;
         let end = start + self.payload_size as usize;
-        &self.as_ref()[start..end]
+        &self.raw()[start..end]
+    }
+
+    fn first_overflow(&self) -> Option<PageNumber> {
+        self.first_overflow
+    }
+
+    fn payload_size(&self) -> VarInt {
+        self.payload_size
+    }
+
+    fn payload_ref(&self) -> PayloadRef {
+        self.payload_ref
     }
 }
 
 #[derive(Debug)]
 pub struct TableInternalCell {
     /// Pointer to whole cell content. (used for copying cell).
-    raw: Cow<'static, [u8]>,
+    raw: Vec<u8>,
     /// Unique ID of row.
-    row_id: i64,
+    pub row_id: i64,
     /// Left child of BTree Page.
     pub left_child: PageNumber,
+}
+
+impl TableInternalCell {
+    /// Creates owned version of cell. Caller must ensure that payload overflow
+    /// is handled first, because this function will put everything in single buffer.
+    pub fn new(row_id: i64, left_child: PageNumber) -> Self {
+        let raw = Vec::new();
+        let mut cursor = BytesCursor::new(raw);
+
+        cursor.put_varint(bytes::zigzag_encode(row_id));
+        cursor.put_u32_le(left_child);
+
+        Self {
+            raw: cursor.into_inner(),
+            row_id,
+            left_child,
+        }
+    }
 }
 
 impl CellOps for TableInternalCell {
@@ -1336,7 +1391,7 @@ impl CellOps for TableInternalCell {
         self.raw.len()
     }
 
-    fn as_ref(&self) -> &[u8] {
+    fn raw(&self) -> &[u8] {
         &self.raw
     }
 
@@ -1351,18 +1406,33 @@ impl CellOps for TableInternalCell {
     }
 
     fn payload(&self) -> &[u8] {
-        &self.raw[..self.raw.len() - size_of::<PageNumber>()]
+        &self.raw[..self.payload_size() as usize]
+    }
+
+    fn first_overflow(&self) -> Option<PageNumber> {
+        None
+    }
+
+    fn payload_size(&self) -> VarInt {
+        (self.raw.len() - size_of::<PageNumber>()) as VarInt
+    }
+
+    fn payload_ref(&self) -> PayloadRef {
+        PayloadRef {
+            offset: 0,
+            len: self.payload_size() as usize,
+        }
     }
 }
 
 #[derive(Debug)]
 pub struct TableLeafCell {
     /// Pointer to whole cell content. (used for copying cell).
-    raw: Cow<'static, [u8]>,
+    raw: Vec<u8>,
     /// Unique ID of row.
-    row_id: i64,
+    pub row_id: i64,
     /// Total size of Cell including overflow Pages.
-    payload_size: u64,
+    payload_size: VarInt,
     /// Pointer to content of cell living in Page. It doesn't include overflowing payload.
     payload_ref: PayloadRef,
     /// If cell is overflowing then it points to first overflowing page.
@@ -1371,9 +1441,43 @@ pub struct TableLeafCell {
 }
 
 impl TableLeafCell {
-    pub fn payload(&self) -> &[u8] {
-        self.payload_ref.as_slice(&self.raw)
+    /// Creates owned version of cell. Caller must ensure that payload overflow
+    /// is handled first, because this function will put everything in single buffer.
+    pub fn new(
+        row_id: i64,
+        payload_size: VarInt,
+        payload: &[u8],
+        first_overflow: Option<PageNumber>,
+    ) -> Self {
+        let raw = Vec::new();
+        let mut cursor = BytesCursor::new(raw);
+
+        cursor.put_varint(bytes::zigzag_encode(row_id));
+        cursor.put_varint(payload_size);
+
+        let payload_ref = PayloadRef {
+            len: payload.len(),
+            offset: cursor.position(),
+        };
+
+        cursor.put_bytes(payload);
+
+        if let Some(overflow_page) = first_overflow {
+            cursor.put_u32_le(overflow_page);
+        }
+
+        Self {
+            raw: cursor.into_inner(),
+            row_id,
+            payload_size,
+            payload_ref,
+            first_overflow,
+        }
     }
+
+    // pub fn payload(&self) -> &[u8] {
+    //     self.payload_ref.as_slice(&self.raw)
+    // }
 }
 
 impl CellOps for TableLeafCell {
@@ -1381,7 +1485,7 @@ impl CellOps for TableLeafCell {
         self.raw.len()
     }
 
-    fn as_ref(&self) -> &[u8] {
+    fn raw(&self) -> &[u8] {
         &self.raw
     }
 
@@ -1397,97 +1501,370 @@ impl CellOps for TableLeafCell {
     fn payload(&self) -> &[u8] {
         let start = self.payload_ref.offset;
         let end = start + self.payload_size as usize;
-        &self.as_ref()[start..end]
+        &self.raw()[start..end]
+    }
+
+    fn first_overflow(&self) -> Option<PageNumber> {
+        self.first_overflow
+    }
+
+    fn payload_size(&self) -> VarInt {
+        self.payload_size
+    }
+
+    fn payload_ref(&self) -> PayloadRef {
+        self.payload_ref
     }
 }
 
-pub fn local_btree_cell_size(
-    page_buffer: &'_ [u8],
-    page_type: PageType,
-    offset: u16,
-    min_cell_size: usize,
-    max_cell_size: usize,
-    usable_space: usize,
-) -> u16 {
-    let mut cursor = BytesCursor::new(page_buffer);
-    cursor.set_position(offset as usize);
+#[derive(Debug)]
+pub enum BTreeCellRef<'a> {
+    IndexInternal(IndexInternalCellRef<'a>),
+    IndexLeaf(IndexLeafCellRef<'a>),
+    TableInternal(TableInternalCellRef<'a>),
+    TableLeaf(TableLeafCellRef<'a>),
+}
 
-    let mut size = 0;
-
-    match page_type {
-        PageType::IndexInternal => {
-            let _ = cursor.read_u32_le();
-            size += size_of::<PageNumber>();
-
-            // variable size, not payload size
-            let (payload_size, n) = cursor.read_varint();
-            size += n;
-
-            let (_, local_payload_size) = cell_overflows(
-                payload_size as usize,
-                min_cell_size,
-                max_cell_size,
-                usable_space,
-            );
-
-            size += local_payload_size;
-        }
-        PageType::IndexLeaf => {
-            // variable size, not payload size
-            let (payload_size, n) = cursor.read_varint();
-            size += n;
-
-            let (_, local_payload_size) = cell_overflows(
-                payload_size as usize,
-                min_cell_size,
-                max_cell_size,
-                usable_space,
-            );
-
-            size += local_payload_size;
-        }
-        PageType::TableInternal => {
-            // variable size, not row_id size
-            let (_, n) = cursor.read_varint();
-            size += n;
-
-            size += size_of::<PageNumber>();
-        }
-        PageType::TableLeaf => {
-            // variable size, not row_id size
-            let (_, n) = cursor.read_varint();
-            size += n;
-
-            // variable size, not payload size
-            let (payload_size, n) = cursor.read_varint();
-            size += n;
-
-            let (_, local_payload_size) = cell_overflows(
-                payload_size as usize,
-                min_cell_size,
-                max_cell_size,
-                usable_space,
-            );
-
-            size += local_payload_size;
+impl<'a> CellOps for BTreeCellRef<'a> {
+    fn local_storage_size(&self) -> usize {
+        match self {
+            Self::IndexInternal(cell) => cell.local_storage_size(),
+            Self::IndexLeaf(cell) => cell.local_storage_size(),
+            Self::TableInternal(cell) => cell.local_storage_size(),
+            Self::TableLeaf(cell) => cell.local_storage_size(),
         }
     }
 
-    size as u16
+    fn raw(&self) -> &[u8] {
+        match self {
+            Self::IndexInternal(cell) => cell.raw(),
+            Self::IndexLeaf(cell) => cell.raw(),
+            Self::TableInternal(cell) => cell.raw(),
+            Self::TableLeaf(cell) => cell.raw(),
+        }
+    }
+
+    fn write_to_buffer(&self, buffer: &mut [u8]) {
+        match self {
+            Self::IndexInternal(cell) => cell.write_to_buffer(buffer),
+            Self::IndexLeaf(cell) => cell.write_to_buffer(buffer),
+            Self::TableInternal(cell) => cell.write_to_buffer(buffer),
+            Self::TableLeaf(cell) => cell.write_to_buffer(buffer),
+        }
+    }
+
+    fn is_overflowing(&self) -> bool {
+        match self {
+            Self::IndexInternal(cell) => cell.is_overflowing(),
+            Self::IndexLeaf(cell) => cell.is_overflowing(),
+            Self::TableInternal(cell) => cell.is_overflowing(),
+            Self::TableLeaf(cell) => cell.is_overflowing(),
+        }
+    }
+
+    fn payload(&self) -> &[u8] {
+        match self {
+            Self::IndexInternal(cell) => cell.payload(),
+            Self::IndexLeaf(cell) => cell.payload(),
+            Self::TableInternal(cell) => cell.payload(),
+            Self::TableLeaf(cell) => cell.payload(),
+        }
+    }
+
+    fn first_overflow(&self) -> Option<PageNumber> {
+        match self {
+            Self::IndexInternal(cell) => cell.first_overflow(),
+            Self::IndexLeaf(cell) => cell.first_overflow(),
+            Self::TableInternal(cell) => cell.first_overflow(),
+            Self::TableLeaf(cell) => cell.first_overflow(),
+        }
+    }
+
+    fn payload_size(&self) -> VarInt {
+        match self {
+            Self::IndexInternal(cell) => cell.payload_size(),
+            Self::IndexLeaf(cell) => cell.payload_size(),
+            Self::TableInternal(cell) => cell.payload_size(),
+            Self::TableLeaf(cell) => cell.payload_size(),
+        }
+    }
+
+    fn payload_ref(&self) -> PayloadRef {
+        match self {
+            Self::IndexInternal(cell) => cell.payload_ref(),
+            Self::IndexLeaf(cell) => cell.payload_ref(),
+            Self::TableInternal(cell) => cell.payload_ref(),
+            Self::TableLeaf(cell) => cell.payload_ref(),
+        }
+    }
 }
 
-/// Creates `BTreeCell` based on provided `PageType`. `offset` param is offset
-/// to beginning of given cell.
-pub fn read_btree_cell(
-    page_buffer: &'static [u8],
+impl<'a> BTreeCellRef<'a> {
+    // /// Returns whole cell payload including overflow pages. In best case it
+    // /// just returns borrowed local payload, but if needed it will reassemble
+    // /// cell content.
+    // pub fn local_payload<'b>(&self, page_buffer: &'b [u8]) -> &'b [u8] {
+
+    // }
+
+    // /// Returns B-tree key from this cell. Pager is needed, because payload
+    // /// migth be reassembled.
+    // pub fn key(&self, pager: &mut Pager) -> storage::Result<BTreeKey<'_>> {
+    //     let reassembled_cell = reassemble_payload(pager, self)?;
+
+    //     match self {
+    //         Self::IndexInternalCell(_) => {
+    //             let record = Record::new(reassembled_cell);
+    //             Ok(BTreeKey::new_index_key(record))
+    //         }
+    //         Self::IndexLeafCell(_) => {
+    //             let record = Record::new(reassembled_cell);
+    //             Ok(BTreeKey::new_index_key(record))
+    //         }
+    //         Self::TableInternalCell(cell) => Ok(BTreeKey::new_table_row_id(cell.row_id, None)),
+    //         Self::TableLeafCell(cell) => {
+    //             let record = Record::new(reassembled_cell);
+    //             Ok(BTreeKey::new_table_row_id(cell.row_id, Some(record)))
+    //         }
+    //     }
+    // }
+
+    /// Returns offset of cell in page.
+    ///
+    /// # Safety
+    ///
+    /// Use it only when cell is referencing page content.
+    /// Otherwise it will return corrupted data.
+    pub fn offset_in_page(&self, page_buffer: &[u8]) -> usize {
+        self.raw().as_ptr() as usize - page_buffer.as_ptr() as usize
+    }
+
+    pub fn to_owned(&self) -> BTreeCell {
+        let raw = self.raw().to_vec();
+
+        match self {
+            Self::IndexInternal(cell) => BTreeCell::IndexInternal(IndexInternalCell {
+                raw,
+                left_child: cell.left_child,
+                payload_size: cell.payload_size,
+                payload_ref: cell.payload_ref,
+                first_overflow: cell.first_overflow,
+            }),
+            Self::IndexLeaf(cell) => BTreeCell::IndexLeaf(IndexLeafCell {
+                raw,
+                payload_size: cell.payload_size,
+                payload_ref: cell.payload_ref,
+                first_overflow: cell.first_overflow,
+            }),
+            Self::TableInternal(cell) => BTreeCell::TableInternal(TableInternalCell {
+                raw,
+                row_id: cell.row_id,
+                left_child: cell.left_child,
+            }),
+            Self::TableLeaf(cell) => BTreeCell::TableLeaf(TableLeafCell {
+                raw,
+                row_id: cell.row_id,
+                payload_size: cell.payload_size,
+                payload_ref: cell.payload_ref,
+                first_overflow: cell.first_overflow,
+            }),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct IndexInternalCellRef<'a> {
+    raw: &'a [u8],
+    pub left_child: PageNumber,
+    payload_size: VarInt,
+    payload_ref: PayloadRef,
+    first_overflow: Option<PageNumber>,
+}
+
+impl<'a> CellOps for IndexInternalCellRef<'a> {
+    fn local_storage_size(&self) -> usize {
+        self.raw.len()
+    }
+
+    fn raw(&self) -> &[u8] {
+        &self.raw
+    }
+
+    fn write_to_buffer(&self, buffer: &mut [u8]) {
+        let end = self.raw.len();
+        buffer[..end].copy_from_slice(&self.raw);
+    }
+
+    fn is_overflowing(&self) -> bool {
+        self.first_overflow.is_some()
+    }
+
+    fn payload(&self) -> &[u8] {
+        let start = self.payload_ref.offset;
+        let end = start + self.payload_size as usize;
+        &self.raw()[start..end]
+    }
+
+    fn first_overflow(&self) -> Option<PageNumber> {
+        self.first_overflow
+    }
+
+    fn payload_size(&self) -> VarInt {
+        self.payload_size
+    }
+
+    fn payload_ref(&self) -> PayloadRef {
+        self.payload_ref
+    }
+}
+
+#[derive(Debug)]
+pub struct IndexLeafCellRef<'a> {
+    raw: &'a [u8],
+    payload_size: VarInt,
+    payload_ref: PayloadRef,
+    first_overflow: Option<PageNumber>,
+}
+
+impl<'a> CellOps for IndexLeafCellRef<'a> {
+    fn local_storage_size(&self) -> usize {
+        self.raw.len()
+    }
+
+    fn raw(&self) -> &[u8] {
+        &self.raw
+    }
+
+    fn write_to_buffer(&self, buffer: &mut [u8]) {
+        let end = self.raw.len();
+        buffer[..end].copy_from_slice(&self.raw);
+    }
+
+    fn is_overflowing(&self) -> bool {
+        self.first_overflow.is_some()
+    }
+
+    fn payload(&self) -> &[u8] {
+        let start = self.payload_ref.offset;
+        let end = start + self.payload_size as usize;
+        &self.raw()[start..end]
+    }
+
+    fn first_overflow(&self) -> Option<PageNumber> {
+        self.first_overflow
+    }
+
+    fn payload_size(&self) -> VarInt {
+        self.payload_size
+    }
+
+    fn payload_ref(&self) -> PayloadRef {
+        self.payload_ref
+    }
+}
+
+#[derive(Debug)]
+pub struct TableInternalCellRef<'a> {
+    raw: &'a [u8],
+    pub row_id: i64,
+    pub left_child: PageNumber,
+}
+
+impl<'a> CellOps for TableInternalCellRef<'a> {
+    fn local_storage_size(&self) -> usize {
+        self.raw.len()
+    }
+
+    fn raw(&self) -> &[u8] {
+        &self.raw
+    }
+
+    fn write_to_buffer(&self, buffer: &mut [u8]) {
+        let end = self.raw.len();
+        buffer[..end].copy_from_slice(&self.raw);
+    }
+    #[inline(always)]
+    fn is_overflowing(&self) -> bool {
+        false
+    }
+
+    fn payload(&self) -> &[u8] {
+        &self.raw[..self.payload_size() as usize]
+    }
+
+    fn first_overflow(&self) -> Option<PageNumber> {
+        None
+    }
+
+    fn payload_size(&self) -> VarInt {
+        (self.raw.len() - size_of::<PageNumber>()) as VarInt
+    }
+
+    fn payload_ref(&self) -> PayloadRef {
+        PayloadRef {
+            offset: 0,
+            len: self.payload_size() as usize,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct TableLeafCellRef<'a> {
+    raw: &'a [u8],
+    pub row_id: i64,
+    payload_size: VarInt,
+    payload_ref: PayloadRef,
+    first_overflow: Option<PageNumber>,
+}
+
+impl<'a> CellOps for TableLeafCellRef<'a> {
+    fn local_storage_size(&self) -> usize {
+        self.raw.len()
+    }
+
+    fn raw(&self) -> &[u8] {
+        &self.raw
+    }
+
+    fn write_to_buffer(&self, buffer: &mut [u8]) {
+        let end = self.raw.len();
+        buffer[..end].copy_from_slice(&self.raw);
+    }
+
+    fn is_overflowing(&self) -> bool {
+        self.first_overflow.is_some()
+    }
+
+    fn payload(&self) -> &[u8] {
+        let start = self.payload_ref.offset;
+        let end = start + self.payload_size as usize;
+        &self.raw()[start..end]
+    }
+
+    fn first_overflow(&self) -> Option<PageNumber> {
+        self.first_overflow
+    }
+
+    fn payload_size(&self) -> VarInt {
+        self.payload_size
+    }
+
+    fn payload_ref(&self) -> PayloadRef {
+        self.payload_ref
+    }
+}
+
+fn read_btree_cell_ref<'a>(
+    page_buffer: &'a [u8],
     page_type: PageType,
-    offset: u16,
+    cell_offset: u16,
     min_cell_size: usize,
     max_cell_size: usize,
     usable_space: usize,
-) -> storage::Result<BTreeCell> {
+) -> storage::Result<BTreeCellRef<'a>> {
+    let cell_offset = cell_offset as usize;
     let mut cursor = BytesCursor::new(page_buffer);
-    cursor.set_position(offset as usize);
+    cursor.set_position(cell_offset);
 
     match page_type {
         PageType::IndexInternal => {
@@ -1501,26 +1878,30 @@ pub fn read_btree_cell(
                 usable_space,
             );
 
-            let start = cursor.position();
-            let end = start + local_payload_size;
+            let payload_offset_in_cell = cursor.position();
+            let cell_end = payload_offset_in_cell + local_payload_size;
 
-            let raw_buffer = cursor.into_inner();
+            let page_buffer = cursor.into_inner();
 
-            let raw_cell = &raw_buffer[offset as usize..end];
-            let payload_buffer = &raw_buffer[start..end];
+            let raw = &page_buffer[cell_offset..cell_end];
+            let payload_region = &page_buffer[payload_offset_in_cell..];
 
-            let (payload_ref, first_overflow) =
-                read_local_payload(start, payload_buffer, local_payload_size, is_overflowing);
+            let (payload_ref, first_overflow) = read_local_payload(
+                payload_region,
+                payload_offset_in_cell,
+                local_payload_size,
+                is_overflowing,
+            );
 
-            let cell = IndexInternalCell {
-                raw: Cow::Borrowed(raw_cell),
+            let cell = IndexInternalCellRef {
+                raw,
                 left_child,
                 payload_size,
                 payload_ref,
                 first_overflow,
             };
 
-            Ok(BTreeCell::IndexInternalCell(cell))
+            Ok(BTreeCellRef::IndexInternal(cell))
         }
         PageType::IndexLeaf => {
             let (payload_size, _) = cursor.try_read_varint()?;
@@ -1532,39 +1913,45 @@ pub fn read_btree_cell(
                 usable_space,
             );
 
-            let start = cursor.position();
-            let end = start + local_payload_size;
+            let payload_offset_in_cell = cursor.position();
+            let cell_end = payload_offset_in_cell + local_payload_size;
 
-            let raw_buffer = cursor.into_inner();
+            let page_buffer = cursor.into_inner();
 
-            let raw_cell = &raw_buffer[offset as usize..end];
-            let payload_buffer = &raw_buffer[start..end];
+            let raw = &page_buffer[cell_offset..cell_end];
+            let payload_region = &page_buffer[payload_offset_in_cell..];
 
-            let (payload_ref, first_overflow) =
-                read_local_payload(start, payload_buffer, local_payload_size, is_overflowing);
+            let (payload_ref, first_overflow) = read_local_payload(
+                payload_region,
+                cell_offset,
+                local_payload_size,
+                is_overflowing,
+            );
 
-            let cell = IndexLeafCell {
-                raw: Cow::Borrowed(raw_cell),
+            let cell = IndexLeafCellRef {
+                raw,
                 payload_size,
                 payload_ref,
                 first_overflow,
             };
 
-            Ok(BTreeCell::IndexLeafCell(cell))
+            Ok(BTreeCellRef::IndexLeaf(cell))
         }
         PageType::TableInternal => {
             let row_id = bytes::zigzag_decode(cursor.try_read_varint()?.0);
             let left_child = cursor.try_read_u32_le()?;
 
-            let end = cursor.position();
-            let raw_cell = &cursor.into_inner()[offset as usize..end];
+            let cell_end = cursor.position();
 
-            let cell = TableInternalCell {
-                raw: Cow::Borrowed(raw_cell),
+            let raw = &cursor.into_inner()[cell_offset..cell_end];
+
+            let cell = TableInternalCellRef {
+                raw,
                 row_id,
                 left_child,
             };
-            Ok(BTreeCell::TableInternalCell(cell))
+
+            Ok(BTreeCellRef::TableInternal(cell))
         }
         PageType::TableLeaf => {
             let row_id = bytes::zigzag_decode(cursor.try_read_varint()?.0);
@@ -1577,42 +1964,166 @@ pub fn read_btree_cell(
                 usable_space,
             );
 
-            let start = cursor.position();
-            let end = start + local_payload_size;
+            let payload_offset_in_cell = cursor.position();
+            let cell_end = payload_offset_in_cell + local_payload_size;
 
-            let raw_buffer = cursor.into_inner();
+            let page_buffer = cursor.into_inner();
 
-            let raw_cell = &raw_buffer[offset as usize..end];
-            let payload_buffer = &raw_buffer[start..end];
+            let raw = &page_buffer[cell_offset..cell_end];
+            let payload_region = &page_buffer[payload_offset_in_cell..];
 
-            let (payload_ref, first_overflow) =
-                read_local_payload(start, payload_buffer, local_payload_size, is_overflowing);
+            let (payload_ref, first_overflow) = read_local_payload(
+                payload_region,
+                cell_offset,
+                local_payload_size,
+                is_overflowing,
+            );
 
-            let cell = TableLeafCell {
-                raw: Cow::Borrowed(raw_cell),
+            let cell = TableLeafCellRef {
+                raw,
                 row_id,
                 payload_size,
                 payload_ref,
                 first_overflow,
             };
-            Ok(BTreeCell::TableLeafCell(cell))
+
+            Ok(BTreeCellRef::TableLeaf(cell))
         }
     }
 }
 
-pub fn write_btree_cell(
+// /// Creates `BTreeCell` based on provided `PageType`. `offset` param is offset
+// /// to beginning of given cell.
+// pub fn read_btree_cell(
+//     page_buffer: &'static [u8],
+//     page_type: PageType,
+//     offset: u16,
+//     min_cell_size: usize,
+//     max_cell_size: usize,
+//     usable_space: usize,
+// ) -> storage::Result<BTreeCell> {
+//     let mut cursor = BytesCursor::new(page_buffer);
+//     cursor.set_position(offset as usize);
+
+//     match page_type {
+//         PageType::IndexInternal => {
+//             let left_child = cursor.try_read_u32_le()?;
+//             let (payload_size, _) = cursor.try_read_varint()?;
+
+//             let (is_overflowing, local_payload_size) = cell_overflows(
+//                 payload_size as usize,
+//                 min_cell_size,
+//                 max_cell_size,
+//                 usable_space,
+//             );
+
+//             let start = cursor.position();
+//             let end = start + local_payload_size;
+
+//             let raw_buffer = cursor.into_inner();
+
+//             let raw_cell = &raw_buffer[offset as usize..end];
+//             let payload_buffer = &raw_buffer[start..end];
+
+//             let (payload_ref, first_overflow) =
+//                 read_local_payload(start, payload_buffer, local_payload_size, is_overflowing);
+
+//             let cell = IndexInternalCell {
+//                 raw: Cow::Borrowed(raw_cell),
+//                 left_child,
+//                 payload_size,
+//                 payload_ref,
+//                 first_overflow,
+//             };
+
+//             Ok(BTreeCell::IndexInternalCell(cell))
+//         }
+//         PageType::IndexLeaf => {
+//             let (payload_size, _) = cursor.try_read_varint()?;
+
+//             let (is_overflowing, local_payload_size) = cell_overflows(
+//                 payload_size as usize,
+//                 min_cell_size,
+//                 max_cell_size,
+//                 usable_space,
+//             );
+
+//             let start = cursor.position();
+//             let end = start + local_payload_size;
+
+//             let raw_buffer = cursor.into_inner();
+
+//             let raw_cell = &raw_buffer[offset as usize..end];
+//             let payload_buffer = &raw_buffer[start..end];
+
+//             let (payload_ref, first_overflow) =
+//                 read_local_payload(start, payload_buffer, local_payload_size, is_overflowing);
+
+//             let cell = IndexLeafCell {
+//                 raw: Cow::Borrowed(raw_cell),
+//                 payload_size,
+//                 payload_ref,
+//                 first_overflow,
+//             };
+
+//             Ok(BTreeCell::IndexLeafCell(cell))
+//         }
+//         PageType::TableInternal => {
+//             let row_id = bytes::zigzag_decode(cursor.try_read_varint()?.0);
+//             let left_child = cursor.try_read_u32_le()?;
+
+//             let end = cursor.position();
+//             let raw_cell = &cursor.into_inner()[offset as usize..end];
+
+//             let cell = TableInternalCell {
+//                 raw: Cow::Borrowed(raw_cell),
+//                 row_id,
+//                 left_child,
+//             };
+//             Ok(BTreeCell::TableInternalCell(cell))
+//         }
+//         PageType::TableLeaf => {
+//             let row_id = bytes::zigzag_decode(cursor.try_read_varint()?.0);
+//             let (payload_size, _) = cursor.try_read_varint()?;
+
+//             let (is_overflowing, local_payload_size) = cell_overflows(
+//                 payload_size as usize,
+//                 min_cell_size,
+//                 max_cell_size,
+//                 usable_space,
+//             );
+
+//             let start = cursor.position();
+//             let end = start + local_payload_size;
+
+//             let raw_buffer = cursor.into_inner();
+
+//             let raw_cell = &raw_buffer[offset as usize..end];
+//             let payload_buffer = &raw_buffer[start..end];
+
+//             let (payload_ref, first_overflow) =
+//                 read_local_payload(start, payload_buffer, local_payload_size, is_overflowing);
+
+//             let cell = TableLeafCell {
+//                 raw: Cow::Borrowed(raw_cell),
+//                 row_id,
+//                 payload_size,
+//                 payload_ref,
+//                 first_overflow,
+//             };
+//             Ok(BTreeCell::TableLeafCell(cell))
+//         }
+//     }
+// }
+
+pub fn write_btree_cell<T: CellOps>(
     page_buffer: &'_ mut [u8],
     offset: u16,
-    cell: &BTreeCell,
+    cell: &T,
 ) -> storage::Result<()> {
     let position = offset as usize;
 
-    match cell {
-        BTreeCell::IndexInternalCell(c) => c.write_to_buffer(&mut page_buffer[position..]),
-        BTreeCell::IndexLeafCell(c) => c.write_to_buffer(&mut page_buffer[position..]),
-        BTreeCell::TableInternalCell(c) => c.write_to_buffer(&mut page_buffer[position..]),
-        BTreeCell::TableLeafCell(c) => c.write_to_buffer(&mut page_buffer[position..]),
-    }
+    cell.write_to_buffer(&mut page_buffer[position..]);
 
     Ok(())
 }
@@ -1620,23 +2131,26 @@ pub fn write_btree_cell(
 /// Takes region where cell payload is stored, `payload_size` and `is_overflowing`
 /// and returns slice of payload (without next value! ==>) and **if exists, `first_overflow` page pointer**.
 pub fn read_local_payload(
-    offset: usize,
-    payload_region: &'_ [u8],
-    payload_size: usize,
+    payload_region: &[u8],
+    payload_offset: usize,
+    local_payload_size: usize,
     is_overflowing: bool,
 ) -> (PayloadRef, Option<PageNumber>) {
-    let mut payload_ref = PayloadRef { offset, len: 0 };
+    let mut payload_ref = PayloadRef {
+        offset: payload_offset,
+        len: 0,
+    };
     if is_overflowing {
         let overflow_page = u32::from_le_bytes([
-            payload_region[payload_size - 1],
-            payload_region[payload_size - 2],
-            payload_region[payload_size - 3],
-            payload_region[payload_size - 4],
+            payload_region[local_payload_size - 1],
+            payload_region[local_payload_size - 2],
+            payload_region[local_payload_size - 3],
+            payload_region[local_payload_size - 4],
         ]);
-        payload_ref.len = payload_size - 4;
+        payload_ref.len = local_payload_size - 4;
         (payload_ref, Some(overflow_page))
     } else {
-        payload_ref.len = payload_size;
+        payload_ref.len = local_payload_size;
         (payload_ref, None)
     }
 }
@@ -1662,35 +2176,17 @@ pub fn cell_overflows(
 /// to pager and cell that you want to reassemble. Returns [Cow], which is
 /// `Borrowed` when cell isn't overflowing and `Owned` when cell needed to be
 /// reconstructed. Returned slice can be directly used as record.
-pub fn reassemble_payload<'a>(
+pub fn reassemble_payload<'a, T: CellOps>(
     pager: &mut Pager,
-    cell: &'a BTreeCell,
+    cell: &'a T,
 ) -> storage::Result<Cow<'a, [u8]>> {
     if !cell.is_overflowing() {
-        return Ok(Cow::Borrowed(cell.local_payload()));
+        return Ok(Cow::Borrowed(cell.payload()));
     }
 
-    let (first_overflow, total_size, local_payload) = match cell {
-        BTreeCell::IndexInternalCell(c) => (
-            c.first_overflow.unwrap(),
-            c.payload_size as usize,
-            c.payload(),
-        ),
-        BTreeCell::IndexLeafCell(c) => (
-            c.first_overflow.unwrap(),
-            c.payload_size as usize,
-            c.payload(),
-        ),
-        BTreeCell::TableLeafCell(c) => (
-            c.first_overflow.unwrap(),
-            c.payload_size as usize,
-            c.payload(),
-        ),
-        BTreeCell::TableInternalCell(_) => {
-            // Internal cells don't overflow
-            return Ok(Cow::Borrowed(cell.local_payload()));
-        }
-    };
+    let first_overflow = cell.first_overflow().unwrap();
+    let total_size = cell.payload_size() as usize;
+    let local_payload = cell.payload();
 
     let mut result = Vec::with_capacity(total_size);
 
@@ -1760,45 +2256,23 @@ mod tests {
         page.as_ptr()[0] = 5;
         page.set_last_used_offset(page.buffer.size() as u16);
 
-        let mut raw_cell_content = vec![];
+        let owned_cell =
+            BTreeCell::IndexInternal(IndexInternalCell::new(123, 6, "Maciek".as_bytes(), None));
 
-        let left_child: PageNumber = 10;
-        let payload_size = 20;
-        let payload = &[1; 20];
-        // let first_overflow: Option<PageNumber> = Some(5);
-
-        raw_cell_content.extend_from_slice(&left_child.to_le_bytes());
-
-        raw_cell_content.extend_from_slice(&bytes::encode_to_varint(payload_size));
-
-        let start = raw_cell_content.len();
-        raw_cell_content.extend_from_slice(payload);
-
-        let cell = BTreeCell::IndexInternalCell(IndexInternalCell {
-            raw: Cow::Owned(raw_cell_content),
-            left_child,
-            payload_size,
-            payload_ref: PayloadRef {
-                offset: start,
-                len: payload.len(),
-            },
-            first_overflow: None,
-        });
-
-        page.insert_cell(0, cell);
+        println!("{:?}", owned_cell.raw());
 
         println!("{:#?}", page);
 
-        println!("{:?}", page.get_cell(0));
-
-        let cell_2 = page.get_cell(0).unwrap().to_owned();
-
-        page.insert_cell(1, cell_2);
+        page.insert_cell(0, owned_cell);
 
         println!("{:#?}", page);
-        println!("{}", page.total_free_space());
 
-        println!("{:#?}", page.remove(0));
+        let cell_ref = page.get_cell(0)?;
+
+        println!(
+            "offset to cell: {}",
+            cell_ref.raw().as_ptr() as usize - page.as_ptr().as_ptr() as usize
+        );
 
         Ok(())
     }
