@@ -1,8 +1,12 @@
-use std::cmp::Ordering;
+use std::{borrow::Cow, cmp::Ordering};
 
 use crate::{
     sql::record::{Record, compare_records, records_equal},
-    storage::{PageNumber, pager::Pager},
+    storage::{
+        self, PageNumber, SlotNumber,
+        page::{self, CellOps, Page},
+        pager::Pager,
+    },
 };
 
 // pub struct ProtectedPayload {
@@ -130,6 +134,18 @@ impl BTree {
     pub fn new(pager: Pager, root: PageNumber) -> Self {
         Self { root, pager }
     }
+
+    fn extract_high_key<'a>(&mut self, page: &'a Page) -> storage::Result<Option<BTreeKey<'a>>> {
+        if !page.has_high_key() {
+            return Ok(None);
+        }
+
+        let payload = reassemble_payload(&mut self.pager, page, Page::HIGH_KEY_SLOT)?;
+
+        let key = BTreeKey::IndexKey(Record::new(payload));
+
+        Ok(Some(key))
+    }
 }
 
 // pub struct BTreeCursor {
@@ -187,3 +203,52 @@ impl BTree {
 
 // pub fn descende(&mut self, pager: &mut Pager, child: )
 // }
+
+/// Returns whole cell payload including overflow pages. Takes mutable reference
+/// to pager and cell that you want to reassemble. Returns [Cow], which is
+/// `Borrowed` when cell isn't overflowing and `Owned` when cell needed to be
+/// reconstructed. Returned slice can be directly used as record.
+pub fn reassemble_payload<'a>(
+    pager: &mut Pager,
+    page: &'a Page,
+    index: SlotNumber,
+) -> storage::Result<Cow<'a, [u8]>> {
+    let cell = page.get_cell(index)?;
+    let offset_to_cell = cell.offset_in_page(page.as_ptr());
+
+    let local_payload = cell
+        .payload_ref()
+        .as_slice(&page.as_ptr()[offset_to_cell..]);
+
+    if !cell.is_overflowing() {
+        return Ok(Cow::Borrowed(local_payload));
+    }
+
+    let first_overflow = cell.first_overflow().unwrap();
+    let total_size = cell.payload_size() as usize;
+
+    let mut result = Vec::with_capacity(total_size);
+
+    result.extend_from_slice(local_payload);
+
+    let mut current_overflow = first_overflow;
+
+    while result.len() < total_size {
+        let overflow_page = pager.read_page(current_overflow)?;
+        let guard = overflow_page.lock_shared();
+
+        result.extend_from_slice(guard.overflow_payload());
+
+        if let Some(next) = guard.next_overflow() {
+            current_overflow = next;
+        } else {
+            break;
+        }
+    }
+
+    if result.len() != total_size {
+        return Err(storage::Error::Corruped);
+    }
+
+    Ok(Cow::Owned(result))
+}
