@@ -387,6 +387,7 @@ impl<T: AsRef<[u8]> + AsMut<[u8]> + Extend<u8>> BytesCursor<T> {
     /// If you want to write byte at current position, then use `write_u8`.
     pub fn put_u8(&mut self, value: u8) {
         self.buffer.extend([value].into_iter());
+        self.advance(size_of::<u8>());
     }
 
     /// Extends buffer with u16 in little-endian. It is added at the ***end***
@@ -394,6 +395,7 @@ impl<T: AsRef<[u8]> + AsMut<[u8]> + Extend<u8>> BytesCursor<T> {
     /// then use `write_u16`.
     pub fn put_u16_le(&mut self, value: u16) {
         self.buffer.extend(value.to_le_bytes().into_iter());
+        self.advance(size_of::<u16>());
     }
 
     /// Extends buffer with u32 in little-endian. It is added at the ***end***
@@ -401,6 +403,7 @@ impl<T: AsRef<[u8]> + AsMut<[u8]> + Extend<u8>> BytesCursor<T> {
     /// then use `write_u32`.
     pub fn put_u32_le(&mut self, value: u32) {
         self.buffer.extend(value.to_le_bytes().into_iter());
+        self.advance(size_of::<u32>());
     }
 
     /// Extends buffer with u64 in little-endian. It is added at the ***end***
@@ -408,20 +411,26 @@ impl<T: AsRef<[u8]> + AsMut<[u8]> + Extend<u8>> BytesCursor<T> {
     /// then use `write_u64`.
     pub fn put_u64_le(&mut self, value: u64) {
         self.buffer.extend(value.to_le_bytes().into_iter());
+        self.advance(size_of::<u64>());
     }
 
     /// Extends buffer with varint in little-endian. It is added at the ***end***
     /// of current buffer. If you want to write varint at current position,
     /// then use `write_varint`.
     pub fn put_varint(&mut self, value: VarInt) {
-        self.buffer.extend(encode_to_varint(value).into_iter());
+        let varint = encode_to_varint(value);
+        let len = varint.len();
+        self.buffer.extend(varint.into_iter());
+        self.advance(len);
     }
 
     /// Extends buffer with slice of bytes. It is added at the ***end***
     /// of current buffer. If you want to write bytes at current position,
     /// then use `write_bytes`.
     pub fn put_bytes(&mut self, value: &[u8]) {
+        let len = value.len();
         self.buffer.extend(value.iter().copied());
+        self.advance(len);
     }
 }
 
