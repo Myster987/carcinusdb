@@ -420,7 +420,12 @@ impl Page {
         )
     }
 
-    pub fn get_cell(&self, index: SlotNumber) -> storage::Result<BTreeCellRef> {
+    /// Returns parsed cell at given index.
+    ///
+    /// # Note
+    ///
+    /// Usually cell at index **0** is high key cell, so keep in mind this.
+    pub fn get_cell<'a>(&'a self, index: SlotNumber) -> storage::Result<BTreeCellRef<'a>> {
         let slot_number = index;
         let offset_to_cell = self.slot_array().get(slot_number);
 
@@ -440,6 +445,8 @@ impl Page {
         }
     }
 
+    /// Attempts to insert cell at given index. If cell doesn't fit, it is returned
+    /// as a error value. Otherwise slot number of this cell is returned.
     fn try_insert_cell(&self, index: SlotNumber, cell: BTreeCell) -> Result<SlotNumber, BTreeCell> {
         assert!(index <= self.count(), "Index out of range");
 
@@ -451,8 +458,6 @@ impl Page {
         if storage_cell_size > total_free_space {
             return Err(cell);
         }
-
-        let physical_slot = index + self.has_high_key() as SlotNumber;
 
         let mut slot_array = self.slot_array();
         let mut freeblocks = self.freeblock_list();
@@ -468,9 +473,9 @@ impl Page {
         if let Some(offset) = freeblocks.take_freeblock(local_payload_size as u16) {
             write_btree_cell(self.as_ptr(), offset, &cell).expect("writting cell failed");
 
-            slot_array.insert(physical_slot, offset);
+            slot_array.insert(index, offset);
 
-            return Ok(physical_slot);
+            return Ok(index);
         }
 
         // defragment if needed
@@ -482,11 +487,11 @@ impl Page {
 
         write_btree_cell(self.as_ptr(), offset, &cell).expect("writting cell failed");
 
-        slot_array.insert(physical_slot, offset);
+        slot_array.insert(index, offset);
 
         self.set_last_used_offset(offset);
 
-        Ok(physical_slot)
+        Ok(index)
     }
 
     /// Attempts to replace old cell with new cell at given slot index.
@@ -566,57 +571,6 @@ impl Page {
     pub fn has_high_key(&self) -> bool {
         self.try_rigth_sibling().is_some()
     }
-
-    // pub fn high_key(&self, pager: &mut Pager) -> storage::Result<Option<BTreeKey<'_>>> {
-    //     if !self.has_high_key() {
-    //         return Ok(None);
-    //     }
-
-    //     // High key is always at slot 0
-    //     let offset = self.slot_array().get(Self::HIGH_KEY_SLOT);
-    //     let cell = self.get_cell_at_offset(offset)?;
-
-    //     // SAFETY: key borrows from page, transmute to extend lifetime to page's lifetime
-    //     let key = unsafe { std::mem::transmute(cell.key(pager)?) };
-
-    //     Ok(Some(key))
-    // }
-
-    // pub fn key_in_range(&self, pager: &mut Pager, key: &BTreeKey) -> storage::Result<bool> {
-    //     if let Some(high_key) = self.high_key(pager)? {
-    //         Ok(*key <= high_key)
-    //     } else {
-    //         Ok(true)
-    //     }
-    // }
-
-    // /// Set the high key (insert as first cell)
-    // pub fn set_high_key(&self, pager: &mut Pager, key: BTreeKey<'static>) -> storage::Result<()> {
-    //     if !self.has_high_key() {
-    //         return Err(StorageError::InvalidOperation("Page has no right sibling"));
-    //     }
-
-    //     // Create a minimal separator cell
-    //     let cell = create_separator_cell(key, self.page_type())?;
-
-    //     // If high key already exists, replace it
-    //     if self.len() > 0 {
-    //         // Remove old high key at slot 0
-    //         let old_offset = self.slot_array().get(Self::HIGH_KEY_SLOT);
-    //         let old_cell = self.get_cell_at_offset(old_offset)?;
-
-    //         self.slot_array().remove(Self::HIGH_KEY_SLOT);
-
-    //         // Mark old cell space as free
-    //         self.freeblock_list()
-    //             .push_freeblock(old_offset, old_cell.local_cell_size() as u16);
-    //     }
-
-    //     // Insert new high key at slot 0
-    //     self.insert_cell(Self::HIGH_KEY_SLOT, cell);
-
-    //     Ok(())
-    // }
 }
 
 impl Page {
@@ -1076,37 +1030,6 @@ pub enum BTreeCell {
     IndexLeaf(IndexLeafCell),
     TableInternal(TableInternalCell),
     TableLeaf(TableLeafCell),
-}
-
-impl BTreeCell {
-    /// Returns whole cell payload including overflow pages. In best case it
-    /// just returns borrowed local payload, but if needed it will reassemble
-    /// cell content.
-    pub fn whole_payload(&self, pager: &mut Pager) -> storage::Result<Cow<'_, [u8]>> {
-        reassemble_payload(pager, self)
-    }
-
-    /// Returns B-tree key from this cell. Pager is needed, because payload
-    /// migth be reassembled.
-    pub fn key(&self, pager: &mut Pager) -> storage::Result<BTreeKey<'_>> {
-        let reassembled_cell = reassemble_payload(pager, self)?;
-
-        match self {
-            Self::IndexInternal(_) => {
-                let record = Record::new(reassembled_cell);
-                Ok(BTreeKey::new_index_key(record))
-            }
-            Self::IndexLeaf(_) => {
-                let record = Record::new(reassembled_cell);
-                Ok(BTreeKey::new_index_key(record))
-            }
-            Self::TableInternal(cell) => Ok(BTreeKey::new_table_row_id(cell.row_id, None)),
-            Self::TableLeaf(cell) => {
-                let record = Record::new(reassembled_cell);
-                Ok(BTreeKey::new_table_row_id(cell.row_id, Some(record)))
-            }
-        }
-    }
 }
 
 impl CellOps for BTreeCell {
@@ -1878,13 +1801,14 @@ fn read_btree_cell_ref<'a>(
                 usable_space,
             );
 
-            let payload_offset_in_cell = cursor.position();
-            let cell_end = payload_offset_in_cell + local_payload_size;
+            let payload_offset_in_page = cursor.position();
+            let cell_end = payload_offset_in_page + local_payload_size;
 
+            let payload_offset_in_cell = payload_offset_in_page - cell_offset;
             let page_buffer = cursor.into_inner();
 
             let raw = &page_buffer[cell_offset..cell_end];
-            let payload_region = &page_buffer[payload_offset_in_cell..];
+            let payload_region = &raw[payload_offset_in_cell..];
 
             let (payload_ref, first_overflow) = read_local_payload(
                 payload_region,
@@ -1913,17 +1837,18 @@ fn read_btree_cell_ref<'a>(
                 usable_space,
             );
 
-            let payload_offset_in_cell = cursor.position();
-            let cell_end = payload_offset_in_cell + local_payload_size;
+            let payload_offset_in_page = cursor.position();
+            let cell_end = payload_offset_in_page + local_payload_size;
 
+            let payload_offset_in_cell = payload_offset_in_page - cell_offset;
             let page_buffer = cursor.into_inner();
 
             let raw = &page_buffer[cell_offset..cell_end];
-            let payload_region = &page_buffer[payload_offset_in_cell..];
+            let payload_region = &raw[payload_offset_in_cell..];
 
             let (payload_ref, first_overflow) = read_local_payload(
                 payload_region,
-                cell_offset,
+                payload_offset_in_cell,
                 local_payload_size,
                 is_overflowing,
             );
@@ -1964,17 +1889,18 @@ fn read_btree_cell_ref<'a>(
                 usable_space,
             );
 
-            let payload_offset_in_cell = cursor.position();
-            let cell_end = payload_offset_in_cell + local_payload_size;
+            let payload_offset_in_page = cursor.position();
+            let cell_end = payload_offset_in_page + local_payload_size;
 
+            let payload_offset_in_cell = payload_offset_in_page - cell_offset;
             let page_buffer = cursor.into_inner();
 
             let raw = &page_buffer[cell_offset..cell_end];
-            let payload_region = &page_buffer[payload_offset_in_cell..];
+            let payload_region = &raw[payload_offset_in_cell..];
 
             let (payload_ref, first_overflow) = read_local_payload(
                 payload_region,
-                cell_offset,
+                payload_offset_in_cell,
                 local_payload_size,
                 is_overflowing,
             );
@@ -2172,48 +2098,6 @@ pub fn cell_overflows(
     (true, to_store + 4)
 }
 
-/// Returns whole cell payload including overflow pages. Takes mutable reference
-/// to pager and cell that you want to reassemble. Returns [Cow], which is
-/// `Borrowed` when cell isn't overflowing and `Owned` when cell needed to be
-/// reconstructed. Returned slice can be directly used as record.
-pub fn reassemble_payload<'a, T: CellOps>(
-    pager: &mut Pager,
-    cell: &'a T,
-) -> storage::Result<Cow<'a, [u8]>> {
-    if !cell.is_overflowing() {
-        return Ok(Cow::Borrowed(cell.payload()));
-    }
-
-    let first_overflow = cell.first_overflow().unwrap();
-    let total_size = cell.payload_size() as usize;
-    let local_payload = cell.payload();
-
-    let mut result = Vec::with_capacity(total_size);
-
-    result.extend_from_slice(local_payload);
-
-    let mut current_overflow = first_overflow;
-
-    while result.len() < total_size {
-        let overflow_page = pager.read_page(current_overflow)?;
-        let guard = overflow_page.lock_shared();
-
-        result.extend_from_slice(guard.overflow_payload());
-
-        if let Some(next) = guard.next_overflow() {
-            current_overflow = next;
-        } else {
-            break;
-        }
-    }
-
-    if result.len() != total_size {
-        return Err(storage::Error::Corruped);
-    }
-
-    Ok(Cow::Owned(result))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2259,20 +2143,29 @@ mod tests {
         let owned_cell =
             BTreeCell::IndexInternal(IndexInternalCell::new(123, 6, "Maciek".as_bytes(), None));
 
-        println!("{:?}", owned_cell.raw());
-
-        println!("{:#?}", page);
-
         page.insert_cell(0, owned_cell);
 
-        println!("{:#?}", page);
+        let owned_cell =
+            BTreeCell::IndexInternal(IndexInternalCell::new(987, 8, "Kowalski".as_bytes(), None));
 
-        let cell_ref = page.get_cell(0)?;
+        page.insert_cell(1, owned_cell);
 
         println!(
-            "offset to cell: {}",
-            cell_ref.raw().as_ptr() as usize - page.as_ptr().as_ptr() as usize
+            "cell offset: {}",
+            page.get_cell(1)?.offset_in_page(page.as_ptr())
         );
+        println!("payload: {:?}", page.get_cell(1)?.payload());
+
+        let _ = page.remove(0);
+        page.defragment();
+
+        println!("cell: {:?}", page.get_cell(0)?);
+        println!(
+            "cell offset: {}",
+            page.get_cell(0)?.offset_in_page(page.as_ptr())
+        );
+
+        println!("cell payload: {:?}", page.get_cell(0)?.payload());
 
         Ok(())
     }
