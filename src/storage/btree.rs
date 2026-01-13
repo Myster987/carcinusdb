@@ -4,7 +4,7 @@ use crate::{
     sql::record::{Record, compare_records, records_equal},
     storage::{
         self, PageNumber, SlotNumber,
-        page::{self, CellOps, Page},
+        page::{self, BTreeCellRef, CellOps, Page},
         pager::Pager,
     },
 };
@@ -135,16 +135,52 @@ impl BTree {
         Self { root, pager }
     }
 
+    pub fn key_in_range(&mut self, page: &Page, key: &BTreeKey) -> storage::Result<bool> {
+        if let Some(high_key) = self.extract_high_key(page)? {
+            Ok(*key <= high_key)
+        } else {
+            Ok(true)
+        }
+    }
+
+    /// Returns page high key, if it exists. Otherwise it returns `Ok(None)`.
     fn extract_high_key<'a>(&mut self, page: &'a Page) -> storage::Result<Option<BTreeKey<'a>>> {
         if !page.has_high_key() {
             return Ok(None);
         }
 
-        let payload = reassemble_payload(&mut self.pager, page, Page::HIGH_KEY_SLOT)?;
+        return self.extracty_key(page, Page::HIGH_KEY_SLOT).map(Some);
+    }
 
-        let key = BTreeKey::IndexKey(Record::new(payload));
+    /// Takes page reference and returns `BTreeKey` based on page type. Cell
+    /// migth need reassembly.
+    fn extracty_key<'a>(
+        &mut self,
+        page: &'a Page,
+        index: SlotNumber,
+    ) -> storage::Result<BTreeKey<'a>> {
+        if index >= page.len() {
+            return Err(storage::Error::CellIndexOutRange);
+        }
 
-        Ok(Some(key))
+        let cell = page.get_cell(index)?;
+        let reassembled_payload = reassemble_payload(&mut self.pager, page, index)?;
+
+        match cell {
+            BTreeCellRef::IndexInternal(_) => {
+                let record = Record::new(reassembled_payload);
+                Ok(BTreeKey::new_index_key(record))
+            }
+            BTreeCellRef::IndexLeaf(_) => {
+                let record = Record::new(reassembled_payload);
+                Ok(BTreeKey::new_index_key(record))
+            }
+            BTreeCellRef::TableInternal(cell) => Ok(BTreeKey::new_table_row_id(cell.row_id, None)),
+            BTreeCellRef::TableLeaf(cell) => {
+                let record = Record::new(reassembled_payload);
+                Ok(BTreeKey::new_table_row_id(cell.row_id, Some(record)))
+            }
+        }
     }
 }
 

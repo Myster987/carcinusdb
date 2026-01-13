@@ -33,6 +33,8 @@ pub enum Error {
     PageNumberOutOfRange,
     #[error("page is corrupted. Exptected state doesn't match")]
     Corruped,
+    #[error("cell slot number is out of range")]
+    CellIndexOutRange,
 
     // wal
     #[error("invalid checksum. data is corrupted")]
