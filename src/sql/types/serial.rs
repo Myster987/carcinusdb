@@ -6,7 +6,7 @@ use crate::{
     utils::bytes::{VarInt, encode_to_varint},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct SerialType(VarInt);
 
 impl SerialType {
