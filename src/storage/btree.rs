@@ -4,71 +4,12 @@ use crate::{
     sql::record::{Record, compare_records, records_equal},
     storage::{
         self, PageNumber, SlotNumber,
-        page::{self, BTreeCellRef, CellOps, Page},
-        pager::Pager,
+        page::{BTreeCellRef, CellOps, Page},
+        pager::{Pager, SharedPageGuard},
     },
 };
 
-// pub struct ProtectedPayload {
-//     pin: SharedPageGuard,
-//     payload: Payload<'static>,
-// }
-
-// impl ProtectedPayload {
-//     pub fn new(pin: SharedPageGuard, payload: Payload<'static>) -> Self {
-//         Self { pin, payload }
-//     }
-// }
-
-// #[derive(Debug)]
-// pub enum Payload<'a> {
-//     /// Payload was small enough, so we can store direct reference to it.
-//     Ref(&'a [u8]),
-//     /// Payload was too large and needed reassembly.
-//     Reassembled(Box<[u8]>),
-// }
-
-// impl<'a> AsRef<[u8]> for Payload<'a> {
-//     fn as_ref(&self) -> &[u8] {
-//         match self {
-//             Self::Ref(r) => r,
-//             Self::Reassembled(r) => r,
-//         }
-//     }
-// }
-
-// #[derive(Debug)]
-// pub struct FixedSizeMemCmp {
-//     to_cmp: usize,
-// }
-
-// impl FixedSizeMemCmp {
-//     pub fn for_type<T>() -> Self {
-//         Self {
-//             to_cmp: size_of::<T>(),
-//         }
-//     }
-// }
-
-// impl BytesCmp for FixedSizeMemCmp {
-//     fn bytes_cmp(&self, a: &[u8], b: &[u8]) -> Ordering {
-//         a[..self.to_cmp].cmp(&b[..self.to_cmp])
-//     }
-// }
-
-// impl TryFrom<DataType> for FixedSizeMemCmp {
-//     type Error = ();
-
-//     fn try_from(value: DataType) -> Result<Self, Self::Error> {
-//         match value {
-//             DataType::VarChar(_) | DataType::Boolean => Err(()),
-//             // fixed_type => Ok(Self {
-//             // })
-//             _ => todo!(),
-//         }
-//     }
-// }
-
+#[derive(Debug)]
 pub enum BTreeKey<'a> {
     TableRowId((i64, Option<Record<'a>>)),
     IndexKey(Record<'a>),
@@ -89,7 +30,17 @@ impl<'a> BTreeKey<'a> {
             BTreeKey::IndexKey(record) => Some(record.clone()),
         }
     }
+
+    pub fn to_owned(&self) -> BTreeKey<'static> {
+        match self {
+            BTreeKey::TableRowId((row_id, record)) => {
+                BTreeKey::TableRowId((*row_id, record.as_ref().map(|r| r.to_owned())))
+            }
+            BTreeKey::IndexKey(record) => BTreeKey::IndexKey(record.to_owned()),
+        }
+    }
 }
+
 impl PartialEq for BTreeKey<'_> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -124,6 +75,21 @@ impl Ord for BTreeKey<'_> {
     }
 }
 
+#[derive(Debug)]
+pub enum SearchResult {
+    Found { page: PageNumber, slot: SlotNumber },
+    NotFound { page: PageNumber, slot: SlotNumber },
+}
+
+impl SearchResult {
+    pub fn is_found(&self) -> bool {
+        match self {
+            SearchResult::Found { page: _, slot: _ } => true,
+            _ => false,
+        }
+    }
+}
+
 pub struct BTree {
     root: PageNumber,
 
@@ -135,6 +101,8 @@ impl BTree {
         Self { root, pager }
     }
 
+    /// Check if search operation needs to visit rigth sibling. This can happen
+    /// when page was splited and key we are looking for is there.
     pub fn key_in_range(&mut self, page: &Page, key: &BTreeKey) -> storage::Result<bool> {
         if let Some(high_key) = self.extract_high_key(page)? {
             Ok(*key <= high_key)
@@ -184,61 +152,142 @@ impl BTree {
     }
 }
 
-// pub struct BTreeCursor {
-//     page_pin: PagePin<()>,
-//     page_number: PageNumber,
-//     slot_number: SlotNumber,
-// }
+pub trait DatabaseCursor {
+    /// Traverses B-tree in order to find value that mathes given key.
+    /// Returns position of found entry or where it should be inserted.
+    fn seek(&mut self, key: &BTreeKey) -> storage::Result<SearchResult>;
 
-// impl BTreeCursor {
-//     pub fn new(pager: &mut Pager, page_number: PageNumber) -> storage::Result<Self> {
-//         let page = pager.read_page(page_number)?;
-//         let guard = page.lock_shared();
+    /// Attempts to extract key at current cursor position. By design cursor
+    /// should hold guard to page that it's currently on. Without this protection
+    /// key could be moved out durring balancing.
+    fn key(&mut self) -> storage::Result<BTreeKey<'_>>;
 
-//         Ok(Self {
-//             page_pin: guard.into_pin(()),
-//             page_number,
-//             slot_number: 0,
-//         })
-//     }
+    /// Extracts record from current position of cursor. This function also
+    /// depends on cursor holding page guard in advance.
+    fn value(&mut self) -> storage::Result<Option<Record<'_>>>;
 
-//     pub fn current_page(&self) -> &Page {
-//         self.page_pin.page.inner().content.as_ref().unwrap()
-//     }
+    /// The same as `DatabaseCursor::key` but returns owned data.
+    fn key_owned(&mut self) -> storage::Result<BTreeKey<'static>>;
+    /// The same as `DatabaseCursor::value` but returns owned data.
+    fn value_owned(&mut self) -> storage::Result<Option<Record<'static>>>;
 
-//     pub fn current_cell(&self) -> storage::Result<BTreeCell> {
-//         self.current_page().get_cell(self.slot_number)
-//     }
+    /// Returns current page and slot that cursor is on.
+    fn position(&self) -> (PageNumber, SlotNumber);
+}
 
-//     pub fn move_rigth(&mut self, pager: &mut Pager) -> storage::Result<bool> {
-//         let page = self.current_page();
+pub struct BTreeCursor<'a> {
+    btree: &'a mut BTree,
+    page_guard: Option<SharedPageGuard>,
+    current_page: PageNumber,
+    current_slot: SlotNumber,
+}
 
-//         if let Some(rigth_sibling) = page.try_rigth_sibling() {
-//             let rigth_page = pager.read_page(rigth_sibling)?;
-//             let guard = rigth_page.lock_shared();
+impl<'a> BTreeCursor<'a> {
+    pub fn new(btree: &'a mut BTree) -> Self {
+        let root = btree.root;
+        Self {
+            btree,
+            page_guard: None,
+            current_page: root,
+            current_slot: 0,
+        }
+    }
 
-//             self.page_pin = guard.into_pin(());
-//             self.page_number = rigth_sibling;
-//             self.slot_number = 0;
+    /// Performs binary search on this page looking for given key. When exact
+    /// match is found, it returns slot number of cell that contained this key.
+    /// Otherwise returns slot where key is supposed to be.
+    fn binary_search(
+        &mut self,
+        page: &Page,
+        search_key: &BTreeKey,
+    ) -> storage::Result<Result<SlotNumber, SlotNumber>> {
+        let count = page.count();
 
-//             Ok(true)
-//         } else {
-//             Ok(false)
-//         }
-//     }
+        let mut left = 0;
+        let mut rigth = count;
 
-// pub fn get_child_pointer(&self) -> storage::Result<PageNumber> {
-//     let page = self.current_page();
+        while left < rigth {
+            let mid = left + (rigth - left) / 2;
+            let slot = Page::FIRST_DATA_KEY + mid;
 
-//     if page.is_leaf() {
-//        return Err(storage::Error::PageNotFound(self.page_number));
-//     }
+            let key = self.btree.extracty_key(page, slot)?;
 
-//     if self.slot_number =>
-// }
+            match search_key.cmp(&key) {
+                Ordering::Less => rigth = mid,
+                Ordering::Equal => return Ok(Ok(slot)),
+                Ordering::Greater => left = mid + 1,
+            }
+        }
 
-// pub fn descende(&mut self, pager: &mut Pager, child: )
-// }
+        Ok(Err(Page::FIRST_DATA_KEY + left))
+    }
+}
+
+impl<'a> DatabaseCursor for BTreeCursor<'a> {
+    fn seek(&mut self, key: &BTreeKey) -> storage::Result<SearchResult> {
+        // start at root
+        self.current_page = self.btree.root;
+
+        loop {
+            let page = self.btree.pager.read_page(self.current_page)?;
+            let guard = page.lock_shared();
+
+            // we need to move to rigth node
+            if !self.btree.key_in_range(&guard, key)? {
+                self.current_page = guard
+                    .try_rigth_sibling()
+                    .expect("page was splited and should contain sibling");
+                continue;
+            }
+
+            let search_result = self.binary_search(&guard, key)?;
+
+            if let Ok(slot) = search_result {
+                self.page_guard.replace(guard);
+
+                return Ok(SearchResult::Found {
+                    page: self.current_page,
+                    slot,
+                });
+            }
+            if guard.is_leaf() {
+                self.page_guard.replace(guard);
+
+                return Ok(SearchResult::NotFound {
+                    page: self.current_page,
+                    slot: search_result.unwrap_err(),
+                });
+            }
+
+            // go to child which may contain searched key
+            self.current_page = guard.child(search_result.unwrap_err());
+        }
+    }
+
+    fn key(&mut self) -> storage::Result<BTreeKey<'_>> {
+        let page = self
+            .page_guard
+            .as_ref()
+            .ok_or(storage::Error::InvalidPageType)?;
+        self.btree.extracty_key(page, self.current_slot)
+    }
+
+    fn value(&mut self) -> storage::Result<Option<Record<'_>>> {
+        self.key().map(|key| key.get_record())
+    }
+
+    fn key_owned(&mut self) -> storage::Result<BTreeKey<'static>> {
+        self.key().map(|key| key.to_owned())
+    }
+
+    fn value_owned(&mut self) -> storage::Result<Option<Record<'static>>> {
+        self.value().map(|val| val.map(|record| record.to_owned()))
+    }
+
+    fn position(&self) -> (PageNumber, SlotNumber) {
+        (self.current_page, self.current_slot)
+    }
+}
 
 /// Returns whole cell payload including overflow pages. Takes mutable reference
 /// to pager and cell that you want to reassemble. Returns [Cow], which is
