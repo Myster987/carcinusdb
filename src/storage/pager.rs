@@ -1,6 +1,5 @@
 use std::cell::UnsafeCell;
 use std::fs::File;
-use std::mem::{self, ManuallyDrop};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -228,12 +227,8 @@ impl SharedPageGuard {
             .expect("Page shouldn't be None")
     }
 
-    pub fn into_pin<T>(self, inner: T) -> PagePin<T, SharedPin> {
-        let manual = ManuallyDrop::new(self);
-        // SAFETY: we prevent drop, so PagePin can take of that
-        let page = unsafe { std::ptr::read(&manual.page) };
-
-        PagePin::shared(page, inner)
+    pub fn into_pin<T>(self, inner: T) -> PagePin<Self, T> {
+        PagePin::new(self, inner)
     }
 
     pub fn id(&self) -> PageNumber {
@@ -320,12 +315,8 @@ impl ExclusivePageGuard {
         self.page.inner().content.take()
     }
 
-    pub fn into_pin<T>(self, inner: T) -> PagePin<T, ExclusivePin> {
-        let manual = ManuallyDrop::new(self);
-        // SAFETY: we prevent drop, so PagePin can take of that
-        let page = unsafe { std::ptr::read(&manual.page) };
-
-        PagePin::exclusive(page, inner)
+    pub fn into_pin<T>(self, inner: T) -> PagePin<Self, T> {
+        PagePin::new(self, inner)
     }
 
     pub fn id(&self) -> PageNumber {
@@ -389,79 +380,32 @@ impl Drop for ExclusivePageGuard {
     }
 }
 
-struct SharedPin;
-struct ExclusivePin;
-
-trait PinKind {
-    fn unlock(page: &MemPageRef);
-}
-
-impl PinKind for SharedPin {
-    fn unlock(page: &MemPageRef) {
-        page.unlock_shared();
-    }
-}
-
-impl PinKind for ExclusivePin {
-    fn unlock(page: &MemPageRef) {
-        page.unlock_exclusive();
-    }
-}
-
 /// Wrapper that will hold lock to page until it's dropped.
-pub struct PagePin<Inner, Kind: PinKind = SharedPin> {
-    pub page: MemPageRef,
-    inner: Inner,
-    kind: std::marker::PhantomData<Kind>,
+pub struct PagePin<G, T> {
+    pub guard: G,
+    inner: Option<T>,
 }
 
-impl<Inner, Kind: PinKind> PagePin<Inner, Kind> {
-    pub fn new(page: MemPageRef, inner: Inner) -> Self {
+impl<G, T> PagePin<G, T> {
+    pub fn new(guard: G, inner: T) -> Self {
         Self {
-            page,
-            inner,
-            kind: std::marker::PhantomData::default(),
+            guard,
+            inner: Some(inner),
         }
     }
 }
 
-impl<Inner> PagePin<Inner, SharedPin> {
-    pub fn shared(page: MemPageRef, inner: Inner) -> Self {
-        Self {
-            page,
-            inner,
-            kind: std::marker::PhantomData::<SharedPin>,
-        }
-    }
-}
-
-impl<Inner> PagePin<Inner, ExclusivePin> {
-    pub fn exclusive(page: MemPageRef, inner: Inner) -> Self {
-        Self {
-            page,
-            inner,
-            kind: std::marker::PhantomData::<ExclusivePin>,
-        }
-    }
-}
-
-impl<Inner, Kind: PinKind> Drop for PagePin<Inner, Kind> {
-    fn drop(&mut self) {
-        Kind::unlock(&self.page);
-    }
-}
-
-impl<Inner, Kind: PinKind> Deref for PagePin<Inner, Kind> {
-    type Target = Inner;
+impl<G, T> Deref for PagePin<G, T> {
+    type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.inner
+        self.inner.as_ref().unwrap()
     }
 }
 
-impl<Inner> DerefMut for PagePin<Inner, ExclusivePin> {
+impl<T> DerefMut for PagePin<ExclusivePageGuard, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
+        self.inner.as_mut().unwrap()
     }
 }
 
