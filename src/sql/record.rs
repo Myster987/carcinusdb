@@ -49,6 +49,13 @@ impl<'a> Record<'a> {
     pub fn len(&self) -> usize {
         self.cursor.borrow_mut().len(&self.payload)
     }
+
+    pub fn to_owned(&self) -> Record<'static> {
+        Record {
+            payload: Cow::Owned(self.payload.to_vec()),
+            cursor: Rc::new(RefCell::new(self.cursor.borrow().clone())),
+        }
+    }
 }
 
 impl<'a> Debug for Record<'a> {
@@ -74,6 +81,7 @@ impl<'a> Debug for Record<'a> {
 
 /// Lazly parses values when needed. Helps to optimize parsing,
 /// by reducing serializing that sometimes is just not needed.
+#[derive(Debug, Clone)]
 pub struct RecordCursor {
     /// All parsed types in order. Length of vector represents, how many types
     /// were parsed starting at the beginning.
