@@ -4,10 +4,7 @@ use std::{
     io::{self, IoSlice, Seek, Write},
     os::fd::AsRawFd,
     path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicU32, Ordering},
-    },
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 use libc::c_void;
@@ -268,35 +265,20 @@ pub struct BlockIO<I> {
     io: UnsafeCell<I>,
     /// Size of single block in **bytes**.
     block_size: usize,
-    /// Atomic counter of blocks in file. It should be
-    block_count: AtomicU32,
     header_size: usize,
 }
 
 impl<I> BlockIO<I> {
-    pub fn new(io: I, block_size: usize, block_count: usize, header_size: usize) -> Self {
+    pub fn new(io: I, block_size: usize, header_size: usize) -> Self {
         Self {
             io: UnsafeCell::new(io),
             block_size,
-            block_count: AtomicU32::new(block_count as u32),
             header_size,
         }
     }
 
     fn get_io(&self) -> &mut I {
         unsafe { self.io.get().as_mut().unwrap() }
-    }
-
-    fn increment_block_count(&self, add: BlockNumber) {
-        self.block_count.fetch_add(add, Ordering::Release);
-    }
-
-    fn decrement_block_count(&self, sub: BlockNumber) {
-        self.block_count.fetch_sub(sub, Ordering::Release);
-    }
-
-    pub fn get_block_count(&self) -> BlockNumber {
-        self.block_count.load(Ordering::Acquire)
     }
 
     /// Calculates offset to block (starts at 1). Includes header size.
@@ -357,7 +339,6 @@ impl<I: IO> BlockIO<I> {
         let offset = self.calculate_offset(block_number)? + skip;
 
         self.raw_write(offset, buffer.as_slice())
-            .inspect(|_| self.increment_block_count(1))
     }
 
     /// Writes sequence of block starting at `block_number`. Note that buffers
@@ -374,9 +355,7 @@ impl<I: IO> BlockIO<I> {
 
         let offset = self.calculate_offset(block_number)?;
 
-        self.get_io()
-            .pwrite_vec(offset, buffers)
-            .inspect(|_| self.increment_block_count(buffers.len() as u32 / 2))
+        self.get_io().pwrite_vec(offset, buffers)
     }
 
     /// Truncates file to specific block length. If `to_block_len`
@@ -408,7 +387,6 @@ impl<I: IO> BlockIO<I> {
 
         self.get_io()
             .truncate_beginning(bytes_to_remove, self.header_size)
-            .inspect(|_| self.decrement_block_count(up_to_block_number))
     }
 }
 
@@ -429,13 +407,7 @@ impl<I: FileOps> BlockIO<I> {
     }
 }
 
-impl BlockIO<File> {
-    /// Returns size of file inside wrapper in **bytes**.
-    pub fn size(&self) -> io::Result<usize> {
-        let meta = self.get_io().metadata()?;
-        Ok(meta.len() as usize)
-    }
-
+impl<I: Write + FileOps> BlockIO<I> {
     /// Flushes and fsync all writes to make sure that they are persisted.
     pub fn persist(&self) -> io::Result<()> {
         self.flush()?;
