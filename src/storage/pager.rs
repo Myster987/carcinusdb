@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::database::MemDatabaseHeader;
 use crate::storage::buffer_pool::LocalBufferPool;
 use crate::storage::cache::ShardedLruCache;
-use crate::storage::page::DATABASE_HEADER_SIZE;
+use crate::storage::page::{DATABASE_HEADER_PAGE_NUMBER, DATABASE_HEADER_SIZE};
 use crate::storage::wal::LocalWal;
 use crate::utils::io::BlockIO;
 
@@ -145,7 +145,7 @@ impl MemPage {
         }
     }
 
-    fn lock_seek(self: &Arc<Self>) -> SharedPageGuard {
+    fn lock_seek(self: &Arc<Self>) {
         loop {
             let current = self.state.load(Ordering::Acquire);
 
@@ -164,7 +164,7 @@ impl MemPage {
                 )
                 .is_ok()
             {
-                return SharedPageGuard { page: self.clone() };
+                return;
             }
         }
     }
@@ -443,9 +443,11 @@ impl Pager {
     pub fn write_header(&mut self) -> storage::Result<()> {
         let raw_header = self.db_header.into_raw_header();
 
-        self.io.write_header(&raw_header.to_bytes())?;
+        let header_page = self.read_page(DATABASE_HEADER_PAGE_NUMBER)?;
+        let guard = header_page.lock_exclusive();
+        guard.write_db_header(raw_header);
 
-        Ok(())
+        self.wal.append_frame(guard, raw_header.database_size)
     }
 
     pub fn read_page(&mut self, page_number: PageNumber) -> storage::Result<MemPageRef> {
@@ -493,7 +495,7 @@ impl Pager {
         match read_result {
             Ok(bytes_read) => {
                 if bytes_read == buffer.size() {
-                    let offset = if page_number == 1 {
+                    let offset = if page_number == DATABASE_HEADER_PAGE_NUMBER {
                         DATABASE_HEADER_SIZE
                     } else {
                         0
@@ -510,8 +512,39 @@ impl Pager {
     pub fn write_page(&mut self, page: MemPageRef) -> storage::Result<()> {
         // begin_write_page(&page)?;
 
+        let guard = page.lock_exclusive();
+
         self.wal
-            .append_frame(page, self.db_header.get_database_size())
+            .append_frame(guard, self.db_header.get_database_size())
+    }
+
+    pub fn alloc_page(&mut self) -> storage::Result<PageNumber> {
+        let first_freelist_page = self.db_header.get_first_freelist_page();
+
+        let free_page = if first_freelist_page == 0 {
+            let page = self.db_header.get_database_size();
+            self.db_header.add_database_size(1);
+
+            let temp_page = Page::new(0, self.buffer_pool.get());
+            temp_page.initialize();
+
+            self.io
+                .raw_write(DATABASE_HEADER_SIZE, temp_page.as_ptr())?;
+
+            page
+        } else {
+            let free_page = self.read_page(first_freelist_page)?;
+
+            self.db_header
+                .set_first_freelist_page(free_page.lock_shared().freelist_next());
+            self.db_header.sub_freelist_pages(1);
+
+            free_page.id()
+        };
+
+        self.write_header()?;
+
+        Ok(free_page)
     }
 
     pub fn flush(&mut self) -> storage::Result<()> {
@@ -565,7 +598,7 @@ impl Pager {
 /// true, it also removes page from memory.
 pub fn complete_write_page(
     write_result: &std::io::Result<usize>,
-    mut page: ExclusivePageGuard,
+    page: &mut ExclusivePageGuard,
     clean: bool,
 ) {
     if write_result.is_err() {
@@ -576,5 +609,23 @@ pub fn complete_write_page(
             page.clear_loaded();
             let _ = page.take();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pager() -> anyhow::Result<()> {
+        let db = crate::database::Database::new("./db-file".into())?;
+
+        let mut pager = db.pager();
+
+        let new_page = pager.alloc_page()?;
+
+        println!("{:?}", *pager.read_page(new_page)?.lock_shared());
+
+        Ok(())
     }
 }
