@@ -1,8 +1,4 @@
-use std::{
-    fmt::Debug,
-    ptr::NonNull,
-    sync::Arc,
-};
+use std::{fmt::Debug, ptr::NonNull, sync::Arc};
 
 use crossbeam::queue::SegQueue;
 
@@ -230,7 +226,7 @@ impl LocalPageAllocator {
                 self.freelist.push(batch_alloc.pop().unwrap());
             }
 
-            // last page is returned directly to avoid unnecessert.
+            // last page is returned directly.
             batch_alloc.pop().unwrap()
         } else {
             // by condition up we are guaranted to have spare page.

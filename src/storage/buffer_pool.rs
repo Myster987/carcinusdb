@@ -109,14 +109,15 @@ mod tests {
         let local_pool = global_pool.local_pool(1);
         let buffer = local_pool.get();
 
+        buffer.as_mut_slice()[0] = 123;
+
         println!("buffer: {:?}", buffer);
 
-        println!("len: {}", local_pool.len());
-
-        println!("global len: {}", global_pool.len());
         drop(buffer);
+
+        println!("buffer: {:?}", local_pool.get());
+
         drop(local_pool);
-        println!("global len: {}", global_pool.len());
 
         Ok(())
     }
