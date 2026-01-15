@@ -90,9 +90,11 @@ impl SearchResult {
     }
 }
 
+/// Implementation of modified B-link tree algorithm.
+///
+/// TODO: make it concurrent
 pub struct BTree {
     root: PageNumber,
-
     pager: Pager,
 }
 
@@ -157,6 +159,12 @@ pub trait DatabaseCursor {
     /// Returns position of found entry or where it should be inserted.
     fn seek(&mut self, key: &BTreeKey) -> storage::Result<SearchResult>;
 
+    /// Postions cursor to leftmost page starting from current position.
+    fn seek_first(&mut self) -> storage::Result<bool>;
+    /// Returns true if cursor advanced in postion or false, if we reached
+    /// end of btree.
+    fn next(&mut self) -> storage::Result<bool>;
+
     /// Attempts to extract key at current cursor position. By design cursor
     /// should hold guard to page that it's currently on. Without this protection
     /// key could be moved out durring balancing.
@@ -176,10 +184,12 @@ pub trait DatabaseCursor {
 }
 
 pub struct BTreeCursor<'a> {
+    /// Reference to b-tree
     btree: &'a mut BTree,
     page_guard: Option<SharedPageGuard>,
     current_page: PageNumber,
     current_slot: SlotNumber,
+    done: bool,
 }
 
 impl<'a> BTreeCursor<'a> {
@@ -190,6 +200,7 @@ impl<'a> BTreeCursor<'a> {
             page_guard: None,
             current_page: root,
             current_slot: 0,
+            done: false,
         }
     }
 
@@ -201,6 +212,7 @@ impl<'a> BTreeCursor<'a> {
         page: &Page,
         search_key: &BTreeKey,
     ) -> storage::Result<Result<SlotNumber, SlotNumber>> {
+        let first = page.first_data_offset();
         let count = page.count();
 
         let mut left = 0;
@@ -208,7 +220,7 @@ impl<'a> BTreeCursor<'a> {
 
         while left < rigth {
             let mid = left + (rigth - left) / 2;
-            let slot = Page::FIRST_DATA_KEY + mid;
+            let slot = first + mid;
 
             let key = self.btree.extracty_key(page, slot)?;
 
@@ -219,7 +231,7 @@ impl<'a> BTreeCursor<'a> {
             }
         }
 
-        Ok(Err(Page::FIRST_DATA_KEY + left))
+        Ok(Err(first + left))
     }
 }
 
@@ -243,7 +255,9 @@ impl<'a> DatabaseCursor for BTreeCursor<'a> {
             let search_result = self.binary_search(&guard, key)?;
 
             if let Ok(slot) = search_result {
-                self.page_guard.replace(guard);
+                self.page_guard = Some(guard);
+                // mark that we can search for data from here
+                self.done = false;
 
                 return Ok(SearchResult::Found {
                     page: self.current_page,
@@ -251,7 +265,10 @@ impl<'a> DatabaseCursor for BTreeCursor<'a> {
                 });
             }
             if guard.is_leaf() {
-                self.page_guard.replace(guard);
+                self.page_guard = Some(guard);
+                // even if page is doesn't match it could be used for range scans
+                // at least I think it can :D
+                self.done = false;
 
                 return Ok(SearchResult::NotFound {
                     page: self.current_page,
@@ -262,6 +279,71 @@ impl<'a> DatabaseCursor for BTreeCursor<'a> {
             // go to child which may contain searched key
             self.current_page = guard.child(search_result.unwrap_err());
         }
+    }
+
+    fn seek_first(&mut self) -> storage::Result<bool> {
+        loop {
+            let page = self.btree.pager.read_page(self.current_page)?;
+            let guard = page.lock_shared();
+
+            if guard.is_leaf() {
+                self.current_slot = guard.first_data_offset();
+
+                // page is empty, so iteration doesn't make any sense.
+                if guard.is_empty() {
+                    self.done = true;
+                }
+
+                self.page_guard = Some(guard);
+                break;
+            }
+
+            self.current_page = guard.child(guard.first_data_offset());
+        }
+
+        Ok(true)
+    }
+
+    fn next(&mut self) -> storage::Result<bool> {
+        if self.done {
+            return Ok(false);
+        }
+
+        // cursor needs to position itself.
+        if self.page_guard.is_none() {
+            self.seek_first()?;
+            // return if there are cells present.
+            return Ok(!self.done);
+        }
+
+        if let Some(page) = self.page_guard.as_ref() {
+            if page.is_empty() {
+                self.done = true;
+                return Ok(false);
+            }
+
+            // check if there are still cells that haven't been visited. we must
+            // use page.len(), because current_slot often starts at 1.
+            if self.current_slot < page.len() {
+                self.current_slot += 1;
+                return Ok(true);
+            }
+
+            if let Some(rigth_sibling) = page.try_rigth_sibling() {
+                let next_page = self.btree.pager.read_page(rigth_sibling)?;
+                let guard = next_page.lock_shared();
+
+                self.current_slot = guard.first_data_offset();
+                self.current_page = rigth_sibling;
+
+                self.page_guard = Some(guard);
+
+                return Ok(true);
+            }
+        }
+
+        // end of iteration
+        Ok(false)
     }
 
     fn key(&mut self) -> storage::Result<BTreeKey<'_>> {
