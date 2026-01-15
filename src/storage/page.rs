@@ -7,14 +7,14 @@ use std::{
 };
 
 use crate::{
-    sql::record::Record,
-    storage::{self, Error, PageNumber, SLOT_SIZE, SlotNumber, btree::BTreeKey, pager::Pager},
+    storage::{self, Error, PageNumber, SLOT_SIZE, SlotNumber},
     utils::{
         buffer::{Buffer, DropFn},
         bytes::{self, BytesCursor, VarInt},
     },
 };
 
+pub const DATABASE_HEADER_PAGE_NUMBER: PageNumber = 1;
 pub const DATABASE_HEADER_SIZE: usize = size_of::<DatabaseHeader>();
 
 pub const DEFAULT_PAGE_SIZE: u32 = 4096;
@@ -38,7 +38,7 @@ pub fn max_cell_size(usable_space: usize) -> usize {
 }
 
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct DatabaseHeader {
     /// Version number of db.
     pub version: u32,
@@ -51,7 +51,7 @@ pub struct DatabaseHeader {
     /// Size of database in `Pages`.
     pub database_size: PageNumber,
     /// Page number of first freelist trunk page.
-    pub freelist_trunk_page: PageNumber,
+    pub first_freelist_page: PageNumber,
     /// Total number of freelist pages.
     pub freelist_pages: u32,
     /// Number of `pages` to cache.
@@ -73,7 +73,7 @@ impl DatabaseHeader {
         let reserved_space = u16::from_le_bytes(buffer[8..10].try_into().unwrap());
         let change_counter = u32::from_le_bytes(buffer[10..14].try_into().unwrap());
         let database_size = u32::from_le_bytes(buffer[14..18].try_into().unwrap());
-        let freelist_trunk_page = u32::from_le_bytes(buffer[18..22].try_into().unwrap());
+        let first_freelist_page = u32::from_le_bytes(buffer[18..22].try_into().unwrap());
         let freelist_pages = u32::from_le_bytes(buffer[22..26].try_into().unwrap());
         let default_page_cache_size = u32::from_le_bytes(buffer[26..30].try_into().unwrap());
 
@@ -83,7 +83,7 @@ impl DatabaseHeader {
             reserved_space,
             change_counter,
             database_size,
-            freelist_trunk_page,
+            first_freelist_page,
             freelist_pages,
             default_page_cache_size,
         }
@@ -101,7 +101,7 @@ impl DatabaseHeader {
         buffer[8..10].copy_from_slice(&self.reserved_space.to_le_bytes());
         buffer[10..14].copy_from_slice(&self.change_counter.to_le_bytes());
         buffer[14..18].copy_from_slice(&self.database_size.to_le_bytes());
-        buffer[18..22].copy_from_slice(&self.freelist_trunk_page.to_le_bytes());
+        buffer[18..22].copy_from_slice(&self.first_freelist_page.to_le_bytes());
         buffer[22..26].copy_from_slice(&self.freelist_pages.to_le_bytes());
         buffer[26..30].copy_from_slice(&self.default_page_cache_size.to_le_bytes());
     }
@@ -115,7 +115,7 @@ impl Default for DatabaseHeader {
             reserved_space: 0,
             change_counter: 1,
             database_size: 1,
-            freelist_trunk_page: 0,
+            first_freelist_page: 0,
             freelist_pages: 0,
             default_page_cache_size: DEFAULT_CACHE_SIZE,
         }
@@ -225,7 +225,7 @@ impl Page {
     const RIGTH_CHILD_OFFSET: usize = Self::RIGTH_SIBLING_OFFSET + size_of::<PageNumber>();
 
     pub const HIGH_KEY_SLOT: SlotNumber = 0;
-    pub const FIRST_DATA_KEY: SlotNumber = Self::HIGH_KEY_SLOT + 1;
+    const FIRST_DATA_KEY: SlotNumber = Self::HIGH_KEY_SLOT + 1;
 
     // overflow page
     const NEXT_OVERFLOW_OFFSET: usize = 0;
@@ -257,7 +257,11 @@ impl Page {
         Self::new(0, buf)
     }
 
-    // #[allow(clippy::mut_from_ref)]
+    /// Set defaults
+    pub fn initialize(&self) {
+        self.set_last_used_offset(self.buffer.size() as u16);
+    }
+
     pub fn as_ptr(&self) -> &mut [u8] {
         &mut self.buffer.as_mut_slice()[self.offset..]
     }
@@ -288,7 +292,7 @@ impl Page {
         IoSlice::new(self.buffer.as_slice())
     }
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.count() == 0
     }
 
     pub fn is_leaf(&self) -> bool {
@@ -327,6 +331,14 @@ impl Page {
     /// Free space between slot array and last cell.
     pub fn free_space(&self) -> u16 {
         self.last_used_offset() - ((self.header_size()) as u16 + self.len() * 2)
+    }
+
+    pub fn first_data_offset(&self) -> SlotNumber {
+        if self.has_high_key() {
+            Self::FIRST_DATA_KEY
+        } else {
+            0
+        }
     }
 
     pub fn slot_array(&self) -> SlotArray {
@@ -427,8 +439,10 @@ impl Page {
     ///
     /// Usually cell at index **0** is high key cell, so keep in mind this.
     pub fn get_cell<'a>(&'a self, index: SlotNumber) -> storage::Result<BTreeCellRef<'a>> {
-        let slot_number = index;
-        let offset_to_cell = self.slot_array().get(slot_number);
+        let offset_to_cell = self
+            .slot_array()
+            .try_get(index)
+            .ok_or(storage::Error::CellIndexOutRange)?;
 
         self.get_cell_at_offset(offset_to_cell)
     }
@@ -678,7 +692,7 @@ impl Page {
 
     /// Returns number of slots in `Page`. Doesn't include high key cell.
     pub fn count(&self) -> u16 {
-        self.len() - if self.has_high_key() { 1 } else { 0 }
+        self.len() - self.first_data_offset()
     }
 }
 
@@ -701,6 +715,30 @@ impl Page {
         let start = Self::PAYLOAD_OFFSET;
         let end = start + self.overflow_payload_size() as usize;
         &self.as_ptr()[start..end]
+    }
+}
+
+/// Page with DB header (page number: 1)
+impl Page {
+    /// Returns database header. Only use with page that have non-zero offset.
+    pub fn db_header(&self) -> DatabaseHeader {
+        DatabaseHeader::from_bytes(&self.buffer.as_slice()[..self.offset])
+    }
+
+    pub fn write_db_header(&self, header: DatabaseHeader) {
+        header.write_to_buffer(&mut self.buffer.as_mut_slice()[..self.offset]);
+    }
+}
+
+/// Only for pages on global freelist
+impl Page {
+    /// Returns page number of next free page, if exists.
+    pub fn freelist_next(&self) -> PageNumber {
+        self.read_u32(0)
+    }
+
+    pub fn freelist_set(&self, value: PageNumber) {
+        self.write_u32(0, value);
     }
 }
 
@@ -789,10 +827,13 @@ impl<'a> SlotArray<'a> {
 
     /// Reads slot at given index.
     pub fn get(&self, index: SlotNumber) -> u16 {
-        assert!(index < self.len(), "Index out of range");
+        self.try_get(index).unwrap()
+    }
 
-        let raw = self.slot_array()[index as usize];
-        u16::from_le(raw)
+    /// Reads slot at given index.
+    pub fn try_get(&self, index: SlotNumber) -> Option<u16> {
+        let raw = *self.slot_array().get(index as usize)?;
+        Some(u16::from_le(raw))
     }
 
     /// Overwrites given slot with new value.
