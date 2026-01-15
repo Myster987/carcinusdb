@@ -55,7 +55,7 @@ pub struct MemDatabaseHeader {
     pub reserved_space: u16,
     change_counter: AtomicU32,
     database_size: AtomicU32,
-    freelist_trunk_page: AtomicU32,
+    first_freelist_page: AtomicU32,
     freelist_pages: AtomicU32,
     pub default_page_cache_size: u32,
 }
@@ -68,7 +68,7 @@ impl MemDatabaseHeader {
             reserved_space: self.reserved_space,
             change_counter: self.get_change_counter(),
             database_size: self.get_database_size(),
-            freelist_trunk_page: self.get_freelist_trunk_page(),
+            first_freelist_page: self.get_first_freelist_page(),
             freelist_pages: self.get_freelist_pages(),
             default_page_cache_size: self.default_page_cache_size,
         }
@@ -82,8 +82,8 @@ impl MemDatabaseHeader {
         self.database_size.load(Ordering::Acquire)
     }
 
-    pub fn get_freelist_trunk_page(&self) -> PageNumber {
-        self.freelist_trunk_page.load(Ordering::Acquire)
+    pub fn get_first_freelist_page(&self) -> PageNumber {
+        self.first_freelist_page.load(Ordering::Acquire)
     }
 
     pub fn get_freelist_pages(&self) -> PageNumber {
@@ -98,13 +98,16 @@ impl MemDatabaseHeader {
         self.database_size.fetch_add(add, Ordering::Release);
     }
 
-    pub fn set_freelist_trunk_page(&self, page_number: PageNumber) {
-        self.freelist_trunk_page
+    pub fn set_first_freelist_page(&self, page_number: PageNumber) {
+        self.first_freelist_page
             .store(page_number, Ordering::Release);
     }
 
-    pub fn set_freelist_pages(&self, value: PageNumber) {
-        self.freelist_pages.store(value, Ordering::Release);
+    pub fn sub_freelist_pages(&self, sub: u32) {
+        self.freelist_pages
+            .fetch_update(Ordering::Acquire, Ordering::Acquire, |val| {
+                Some(val.saturating_sub(sub))
+            });
     }
 }
 
@@ -116,7 +119,7 @@ impl From<DatabaseHeader> for MemDatabaseHeader {
             reserved_space: db_header.reserved_space,
             change_counter: AtomicU32::new(db_header.change_counter),
             database_size: AtomicU32::new(db_header.database_size),
-            freelist_trunk_page: AtomicU32::new(db_header.freelist_trunk_page),
+            first_freelist_page: AtomicU32::new(db_header.first_freelist_page),
             freelist_pages: AtomicU32::new(db_header.freelist_pages),
             default_page_cache_size: db_header.default_page_cache_size,
         }
@@ -134,7 +137,7 @@ pub struct Database {
 
 impl Database {
     pub fn new(db_file_path: PathBuf) -> DatabaseResult<Self> {
-        let mut header = (!db_file_path.exists()).then(|| DatabaseHeader::default());
+        let file_exists = db_file_path.exists();
 
         let file = OpenOptions::default()
             .create(true)
@@ -142,19 +145,24 @@ impl Database {
             .write(true)
             .open(db_file_path.clone())?;
 
-        if header.is_none() {
+        if !file_exists {
             let buf = &mut [0; DATABASE_HEADER_SIZE];
-            file.pread(0, buf)?;
-            let h = DatabaseHeader::from_bytes(buf);
+            let default_header = DatabaseHeader::default();
+            default_header.write_to_buffer(buf);
 
-            header = Some(h);
+            file.pwrite(0, buf)?;
         }
 
-        let db_header = header.unwrap();
+        let db_header = {
+            let buf = &mut [0; DATABASE_HEADER_SIZE];
+            file.pread(0, buf)?;
+
+            DatabaseHeader::from_bytes(buf)
+        };
+
         let db_file = Arc::new(BlockIO::new(
             file,
             db_header.get_page_size(),
-            db_header.database_size as usize,
             DATABASE_HEADER_SIZE,
         ));
 
@@ -182,6 +190,7 @@ impl Database {
             wal_file_path,
             db_file.clone(),
             db_header.get_page_size() as u32,
+            db_header.database_size,
             cache.clone(),
         )?;
 

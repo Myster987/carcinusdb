@@ -19,7 +19,7 @@ use crate::{
         buffer_pool::LocalBufferPool,
         cache::ShardedLruCache,
         page::{MAX_PAGE_SIZE, Page},
-        pager::{self, MemPageRef},
+        pager::{self, ExclusivePageGuard},
         wal::locks::{PackedU64, ReadGuard, ReadersPool, WriteGuard},
     },
     utils::{
@@ -53,6 +53,8 @@ pub struct WalHeader {
     db_size: u32,
     /// Number of frames transfered from WAL to DB.
     backfilled_number: u32,
+    /// Padding to make header size divisible by 8.
+    padding: [u8; 4],
     /// Checksum of header
     checksum: Checksum,
 }
@@ -71,6 +73,7 @@ impl WalHeader {
             db_size,
             backfilled_number: 0,
             checksum: (0, 0),
+            padding: [0; 4],
         };
         wal_header.update_checksum();
         wal_header
@@ -82,9 +85,10 @@ impl WalHeader {
         let last_checkpointed = u32::from_le_bytes(buffer[8..12].try_into().unwrap());
         let db_size = u32::from_le_bytes(buffer[12..16].try_into().unwrap());
         let backfilled_number = u32::from_le_bytes(buffer[16..20].try_into().unwrap());
+        let padding = buffer[20..24].try_into().unwrap();
         let checksum = (
-            u32::from_le_bytes(buffer[20..24].try_into().unwrap()),
             u32::from_le_bytes(buffer[24..28].try_into().unwrap()),
+            u32::from_le_bytes(buffer[28..32].try_into().unwrap()),
         );
 
         Self {
@@ -94,6 +98,7 @@ impl WalHeader {
             db_size,
             backfilled_number,
             checksum,
+            padding,
         }
     }
 
@@ -109,8 +114,9 @@ impl WalHeader {
         buffer[8..12].copy_from_slice(&self.last_checkpointed.to_le_bytes());
         buffer[12..16].copy_from_slice(&self.db_size.to_le_bytes());
         buffer[16..20].copy_from_slice(&self.backfilled_number.to_le_bytes());
-        buffer[20..24].copy_from_slice(&self.checksum.0.to_le_bytes());
-        buffer[24..28].copy_from_slice(&self.checksum.1.to_le_bytes());
+        buffer[20..24].copy_from_slice(&self.padding);
+        buffer[24..28].copy_from_slice(&self.checksum.0.to_le_bytes());
+        buffer[28..32].copy_from_slice(&self.checksum.1.to_le_bytes());
     }
 
     fn checksum_self(&self, seed: Option<Checksum>) -> Checksum {
@@ -137,6 +143,7 @@ impl MemWalHeader {
             db_size: self.get_db_size(),
             backfilled_number: self.get_backfilled_number(),
             checksum: self.get_checksum(),
+            padding: [0; 4],
         }
     }
 
@@ -244,11 +251,10 @@ impl WalManager {
         wal_file_path: PathBuf,
         db_file: Arc<BlockIO<File>>,
         page_size: u32,
+        db_size: u32,
         page_cache: Arc<ShardedLruCache>,
     ) -> storage::Result<Self> {
-        // If WAL doesn't exist, then it creates header with default parameters
-        let mut header = (!wal_file_path.exists())
-            .then(|| WalHeader::default(page_size, db_file.get_block_count()));
+        let file_exists = wal_file_path.exists();
 
         let file = OpenOptions::default()
             .create(true)
@@ -256,27 +262,27 @@ impl WalManager {
             .write(true)
             .open(wal_file_path)?;
 
-        if header.is_none() {
+        if !file_exists {
             let buf = &mut [0; WAL_HEADER_SIZE];
-            file.pread(0, buf)?;
-            let h = WalHeader::from_bytes(buf);
+            let default_header = WalHeader::default(page_size, db_size);
+            default_header.write_to_buffer(buf);
 
-            // validate header checksum
-            if h.checksum != h.checksum_self(None) {
-                return Err(Error::InvalidChecksum);
-            }
-
-            header = Some(h);
+            file.pwrite(0, buf)?;
         }
 
-        let header = header.unwrap();
+        let header = {
+            let buf = &mut [0; WAL_HEADER_SIZE];
+            file.pread(0, buf)?;
+            let header = WalHeader::from_bytes(buf);
 
-        let wal_file = Arc::new(BlockIO::new(
-            file,
-            page_size as usize,
-            header.last_checkpointed as usize,
-            WAL_HEADER_SIZE,
-        ));
+            // validate header checksum
+            if header.checksum != header.checksum_self(None) {
+                return Err(Error::InvalidChecksum);
+            }
+            header
+        };
+
+        let wal_file = Arc::new(BlockIO::new(file, page_size as usize, WAL_HEADER_SIZE));
 
         let global_wal = GlobalWal::new(wal_file, db_file, header, page_cache)?;
 
@@ -569,22 +575,25 @@ impl LocalWal {
         }
     }
 
-    pub fn append_frame(&mut self, page: MemPageRef, db_size: u32) -> storage::Result<()> {
+    pub fn append_frame(&mut self, page: ExclusivePageGuard, db_size: u32) -> storage::Result<()> {
         self.append_vectored(vec![page], db_size)
     }
 
-    pub fn append_vectored(&mut self, pages: Vec<MemPageRef>, db_size: u32) -> storage::Result<()> {
+    pub fn append_vectored(
+        &mut self,
+        mut pages: Vec<ExclusivePageGuard>,
+        db_size: u32,
+    ) -> storage::Result<()> {
+        let pages_number = pages.len();
+
         let mut io_buffers = Vec::with_capacity(pages.len() * 2);
         let mut header_buffers: Vec<Vec<u8>> = (0..pages.len())
             .map(|_| vec![0; FRAME_HEADER_SIZE])
             .collect();
 
-        // locks all pages for IO operation to prevent content from changing
-        let locked_pages: Vec<_> = pages.iter().map(|p| p.lock_exclusive()).collect();
-
         let mut running_checksum = self.last_checksum;
 
-        for (i, page) in locked_pages.iter().enumerate() {
+        for (i, page) in pages.iter().enumerate() {
             // begin_write_page(page)?;
 
             let page_number = page.id();
@@ -603,7 +612,7 @@ impl LocalWal {
             frame_header.to_bytes(&mut header_buffers[i][..]);
         }
 
-        for (i, page) in locked_pages.iter().enumerate() {
+        for (i, page) in pages.iter().enumerate() {
             io_buffers.push(IoSlice::new(&header_buffers[i]));
             io_buffers.push(page.as_io_slice());
         }
@@ -615,12 +624,12 @@ impl LocalWal {
             .wal_file
             .write_vectored(frame_number, &mut io_buffers);
 
-        for page in locked_pages {
+        for page in pages.iter_mut() {
             pager::complete_write_page(&write_result, page, false);
         }
 
         self.last_checksum = running_checksum;
-        self.max_frame = self.max_frame + pages.len() as FrameNumber;
+        self.max_frame = self.max_frame + pages_number as FrameNumber;
 
         for (i, page) in pages.iter().enumerate() {
             self.global_wal
