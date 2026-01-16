@@ -4,7 +4,6 @@ use std::{
     io::{self, IoSlice, Seek, Write},
     os::fd::AsRawFd,
     path::Path,
-    sync::atomic::{AtomicU32, Ordering},
 };
 
 use libc::c_void;

@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
@@ -143,6 +143,10 @@ impl Database {
             .create(true)
             .read(true)
             .write(true)
+            .bypass_cache(true)
+            .truncate(false)
+            .sync_on_write(false)
+            .lock(true)
             .open(db_file_path.clone())?;
 
         if !file_exists {
@@ -201,6 +205,10 @@ impl Database {
             wal_manager,
             cache,
         })
+    }
+
+    fn init(path: &Path) -> DatabaseResult<()> {
+        todo!()
     }
 
     pub fn pager(&self) -> Pager {
