@@ -1,4 +1,4 @@
-use std::{borrow::Cow, cmp::Ordering};
+use std::{borrow::Cow, cell::RefCell, cmp::Ordering, rc::Rc};
 
 use crate::{
     sql::record::{Record, compare_records, records_equal},
@@ -90,16 +90,28 @@ impl SearchResult {
     }
 }
 
+#[derive(Debug)]
+pub enum BTreeType {
+    Table,
+    Index,
+}
+
 /// Implementation of modified B-link tree algorithm.
 ///
 /// TODO: make it concurrent
 pub struct BTree {
     root: PageNumber,
-    pager: Pager,
+    pager: Rc<RefCell<Pager>>,
 }
 
 impl BTree {
-    pub fn new(pager: Pager, root: PageNumber) -> Self {
+    // pub fn init(&self) -> storage::Result<()> {
+    //     self.pager.alloc_page();
+
+    //     Ok(())
+    // }
+
+    pub fn new(pager: Rc<RefCell<Pager>>, root: PageNumber) -> Self {
         Self { root, pager }
     }
 
@@ -134,7 +146,7 @@ impl BTree {
         }
 
         let cell = page.get_cell(index)?;
-        let reassembled_payload = reassemble_payload(&mut self.pager, page, index)?;
+        let reassembled_payload = reassemble_payload(&mut self.pager.borrow_mut(), page, index)?;
 
         match cell {
             BTreeCellRef::IndexInternal(_) => {
@@ -241,7 +253,7 @@ impl<'a> DatabaseCursor for BTreeCursor<'a> {
         self.current_page = self.btree.root;
 
         loop {
-            let page = self.btree.pager.read_page(self.current_page)?;
+            let page = self.btree.pager.borrow_mut().read_page(self.current_page)?;
             let guard = page.lock_shared();
 
             // we need to move to rigth node
@@ -283,7 +295,7 @@ impl<'a> DatabaseCursor for BTreeCursor<'a> {
 
     fn seek_first(&mut self) -> storage::Result<bool> {
         loop {
-            let page = self.btree.pager.read_page(self.current_page)?;
+            let page = self.btree.pager.borrow_mut().read_page(self.current_page)?;
             let guard = page.lock_shared();
 
             if guard.is_leaf() {
@@ -330,7 +342,7 @@ impl<'a> DatabaseCursor for BTreeCursor<'a> {
             }
 
             if let Some(rigth_sibling) = page.try_rigth_sibling() {
-                let next_page = self.btree.pager.read_page(rigth_sibling)?;
+                let next_page = self.btree.pager.borrow_mut().read_page(rigth_sibling)?;
                 let guard = next_page.lock_shared();
 
                 self.current_slot = guard.first_data_offset();

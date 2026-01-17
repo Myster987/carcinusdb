@@ -5,9 +5,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::database::MemDatabaseHeader;
+use crate::storage::btree::BTreeType;
 use crate::storage::buffer_pool::LocalBufferPool;
 use crate::storage::cache::ShardedLruCache;
-use crate::storage::page::{DATABASE_HEADER_PAGE_NUMBER, DATABASE_HEADER_SIZE};
+use crate::storage::page::{DATABASE_HEADER_PAGE_NUMBER, DATABASE_HEADER_SIZE, PageType};
 use crate::storage::wal::LocalWal;
 use crate::utils::io::BlockIO;
 
@@ -35,6 +36,16 @@ impl MemPage {
         Self {
             state: AtomicUsize::new(0),
             inner: UnsafeCell::new(MemPageInner { id, content: None }),
+        }
+    }
+
+    pub fn from_page(id: PageNumber, page: Page) -> Self {
+        Self {
+            state: AtomicUsize::new(0),
+            inner: UnsafeCell::new(MemPageInner {
+                id,
+                content: Some(page),
+            }),
         }
     }
 
@@ -518,26 +529,50 @@ impl Pager {
             .append_frame(guard, self.db_header.get_database_size())
     }
 
-    pub fn alloc_page(&mut self) -> storage::Result<PageNumber> {
+    pub fn btree_create(&mut self, btree_type: BTreeType) -> storage::Result<PageNumber> {
+        let page_type = match btree_type {
+            BTreeType::Index => PageType::IndexLeaf,
+            BTreeType::Table => PageType::TableLeaf,
+        };
+
+        self.alloc_page(page_type)
+    }
+
+    /// Allocates new page in db file. By default tries to use page from
+    /// freelist and if freelist is empty, then it creates new page at the
+    /// end of db file.
+    pub fn alloc_page(&mut self, page_type: PageType) -> storage::Result<PageNumber> {
         let first_freelist_page = self.db_header.get_first_freelist_page();
 
         let free_page = if first_freelist_page == 0 {
-            let page = self.db_header.get_database_size();
-            self.db_header.add_database_size(1);
+            let page_number = self.db_header.add_database_size(1);
 
-            let temp_page = Page::new(0, self.buffer_pool.get());
-            temp_page.initialize();
+            let new_page = Page::new(0, self.buffer_pool.get());
+            new_page.initialize(page_type);
 
-            self.io
-                .raw_write(DATABASE_HEADER_SIZE, temp_page.as_ptr())?;
+            let new_page = Arc::new(MemPage::from_page(page_number, new_page));
+            new_page.set_dirty();
+            new_page.set_loaded();
 
-            page
+            // we have to manually insert new page to cache and set it dirty
+            self.page_cache.insert(page_number, new_page)?;
+
+            page_number
         } else {
+            // loads to cache for use.
             let free_page = self.read_page(first_freelist_page)?;
 
+            //
             self.db_header
                 .set_first_freelist_page(free_page.lock_shared().freelist_next());
             self.db_header.sub_freelist_pages(1);
+
+            {
+                let guard = free_page.lock_exclusive();
+                guard.initialize(page_type);
+                guard.set_dirty();
+                guard.set_loaded();
+            }
 
             free_page.id()
         };
@@ -545,6 +580,11 @@ impl Pager {
         self.write_header()?;
 
         Ok(free_page)
+    }
+
+    pub fn flush_dirty_pages(&mut self) -> storage::Result<()> {
+        // for i in self.page_cache.
+        todo!()
     }
 
     pub fn flush(&mut self) -> storage::Result<()> {
@@ -622,9 +662,7 @@ mod tests {
 
         let mut pager = db.pager();
 
-        let new_page = pager.alloc_page()?;
-
-        println!("{:?}", *pager.read_page(new_page)?.lock_shared());
+        // println!("{:?}", *pager.read_page(new_page)?.lock_shared());
 
         Ok(())
     }
