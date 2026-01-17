@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     fs::File,
-    io::IoSlice,
+    io::{IoSlice, Write},
     path::PathBuf,
     sync::{
         Arc,
@@ -25,7 +25,7 @@ use crate::{
     utils::{
         self,
         bytes::{byte_swap_u32, pack_u64},
-        io::{BlockIO, IO},
+        io::{BlockIO, FileOps, IO},
     },
 };
 
@@ -256,10 +256,13 @@ impl WalManager {
     ) -> storage::Result<Self> {
         let file_exists = wal_file_path.exists();
 
-        let file = OpenOptions::default()
+        let mut file = OpenOptions::default()
             .create(true)
             .read(true)
             .write(true)
+            .sync_on_write(false)
+            .truncate(false)
+            .lock(true)
             .open(wal_file_path)?;
 
         if !file_exists {
@@ -268,6 +271,8 @@ impl WalManager {
             default_header.write_to_buffer(buf);
 
             file.pwrite(0, buf)?;
+            file.flush()?;
+            file.sync()?;
         }
 
         let header = {

@@ -488,11 +488,13 @@ pub fn byte_swap_u32(value: u32) -> u32 {
 }
 
 /// Takes two u32 and packs it into sinle u64.
+#[inline]
 pub fn pack_u64(a: u32, b: u32) -> u64 {
     ((a as u64) << 32) | b as u64
 }
 
 /// Takes u64 and unpacks it into two u32.
+#[inline]
 pub fn unpack_u64(packed: u64) -> (u32, u32) {
     ((packed >> 32) as u32, packed as u32)
 }

@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     cell::UnsafeCell,
     collections::{BinaryHeap, HashMap},
     fmt::Debug,
@@ -258,8 +257,14 @@ impl Page {
     }
 
     /// Set defaults
-    pub fn initialize(&self) {
+    pub fn initialize(&self, page_type: PageType) {
+        self.write_u8(0, page_type as u8);
+        self.set_first_freeblock(0);
+        self.set_len(0);
         self.set_last_used_offset(self.buffer.size() as u16);
+        self.set_free_fragments(0);
+        self.write_u32(Self::RIGTH_SIBLING_OFFSET, 0);
+        self.write_u32(Self::RIGTH_CHILD_OFFSET, 0);
     }
 
     pub fn as_ptr(&self) -> &mut [u8] {

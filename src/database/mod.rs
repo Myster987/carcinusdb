@@ -22,6 +22,8 @@ use crate::{
     utils::io::{BlockIO, IO},
 };
 
+const CARCINUSDB_MASTER_TABLE: &'static str = "carcinusdb_master";
+
 pub const GLOBAL_INIT_POOL_SIZE: usize = 250;
 pub const LOCAL_INIT_POOL_SIZE: usize = 40;
 
@@ -94,8 +96,9 @@ impl MemDatabaseHeader {
         self.change_counter.fetch_add(1, Ordering::Release);
     }
 
-    pub fn add_database_size(&self, add: u32) {
-        self.database_size.fetch_add(add, Ordering::Release);
+    /// Adds to current db size. Returns previous value.
+    pub fn add_database_size(&self, add: u32) -> u32 {
+        self.database_size.fetch_add(add, Ordering::Release)
     }
 
     pub fn set_first_freelist_page(&self, page_number: PageNumber) {
@@ -104,7 +107,8 @@ impl MemDatabaseHeader {
     }
 
     pub fn sub_freelist_pages(&self, sub: u32) {
-        self.freelist_pages
+        let _ = self
+            .freelist_pages
             .fetch_update(Ordering::Acquire, Ordering::Acquire, |val| {
                 Some(val.saturating_sub(sub))
             });
@@ -143,25 +147,20 @@ impl Database {
             .create(true)
             .read(true)
             .write(true)
-            .bypass_cache(true)
             .truncate(false)
             .sync_on_write(false)
             .lock(true)
             .open(db_file_path.clone())?;
 
-        if !file_exists {
-            let buf = &mut [0; DATABASE_HEADER_SIZE];
-            let default_header = DatabaseHeader::default();
-            default_header.write_to_buffer(buf);
-
-            file.pwrite(0, buf)?;
-        }
-
         let db_header = {
             let buf = &mut [0; DATABASE_HEADER_SIZE];
-            file.pread(0, buf)?;
 
-            DatabaseHeader::from_bytes(buf)
+            if file_exists {
+                file.pread(0, buf)?;
+                DatabaseHeader::from_bytes(buf)
+            } else {
+                DatabaseHeader::default()
+            }
         };
 
         let db_file = Arc::new(BlockIO::new(
@@ -205,10 +204,6 @@ impl Database {
             wal_manager,
             cache,
         })
-    }
-
-    fn init(path: &Path) -> DatabaseResult<()> {
-        todo!()
     }
 
     pub fn pager(&self) -> Pager {

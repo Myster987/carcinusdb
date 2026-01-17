@@ -59,7 +59,7 @@ pub struct ShardedLruCache<S: BuildHasher = RandomState> {
 unsafe impl Send for ShardedLruCache {}
 unsafe impl Sync for ShardedLruCache {}
 
-const DEFAULT_SHARD_COUNT: usize = 16;
+const DEFAULT_SHARD_COUNT: usize = 8;
 
 impl ShardedLruCache {
     pub fn new(capacity: usize) -> Self {
@@ -325,7 +325,9 @@ impl LruPageCache {
             let key_to_delete = entry.key;
             current_entry = entry.prev;
 
-            self.delete(key_to_delete).inspect(|_| to_delete -= 1)?;
+            // don't bubble up error, just ignore it and look for another page
+            // to delete.
+            let _ = self.delete(key_to_delete).inspect(|_| to_delete -= 1);
         }
 
         if to_delete > 0 {
