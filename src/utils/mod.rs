@@ -3,6 +3,7 @@ use thiserror::Error;
 pub mod buffer;
 pub mod bytes;
 pub mod cast;
+pub mod concurrency;
 pub mod debug_table;
 pub mod io;
 
