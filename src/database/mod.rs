@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    error::DatabaseResult,
+    error::{DatabaseError, DatabaseResult},
     os::{Open, OpenOptions},
     storage::{
         PageNumber,
@@ -137,9 +137,32 @@ pub struct Database {
     global_pool: GlobalBufferPool,
     wal_manager: WalManager,
     cache: Arc<ShardedLruCache>,
+
+    initialized: bool,
 }
 
 impl Database {
+    pub fn init(path: impl AsRef<Path>) -> DatabaseResult<Self> {
+        let file = OpenOptions::default()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .sync_on_write(false)
+            .lock(true)
+            .open(&path)?;
+
+        let metadata = file.metadata()?;
+
+        // if !metadata.is_file() {
+        //     return Err(DatabaseError::InvalidFilePath(
+        //         path.as_ref().to_str().unwrap().to_string(),
+        //     ));
+        // }
+
+        todo!()
+    }
+
     pub fn new(db_file_path: PathBuf) -> DatabaseResult<Self> {
         let file_exists = db_file_path.exists();
 
@@ -203,8 +226,11 @@ impl Database {
             global_pool,
             wal_manager,
             cache,
+            initialized: file_exists,
         })
     }
+
+    // pub fn init(&self, )
 
     pub fn pager(&self) -> Pager {
         Pager::new(

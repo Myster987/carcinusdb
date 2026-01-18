@@ -562,7 +562,6 @@ impl Pager {
             // loads to cache for use.
             let free_page = self.read_page(first_freelist_page)?;
 
-            //
             self.db_header
                 .set_first_freelist_page(free_page.lock_shared().freelist_next());
             self.db_header.sub_freelist_pages(1);
@@ -580,11 +579,6 @@ impl Pager {
         self.write_header()?;
 
         Ok(free_page)
-    }
-
-    pub fn flush_dirty_pages(&mut self) -> storage::Result<()> {
-        // for i in self.page_cache.
-        todo!()
     }
 
     pub fn flush(&mut self) -> storage::Result<()> {
