@@ -2,7 +2,6 @@ use thiserror::Error;
 
 use crate::utils::io::BlockNumber;
 
-pub mod allocator;
 pub mod btree;
 pub mod buffer_pool;
 pub mod cache;
