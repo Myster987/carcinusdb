@@ -16,8 +16,8 @@ use crate::{
     os::{Open, OpenOptions},
     storage::{
         self, Error, FrameNumber, PageNumber,
-        buffer_pool::LocalBufferPool,
-        cache::ShardedLruCache,
+        buffer_pool::BufferPool,
+        cache::ShardedClockCache,
         page::{MAX_PAGE_SIZE, Page},
         pager::{self, ExclusivePageGuard},
         wal::locks::{PackedU64, ReadGuard, ReadersPool, WriteGuard},
@@ -252,7 +252,7 @@ impl WalManager {
         db_file: Arc<BlockIO<File>>,
         page_size: u32,
         db_size: u32,
-        page_cache: Arc<ShardedLruCache>,
+        page_cache: Arc<ShardedClockCache>,
     ) -> storage::Result<Self> {
         let file_exists = wal_file_path.exists();
 
@@ -314,7 +314,7 @@ pub struct GlobalWal {
     /// WAL index that sppeds up searching for frame.
     index: Arc<WalIndex>,
     /// Reference to page cache used durring checkpointing to dump dirty pages.
-    page_cache: Arc<ShardedLruCache>,
+    page_cache: Arc<ShardedClockCache>,
     // /// Last checkpointed entry in WAL.
     // min_frame: AtomicU32,
     /// Last commited frame in transaction.
@@ -341,7 +341,7 @@ impl GlobalWal {
         wal_file: Arc<BlockIO<File>>,
         db_file: Arc<BlockIO<File>>,
         header: WalHeader,
-        page_cache: Arc<ShardedLruCache>,
+        page_cache: Arc<ShardedClockCache>,
     ) -> storage::Result<Self> {
         let frame_size = header.page_size as usize + FRAME_HEADER_SIZE;
         // let backfilled_number = header.backfilled_number;
@@ -543,7 +543,7 @@ impl LocalWal {
     pub fn read_frame(
         &mut self,
         page_number: PageNumber,
-        buffer_pool: &LocalBufferPool,
+        buffer_pool: &Arc<BufferPool>,
     ) -> storage::Result<Option<Page>> {
         // if given page number is not present in WAL we can simply return OK(None)
         if !self.is_in_wal(&page_number) {

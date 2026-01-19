@@ -12,8 +12,8 @@ use crate::{
     os::{Open, OpenOptions},
     storage::{
         PageNumber,
-        buffer_pool::GlobalBufferPool,
-        cache::ShardedLruCache,
+        buffer_pool::BufferPool,
+        cache::ShardedClockCache,
         page::{DATABASE_HEADER_SIZE, DatabaseHeader},
         pager::Pager,
         wal::WalManager,
@@ -134,9 +134,9 @@ pub struct Database {
     header: Arc<MemDatabaseHeader>,
     db_file: Arc<BlockIO<File>>,
 
-    global_pool: GlobalBufferPool,
+    global_pool: Arc<BufferPool>,
     wal_manager: WalManager,
-    cache: Arc<ShardedLruCache>,
+    cache: Arc<ShardedClockCache>,
 
     initialized: bool,
 }
@@ -205,10 +205,12 @@ impl Database {
             path
         };
 
-        let global_pool =
-            GlobalBufferPool::default(db_header.get_page_size(), GLOBAL_INIT_POOL_SIZE);
+        // let global_pool =
+        //     GlobalBufferPool::default(db_header.get_page_size(), GLOBAL_INIT_POOL_SIZE);
 
-        let cache = Arc::new(ShardedLruCache::new(
+        let global_pool = Arc::new(BufferPool::default(db_header.get_page_size()));
+
+        let cache = Arc::new(ShardedClockCache::new(
             db_header.default_page_cache_size as usize,
         ));
 
@@ -236,7 +238,7 @@ impl Database {
         Pager::new(
             self.header.clone(),
             self.db_file.clone(),
-            self.global_pool.local_pool(LOCAL_INIT_POOL_SIZE),
+            self.global_pool.clone(),
             self.wal_manager.local_wal(),
             self.cache.clone(),
         )

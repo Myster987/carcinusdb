@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::database::MemDatabaseHeader;
 use crate::storage::btree::BTreeType;
-use crate::storage::buffer_pool::LocalBufferPool;
-use crate::storage::cache::ShardedLruCache;
+use crate::storage::buffer_pool::BufferPool;
+use crate::storage::cache::ShardedClockCache;
 use crate::storage::page::{DATABASE_HEADER_PAGE_NUMBER, DATABASE_HEADER_SIZE, PageType};
 use crate::storage::wal::LocalWal;
 use crate::utils::io::BlockIO;
@@ -420,27 +420,27 @@ impl<T> DerefMut for PagePin<ExclusivePageGuard, T> {
     }
 }
 
-/// Is responsive for reading and writing to file
+/// Is responsive for reading and writing to file.
 pub struct Pager {
     /// Reference to database header owned by `Database` struct.
     pub db_header: Arc<MemDatabaseHeader>,
     /// I/O interface
     io: Arc<BlockIO<File>>,
     /// Each pager gets it's dedicated local pool
-    buffer_pool: LocalBufferPool,
+    buffer_pool: Arc<BufferPool>,
     /// Each pager gets local wal to sync with other pagers
     wal: LocalWal,
     /// Reference to global LRU cache
-    pub page_cache: Arc<ShardedLruCache>,
+    pub page_cache: Arc<ShardedClockCache>,
 }
 
 impl Pager {
     pub fn new(
         db_header: Arc<MemDatabaseHeader>,
         io: Arc<BlockIO<File>>,
-        buffer_pool: LocalBufferPool,
+        buffer_pool: Arc<BufferPool>,
         wal: LocalWal,
-        page_cache: Arc<ShardedLruCache>,
+        page_cache: Arc<ShardedClockCache>,
     ) -> Self {
         Self {
             db_header,
