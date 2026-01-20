@@ -113,7 +113,7 @@ impl Default for DatabaseHeader {
             page_size: DEFAULT_PAGE_SIZE,
             reserved_space: 0,
             change_counter: 1,
-            database_size: 1,
+            database_size: 0,
             first_freelist_page: 0,
             freelist_pages: 0,
             default_page_cache_size: DEFAULT_CACHE_SIZE,

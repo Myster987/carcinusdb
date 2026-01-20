@@ -9,7 +9,8 @@ use crate::storage::btree::BTreeType;
 use crate::storage::buffer_pool::BufferPool;
 use crate::storage::cache::ShardedClockCache;
 use crate::storage::page::{DATABASE_HEADER_PAGE_NUMBER, DATABASE_HEADER_SIZE, PageType};
-use crate::storage::wal::LocalWal;
+use crate::storage::wal::transaction::{ReadTx, WriteTx};
+use crate::storage::wal::{LocalWal, WriteAheadLog};
 use crate::utils::io::BlockIO;
 
 use crate::storage::{self, PageNumber};
@@ -429,7 +430,7 @@ pub struct Pager {
     /// Each pager gets it's dedicated local pool
     buffer_pool: Arc<BufferPool>,
     /// Each pager gets local wal to sync with other pagers
-    wal: LocalWal,
+    pub wal: Arc<WriteAheadLog>,
     /// Reference to global LRU cache
     pub page_cache: Arc<ShardedClockCache>,
 }
@@ -439,7 +440,7 @@ impl Pager {
         db_header: Arc<MemDatabaseHeader>,
         io: Arc<BlockIO<File>>,
         buffer_pool: Arc<BufferPool>,
-        wal: LocalWal,
+        wal: Arc<WriteAheadLog>,
         page_cache: Arc<ShardedClockCache>,
     ) -> Self {
         Self {
@@ -451,17 +452,21 @@ impl Pager {
         }
     }
 
-    pub fn write_header(&mut self) -> storage::Result<()> {
+    pub fn write_header<Tx: WriteTx>(&self, tx: &mut Tx) -> storage::Result<()> {
         let raw_header = self.db_header.into_raw_header();
 
-        let header_page = self.read_page(DATABASE_HEADER_PAGE_NUMBER)?;
+        let header_page = self.read_page(tx, DATABASE_HEADER_PAGE_NUMBER)?;
         let guard = header_page.lock_exclusive();
         guard.write_db_header(raw_header);
 
-        self.wal.append_frame(guard, raw_header.database_size)
+        self.wal.append_frame(tx, guard, raw_header.database_size)
     }
 
-    pub fn read_page(&mut self, page_number: PageNumber) -> storage::Result<MemPageRef> {
+    pub fn read_page<Tx: ReadTx>(
+        &self,
+        tx: &Tx,
+        page_number: PageNumber,
+    ) -> storage::Result<MemPageRef> {
         // check cache...
         if let Some(cached_page) = self.page_cache.get(&page_number) {
             return Ok(cached_page);
@@ -474,7 +479,7 @@ impl Pager {
             let mut guard = page_wrapper.lock_exclusive();
 
             // check wall...
-            if let Ok(Some(page)) = self.wal.read_frame(page_number, &self.buffer_pool) {
+            if let Ok(Some(page)) = self.wal.read_frame(tx, page_number, &self.buffer_pool) {
                 *guard = page;
             } else {
                 // read from disk
@@ -494,7 +499,7 @@ impl Pager {
     /// # Safety
     ///
     /// Page that needs to be read should already be write-locked.
-    fn read_page_from_disk(&mut self, page_number: PageNumber) -> storage::Result<Page> {
+    fn read_page_from_disk(&self, page_number: PageNumber) -> storage::Result<Page> {
         // begin_read_page(&page);
 
         let mut buffer = self.buffer_pool.get();
@@ -520,28 +525,36 @@ impl Pager {
         }
     }
 
-    pub fn write_page(&mut self, page: MemPageRef) -> storage::Result<()> {
+    pub fn write_page<Tx: WriteTx>(&self, tx: &mut Tx, page: MemPageRef) -> storage::Result<()> {
         // begin_write_page(&page)?;
 
         let guard = page.lock_exclusive();
 
         self.wal
-            .append_frame(guard, self.db_header.get_database_size())
+            .append_frame(tx, guard, self.db_header.get_database_size())
     }
 
-    pub fn btree_create(&mut self, btree_type: BTreeType) -> storage::Result<PageNumber> {
+    pub fn btree_create<Tx: WriteTx>(
+        &self,
+        tx: &mut Tx,
+        btree_type: BTreeType,
+    ) -> storage::Result<PageNumber> {
         let page_type = match btree_type {
             BTreeType::Index => PageType::IndexLeaf,
             BTreeType::Table => PageType::TableLeaf,
         };
 
-        self.alloc_page(page_type)
+        self.alloc_page(tx, page_type)
     }
 
     /// Allocates new page in db file. By default tries to use page from
     /// freelist and if freelist is empty, then it creates new page at the
     /// end of db file.
-    pub fn alloc_page(&mut self, page_type: PageType) -> storage::Result<PageNumber> {
+    pub fn alloc_page<Tx: WriteTx>(
+        &self,
+        tx: &mut Tx,
+        page_type: PageType,
+    ) -> storage::Result<PageNumber> {
         let first_freelist_page = self.db_header.get_first_freelist_page();
 
         let free_page = if first_freelist_page == 0 {
@@ -560,7 +573,8 @@ impl Pager {
             page_number
         } else {
             // loads to cache for use.
-            let free_page = self.read_page(first_freelist_page)?;
+            let tx = self.wal.begin_read_tx()?;
+            let free_page = self.read_page(&tx, first_freelist_page)?;
 
             self.db_header
                 .set_first_freelist_page(free_page.lock_shared().freelist_next());
@@ -576,7 +590,7 @@ impl Pager {
             free_page.id()
         };
 
-        self.write_header()?;
+        self.write_header(tx)?;
 
         Ok(free_page)
     }
@@ -589,17 +603,6 @@ impl Pager {
         Ok(self.io.sync()?)
     }
 }
-
-// /// Prepares page for read operation
-// pub fn begin_read_page(page: &MemPageRef) -> storage::Result<()> {
-//     page.set_locked();
-//     Ok(())
-// }
-
-// pub fn begin_write_page(page: &MemPageRef) -> storage::Result<()> {
-//     page.set_locked();
-//     Ok(())
-// }
 
 // /// Should be universal to both disk and wal reads. Takes `IoResult` with page
 // /// and buffer and if it is an error it will set proper flags on page. Otherwise
@@ -649,12 +652,23 @@ pub fn complete_write_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::btree::{BTreeKey, DatabaseCursor};
 
     #[test]
     fn test_pager() -> anyhow::Result<()> {
-        let db = crate::database::Database::new("./db-file".into())?;
+        let db = crate::database::Database::open("./db-file")?;
 
-        let mut pager = db.pager();
+        {
+            let tx = db.begin_read()?;
+            let mut cursor = tx.cursor(1);
+            let test = cursor.seek(&BTreeKey::new_table_row_id(1, None));
+
+            println!("result: {:?}", test);
+
+            tx.commit()?;
+        }
+
+        // let mut pager = db.pager();
 
         // println!("{:?}", *pager.read_page(new_page)?.lock_shared());
 

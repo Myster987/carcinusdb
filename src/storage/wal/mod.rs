@@ -14,6 +14,7 @@ use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
 
 use crate::{
+    database::MemDatabaseHeader,
     os::{Open, OpenOptions},
     storage::{
         self, Error, FrameNumber, PageNumber,
@@ -35,7 +36,7 @@ use crate::{
 };
 
 mod locks;
-mod transaction;
+pub mod transaction;
 
 const WAL_HEADER_SIZE: usize = size_of::<WalHeader>();
 const WAL_HEADER_SIZE_NO_CHECKSUM: usize = WAL_HEADER_SIZE - size_of::<[u32; 2]>();
@@ -888,6 +889,55 @@ pub struct WriteAheadLog {
 }
 
 impl WriteAheadLog {
+    pub fn open(
+        db_file: &Arc<BlockIO<File>>,
+        db_header: &Arc<MemDatabaseHeader>,
+        page_cache: &Arc<ShardedClockCache>,
+        wal_file_path: PathBuf,
+    ) -> storage::Result<Self> {
+        let file_exists = wal_file_path.exists();
+
+        let mut file = OpenOptions::default()
+            .create(true)
+            .read(true)
+            .write(true)
+            .sync_on_write(false)
+            .truncate(false)
+            .lock(true)
+            .open(wal_file_path)?;
+
+        if !file_exists {
+            let buf = &mut [0; WAL_HEADER_SIZE];
+            let default_header =
+                WalHeader::default(db_header.page_size, db_header.get_database_size());
+            default_header.write_to_buffer(buf);
+
+            file.pwrite(0, buf)?;
+            file.flush()?;
+            file.sync()?;
+        }
+
+        let header = {
+            let buf = &mut [0; WAL_HEADER_SIZE];
+            file.pread(0, buf)?;
+            let header = WalHeader::from_bytes(buf);
+
+            // validate header checksum
+            if header.checksum != header.checksum_self(None) {
+                return Err(Error::InvalidChecksum);
+            }
+            header
+        };
+
+        let wal_file = Arc::new(BlockIO::new(
+            file,
+            db_header.page_size as usize,
+            WAL_HEADER_SIZE,
+        ));
+
+        Self::new(wal_file, db_file.clone(), header, page_cache.clone())
+    }
+
     pub fn new(
         wal_file: Arc<BlockIO<File>>,
         db_file: Arc<BlockIO<File>>,
@@ -1193,6 +1243,14 @@ impl WriteAheadLog {
             return Ok(());
         }
 
+        self._checkpoint()
+    }
+
+    pub fn force_checkpoint(&self) -> storage::Result<()> {
+        self._checkpoint()
+    }
+
+    fn _checkpoint(&self) -> storage::Result<()> {
         let exclusive_lock = self.checkpoint_lock.write();
         // let mut wal_header = self.global_wal.header.lock();
 

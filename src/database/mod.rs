@@ -1,6 +1,5 @@
 use std::{
-    fs::File,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
@@ -12,20 +11,21 @@ use crate::{
     os::{Open, OpenOptions},
     storage::{
         PageNumber,
+        btree::BTreeCursor,
         buffer_pool::BufferPool,
         cache::ShardedClockCache,
         page::{DATABASE_HEADER_SIZE, DatabaseHeader},
         pager::Pager,
-        wal::WalManager,
+        wal::{
+            WriteAheadLog,
+            transaction::{ReadTransaction, WriteTransaction},
+        },
     },
     tcp::server::{TcpServer, connection::Connection},
     utils::io::{BlockIO, IO},
 };
 
 const CARCINUSDB_MASTER_TABLE: &'static str = "carcinusdb_master";
-
-pub const GLOBAL_INIT_POOL_SIZE: usize = 250;
-pub const LOCAL_INIT_POOL_SIZE: usize = 40;
 
 pub async fn run(hostname: String, port: u16) -> DatabaseResult<()> {
     log::info!("Starting CarcinusDB...");
@@ -131,18 +131,14 @@ impl From<DatabaseHeader> for MemDatabaseHeader {
 }
 
 pub struct Database {
-    header: Arc<MemDatabaseHeader>,
-    db_file: Arc<BlockIO<File>>,
-
-    global_pool: Arc<BufferPool>,
-    wal_manager: WalManager,
-    cache: Arc<ShardedClockCache>,
-
+    pager: Arc<Pager>,
     initialized: bool,
 }
 
 impl Database {
-    pub fn init(path: impl AsRef<Path>) -> DatabaseResult<Self> {
+    pub fn open(path: impl AsRef<Path>) -> DatabaseResult<Self> {
+        let file_exists = path.as_ref().exists();
+
         let file = OpenOptions::default()
             .create(true)
             .read(true)
@@ -152,29 +148,6 @@ impl Database {
             .lock(true)
             .open(&path)?;
 
-        let metadata = file.metadata()?;
-
-        // if !metadata.is_file() {
-        //     return Err(DatabaseError::InvalidFilePath(
-        //         path.as_ref().to_str().unwrap().to_string(),
-        //     ));
-        // }
-
-        todo!()
-    }
-
-    pub fn new(db_file_path: PathBuf) -> DatabaseResult<Self> {
-        let file_exists = db_file_path.exists();
-
-        let file = OpenOptions::default()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .sync_on_write(false)
-            .lock(true)
-            .open(db_file_path.clone())?;
-
         let db_header = {
             let buf = &mut [0; DATABASE_HEADER_SIZE];
 
@@ -182,7 +155,10 @@ impl Database {
                 file.pread(0, buf)?;
                 DatabaseHeader::from_bytes(buf)
             } else {
-                DatabaseHeader::default()
+                let h = DatabaseHeader::default();
+                h.write_to_buffer(buf);
+                file.pwrite(0, buf)?;
+                h
             }
         };
 
@@ -193,7 +169,7 @@ impl Database {
         ));
 
         let wal_file_path = {
-            let mut path = db_file_path;
+            let mut path = path.as_ref().to_path_buf();
 
             if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
                 let new_file_name = format!("{}-wal", file_name);
@@ -205,42 +181,76 @@ impl Database {
             path
         };
 
-        // let global_pool =
-        //     GlobalBufferPool::default(db_header.get_page_size(), GLOBAL_INIT_POOL_SIZE);
-
-        let global_pool = Arc::new(BufferPool::default(db_header.get_page_size()));
+        let buffer_pool = Arc::new(BufferPool::default(db_header.get_page_size()));
 
         let cache = Arc::new(ShardedClockCache::new(
             db_header.default_page_cache_size as usize,
         ));
 
-        let wal_manager = WalManager::new(
+        let db_header = Arc::new(MemDatabaseHeader::from(db_header));
+
+        let wal = Arc::new(WriteAheadLog::open(
+            &db_file,
+            &db_header,
+            &cache,
             wal_file_path,
-            db_file.clone(),
-            db_header.get_page_size() as u32,
-            db_header.database_size,
-            cache.clone(),
-        )?;
+        )?);
+
+        let pager = Arc::new(Pager::new(db_header, db_file, buffer_pool, wal, cache));
 
         Ok(Self {
-            header: Arc::new(MemDatabaseHeader::from(db_header)),
-            db_file,
-            global_pool,
-            wal_manager,
-            cache,
+            pager,
             initialized: file_exists,
         })
     }
 
-    // pub fn init(&self, )
+    pub fn begin_read<'a>(&'a self) -> DatabaseResult<DatabaseReadTransaction<'a>> {
+        let wal_tx = self.pager.wal.begin_read_tx()?;
 
-    pub fn pager(&self) -> Pager {
-        Pager::new(
-            self.header.clone(),
-            self.db_file.clone(),
-            self.global_pool.clone(),
-            self.wal_manager.local_wal(),
-            self.cache.clone(),
-        )
+        Ok(DatabaseReadTransaction {
+            wal_tx,
+            pager: self.pager.clone(),
+        })
+    }
+
+    pub fn begin_write<'a>(&'a self) -> DatabaseResult<DatabaseWriteTransaction<'a>> {
+        let wal_tx = self.pager.wal.begin_write_tx()?;
+
+        Ok(DatabaseWriteTransaction {
+            wal_tx,
+            pager: self.pager.clone(),
+        })
+    }
+}
+
+pub struct DatabaseReadTransaction<'tx> {
+    wal_tx: ReadTransaction<'tx>,
+    pager: Arc<Pager>,
+}
+
+impl<'tx> DatabaseReadTransaction<'tx> {
+    pub fn cursor(&'tx self, root: PageNumber) -> BTreeCursor<'tx, ReadTransaction<'tx>> {
+        BTreeCursor::new(&self.wal_tx, &self.pager, root)
+    }
+
+    pub fn commit(self) -> DatabaseResult<()> {
+        Ok(())
+    }
+}
+
+pub struct DatabaseWriteTransaction<'tx> {
+    wal_tx: WriteTransaction<'tx>,
+    pager: Arc<Pager>,
+}
+
+impl<'tx> DatabaseWriteTransaction<'tx> {
+    pub fn cursor(&'tx self, root: PageNumber) -> BTreeCursor<'tx, WriteTransaction<'tx>> {
+        BTreeCursor::new(&self.wal_tx, &self.pager, root)
+    }
+
+    pub fn commit(self) -> DatabaseResult<()> {
+        self.pager.wal.commit(self.wal_tx)?;
+
+        Ok(())
     }
 }

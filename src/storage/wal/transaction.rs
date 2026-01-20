@@ -128,13 +128,13 @@ impl<'a> WriteTransaction<'a> {
     }
 }
 
-impl Drop for WriteTransaction<'_> {
-    fn drop(&mut self) {
-        panic!(
-            "WriteTransaction must be explicitly ended with wal.commit(). Do not drop directly."
-        );
-    }
-}
+// impl Drop for WriteTransaction<'_> {
+//     fn drop(&mut self) {
+//         panic!(
+//             "WriteTransaction must be explicitly ended with wal.commit(). Do not drop directly."
+//         );
+//     }
+// }
 
 impl ReadTx for WriteTransaction<'_> {
     #[inline]

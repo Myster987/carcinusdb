@@ -1,4 +1,4 @@
-use std::{borrow::Cow, cell::RefCell, cmp::Ordering, rc::Rc};
+use std::{borrow::Cow, cmp::Ordering, sync::Arc};
 
 use crate::{
     sql::record::{Record, compare_records, records_equal},
@@ -6,6 +6,7 @@ use crate::{
         self, PageNumber, SlotNumber,
         page::{BTreeCellRef, CellOps, Page},
         pager::{Pager, SharedPageGuard},
+        wal::transaction::{ReadTx, WriteTransaction},
     },
 };
 
@@ -96,76 +97,6 @@ pub enum BTreeType {
     Index,
 }
 
-/// Implementation of modified B-link tree algorithm.
-///
-/// TODO: make it concurrent
-pub struct BTree {
-    root: PageNumber,
-    pager: Rc<RefCell<Pager>>,
-}
-
-impl BTree {
-    // pub fn init(&self) -> storage::Result<()> {
-    //     self.pager.alloc_page();
-
-    //     Ok(())
-    // }
-
-    pub fn new(pager: Rc<RefCell<Pager>>, root: PageNumber) -> Self {
-        Self { root, pager }
-    }
-
-    /// Check if search operation needs to visit rigth sibling. This can happen
-    /// when page was splited and key we are looking for is there.
-    pub fn key_in_range(&mut self, page: &Page, key: &BTreeKey) -> storage::Result<bool> {
-        if let Some(high_key) = self.extract_high_key(page)? {
-            Ok(*key <= high_key)
-        } else {
-            Ok(true)
-        }
-    }
-
-    /// Returns page high key, if it exists. Otherwise it returns `Ok(None)`.
-    fn extract_high_key<'a>(&mut self, page: &'a Page) -> storage::Result<Option<BTreeKey<'a>>> {
-        if !page.has_high_key() {
-            return Ok(None);
-        }
-
-        return self.extracty_key(page, Page::HIGH_KEY_SLOT).map(Some);
-    }
-
-    /// Takes page reference and returns `BTreeKey` based on page type. Cell
-    /// migth need reassembly.
-    fn extracty_key<'a>(
-        &mut self,
-        page: &'a Page,
-        index: SlotNumber,
-    ) -> storage::Result<BTreeKey<'a>> {
-        if index >= page.len() {
-            return Err(storage::Error::CellIndexOutRange);
-        }
-
-        let cell = page.get_cell(index)?;
-        let reassembled_payload = reassemble_payload(&mut self.pager.borrow_mut(), page, index)?;
-
-        match cell {
-            BTreeCellRef::IndexInternal(_) => {
-                let record = Record::new(reassembled_payload);
-                Ok(BTreeKey::new_index_key(record))
-            }
-            BTreeCellRef::IndexLeaf(_) => {
-                let record = Record::new(reassembled_payload);
-                Ok(BTreeKey::new_index_key(record))
-            }
-            BTreeCellRef::TableInternal(cell) => Ok(BTreeKey::new_table_row_id(cell.row_id, None)),
-            BTreeCellRef::TableLeaf(cell) => {
-                let record = Record::new(reassembled_payload);
-                Ok(BTreeKey::new_table_row_id(cell.row_id, Some(record)))
-            }
-        }
-    }
-}
-
 pub trait DatabaseCursor {
     /// Traverses B-tree in order to find value that mathes given key.
     /// Returns position of found entry or where it should be inserted.
@@ -195,20 +126,22 @@ pub trait DatabaseCursor {
     fn position(&self) -> (PageNumber, SlotNumber);
 }
 
-pub struct BTreeCursor<'a> {
-    /// Reference to b-tree
-    btree: &'a mut BTree,
+pub struct BTreeCursor<'tx, Tx> {
+    tx: &'tx Tx,
+    pager: &'tx Arc<Pager>,
+    root: PageNumber,
     page_guard: Option<SharedPageGuard>,
     current_page: PageNumber,
     current_slot: SlotNumber,
     done: bool,
 }
 
-impl<'a> BTreeCursor<'a> {
-    pub fn new(btree: &'a mut BTree) -> Self {
-        let root = btree.root;
+impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
+    pub fn new(tx: &'tx Tx, pager: &'tx Arc<Pager>, root: PageNumber) -> Self {
         Self {
-            btree,
+            tx,
+            pager,
+            root,
             page_guard: None,
             current_page: root,
             current_slot: 0,
@@ -234,7 +167,7 @@ impl<'a> BTreeCursor<'a> {
             let mid = left + (rigth - left) / 2;
             let slot = first + mid;
 
-            let key = self.btree.extracty_key(page, slot)?;
+            let key = self.extracty_key(page, slot)?;
 
             match search_key.cmp(&key) {
                 Ordering::Less => rigth = mid,
@@ -245,19 +178,114 @@ impl<'a> BTreeCursor<'a> {
 
         Ok(Err(first + left))
     }
+
+    /// Check if search operation needs to visit rigth sibling. This can happen
+    /// when page was splited and key we are looking for is there.
+    pub fn key_in_range(&self, page: &Page, key: &BTreeKey) -> storage::Result<bool> {
+        if let Some(high_key) = self.extract_high_key(page)? {
+            Ok(*key <= high_key)
+        } else {
+            Ok(true)
+        }
+    }
+
+    /// Returns page high key, if it exists. Otherwise it returns `Ok(None)`.
+    fn extract_high_key<'a>(&self, page: &'a Page) -> storage::Result<Option<BTreeKey<'a>>> {
+        if !page.has_high_key() {
+            return Ok(None);
+        }
+
+        return self.extracty_key(page, Page::HIGH_KEY_SLOT).map(Some);
+    }
+
+    /// Takes page reference and returns `BTreeKey` based on page type. Cell
+    /// migth need reassembly.
+    fn extracty_key<'a>(&self, page: &'a Page, index: SlotNumber) -> storage::Result<BTreeKey<'a>> {
+        if index >= page.len() {
+            return Err(storage::Error::CellIndexOutRange);
+        }
+
+        let cell = page.get_cell(index)?;
+        let reassembled_payload = self.reassemble_payload(page, index)?;
+
+        match cell {
+            BTreeCellRef::IndexInternal(_) => {
+                let record = Record::new(reassembled_payload);
+                Ok(BTreeKey::new_index_key(record))
+            }
+            BTreeCellRef::IndexLeaf(_) => {
+                let record = Record::new(reassembled_payload);
+                Ok(BTreeKey::new_index_key(record))
+            }
+            BTreeCellRef::TableInternal(cell) => Ok(BTreeKey::new_table_row_id(cell.row_id, None)),
+            BTreeCellRef::TableLeaf(cell) => {
+                let record = Record::new(reassembled_payload);
+                Ok(BTreeKey::new_table_row_id(cell.row_id, Some(record)))
+            }
+        }
+    }
+
+    /// Returns whole cell payload including overflow pages. Takes mutable reference
+    /// to pager and cell that you want to reassemble. Returns [Cow], which is
+    /// `Borrowed` when cell isn't overflowing and `Owned` when cell needed to be
+    /// reconstructed. Returned slice can be directly used as record.
+    pub fn reassemble_payload<'a>(
+        &self,
+        page: &'a Page,
+        index: SlotNumber,
+    ) -> storage::Result<Cow<'a, [u8]>> {
+        let cell = page.get_cell(index)?;
+        let offset_to_cell = cell.offset_in_page(page.as_ptr());
+
+        let local_payload = cell
+            .payload_ref()
+            .as_slice(&page.as_ptr()[offset_to_cell..]);
+
+        if !cell.is_overflowing() {
+            return Ok(Cow::Borrowed(local_payload));
+        }
+
+        let first_overflow = cell.first_overflow().unwrap();
+        let total_size = cell.payload_size() as usize;
+
+        let mut result = Vec::with_capacity(total_size);
+
+        result.extend_from_slice(local_payload);
+
+        let mut current_overflow = first_overflow;
+
+        while result.len() < total_size {
+            let overflow_page = self.pager.read_page(self.tx, current_overflow)?;
+            let guard = overflow_page.lock_shared();
+
+            result.extend_from_slice(guard.overflow_payload());
+
+            if let Some(next) = guard.next_overflow() {
+                current_overflow = next;
+            } else {
+                break;
+            }
+        }
+
+        if result.len() != total_size {
+            return Err(storage::Error::Corruped);
+        }
+
+        Ok(Cow::Owned(result))
+    }
 }
 
-impl<'a> DatabaseCursor for BTreeCursor<'a> {
+impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
     fn seek(&mut self, key: &BTreeKey) -> storage::Result<SearchResult> {
         // start at root
-        self.current_page = self.btree.root;
+        self.current_page = self.root;
 
         loop {
-            let page = self.btree.pager.borrow_mut().read_page(self.current_page)?;
+            let page = self.pager.read_page(self.tx, self.current_page)?;
             let guard = page.lock_shared();
 
             // we need to move to rigth node
-            if !self.btree.key_in_range(&guard, key)? {
+            if !self.key_in_range(&guard, key)? {
                 self.current_page = guard
                     .try_rigth_sibling()
                     .expect("page was splited and should contain sibling");
@@ -295,7 +323,7 @@ impl<'a> DatabaseCursor for BTreeCursor<'a> {
 
     fn seek_first(&mut self) -> storage::Result<bool> {
         loop {
-            let page = self.btree.pager.borrow_mut().read_page(self.current_page)?;
+            let page = self.pager.read_page(self.tx, self.current_page)?;
             let guard = page.lock_shared();
 
             if guard.is_leaf() {
@@ -342,7 +370,7 @@ impl<'a> DatabaseCursor for BTreeCursor<'a> {
             }
 
             if let Some(rigth_sibling) = page.try_rigth_sibling() {
-                let next_page = self.btree.pager.borrow_mut().read_page(rigth_sibling)?;
+                let next_page = self.pager.read_page(self.tx, rigth_sibling)?;
                 let guard = next_page.lock_shared();
 
                 self.current_slot = guard.first_data_offset();
@@ -363,7 +391,7 @@ impl<'a> DatabaseCursor for BTreeCursor<'a> {
             .page_guard
             .as_ref()
             .ok_or(storage::Error::InvalidPageType)?;
-        self.btree.extracty_key(page, self.current_slot)
+        self.extracty_key(page, self.current_slot)
     }
 
     fn value(&mut self) -> storage::Result<Option<Record<'_>>> {
@@ -381,53 +409,4 @@ impl<'a> DatabaseCursor for BTreeCursor<'a> {
     fn position(&self) -> (PageNumber, SlotNumber) {
         (self.current_page, self.current_slot)
     }
-}
-
-/// Returns whole cell payload including overflow pages. Takes mutable reference
-/// to pager and cell that you want to reassemble. Returns [Cow], which is
-/// `Borrowed` when cell isn't overflowing and `Owned` when cell needed to be
-/// reconstructed. Returned slice can be directly used as record.
-pub fn reassemble_payload<'a>(
-    pager: &mut Pager,
-    page: &'a Page,
-    index: SlotNumber,
-) -> storage::Result<Cow<'a, [u8]>> {
-    let cell = page.get_cell(index)?;
-    let offset_to_cell = cell.offset_in_page(page.as_ptr());
-
-    let local_payload = cell
-        .payload_ref()
-        .as_slice(&page.as_ptr()[offset_to_cell..]);
-
-    if !cell.is_overflowing() {
-        return Ok(Cow::Borrowed(local_payload));
-    }
-
-    let first_overflow = cell.first_overflow().unwrap();
-    let total_size = cell.payload_size() as usize;
-
-    let mut result = Vec::with_capacity(total_size);
-
-    result.extend_from_slice(local_payload);
-
-    let mut current_overflow = first_overflow;
-
-    while result.len() < total_size {
-        let overflow_page = pager.read_page(current_overflow)?;
-        let guard = overflow_page.lock_shared();
-
-        result.extend_from_slice(guard.overflow_payload());
-
-        if let Some(next) = guard.next_overflow() {
-            current_overflow = next;
-        } else {
-            break;
-        }
-    }
-
-    if result.len() != total_size {
-        return Err(storage::Error::Corruped);
-    }
-
-    Ok(Cow::Owned(result))
 }
