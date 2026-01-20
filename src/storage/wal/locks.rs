@@ -4,45 +4,12 @@ use std::sync::{
 };
 
 use crossbeam::utils::Backoff;
-use parking_lot::{Condvar, Mutex, MutexGuard, RwLockReadGuard};
+use parking_lot::{MutexGuard, RwLockReadGuard};
 
 use crate::{
     storage::FrameNumber,
     utils::bytes::{pack_u64, unpack_u64},
 };
-
-/// Counting semaphore. Used to sync readers.
-pub struct Semaphore {
-    count: Mutex<usize>,
-    state: Condvar,
-}
-
-impl Semaphore {
-    pub fn new(initial: usize) -> Self {
-        Self {
-            count: Mutex::new(initial),
-            state: Condvar::new(),
-        }
-    }
-
-    /// Tryies to acquire permit, but if none is avalible it will block current thread.
-    pub fn acquire(&self) {
-        let mut count = self.count.lock();
-
-        while *count == 0 {
-            self.state.wait(&mut count);
-        }
-
-        *count -= 1;
-    }
-
-    /// Releases permit and notifies one thread.
-    pub fn release(&self) {
-        let mut count = self.count.lock();
-        *count += 1;
-        self.state.notify_one();
-    }
-}
 
 /// Pool of all avalible readers that are allowed to read from WAL.
 pub struct ReadersPool<const READERS_NUM: usize> {
