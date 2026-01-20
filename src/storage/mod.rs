@@ -40,6 +40,8 @@ pub enum Error {
     InvalidChecksum,
     #[error("page {0} not found in WAL")]
     PageNotFoundInWal(PageNumber),
+    #[error("could not begin transaction correctly. please try again")]
+    RetryTransaction,
 
     // cache
     #[error(transparent)]
