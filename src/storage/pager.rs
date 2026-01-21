@@ -8,7 +8,9 @@ use crate::database::MemDatabaseHeader;
 use crate::storage::btree::BTreeType;
 use crate::storage::buffer_pool::BufferPool;
 use crate::storage::cache::ShardedClockCache;
-use crate::storage::page::{DATABASE_HEADER_PAGE_NUMBER, DATABASE_HEADER_SIZE, PageType};
+use crate::storage::page::{
+    DATABASE_HEADER_PAGE_NUMBER, DATABASE_HEADER_SIZE, DatabaseHeader, PageType,
+};
 use crate::storage::wal::transaction::{ReadTx, WriteTx};
 use crate::storage::wal::{LocalWal, WriteAheadLog};
 use crate::utils::io::BlockIO;
@@ -442,14 +444,40 @@ impl Pager {
         buffer_pool: Arc<BufferPool>,
         wal: Arc<WriteAheadLog>,
         page_cache: Arc<ShardedClockCache>,
-    ) -> Self {
-        Self {
+        is_initialized: bool,
+    ) -> storage::Result<Self> {
+        let pager = Self {
             db_header,
             io,
             buffer_pool,
             wal,
             page_cache,
+        };
+
+        if !is_initialized {
+            pager.init()?;
         }
+
+        Ok(pager)
+    }
+
+    pub fn init(&self) -> storage::Result<()> {
+        let mut tx = self.wal.begin_write_tx()?;
+
+        let master_table_page_number = self.btree_create(&mut tx, BTreeType::Table)?;
+        let master_page = self.read_page(&tx, master_table_page_number)?;
+
+        {
+            let guard = master_page.lock_exclusive();
+            guard.write_db_header(DatabaseHeader::default());
+        }
+
+        self.write_page(&mut tx, master_page)?;
+        self.wal.commit(tx)?;
+
+        self.wal.force_checkpoint()?;
+
+        Ok(())
     }
 
     pub fn write_header<Tx: WriteTx>(&self, tx: &mut Tx) -> storage::Result<()> {
@@ -559,8 +587,13 @@ impl Pager {
 
         let free_page = if first_freelist_page == 0 {
             let page_number = self.db_header.add_database_size(1);
+            let offset = if page_number == DATABASE_HEADER_PAGE_NUMBER {
+                DATABASE_HEADER_SIZE
+            } else {
+                0
+            };
 
-            let new_page = Page::new(0, self.buffer_pool.get());
+            let new_page = Page::new(offset, self.buffer_pool.get());
             new_page.initialize(page_type);
 
             let new_page = Arc::new(MemPage::from_page(page_number, new_page));

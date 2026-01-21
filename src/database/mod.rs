@@ -1,4 +1,5 @@
 use std::{
+    io::Write,
     path::Path,
     sync::{
         Arc,
@@ -14,7 +15,7 @@ use crate::{
         btree::BTreeCursor,
         buffer_pool::BufferPool,
         cache::ShardedClockCache,
-        page::{DATABASE_HEADER_SIZE, DatabaseHeader},
+        page::{DATABASE_HEADER_SIZE, DatabaseHeader, Page},
         pager::Pager,
         wal::{
             WriteAheadLog,
@@ -22,7 +23,7 @@ use crate::{
         },
     },
     tcp::server::{TcpServer, connection::Connection},
-    utils::io::{BlockIO, IO},
+    utils::io::{BlockIO, FileOps, IO},
 };
 
 const CARCINUSDB_MASTER_TABLE: &'static str = "carcinusdb_master";
@@ -132,14 +133,13 @@ impl From<DatabaseHeader> for MemDatabaseHeader {
 
 pub struct Database {
     pager: Arc<Pager>,
-    initialized: bool,
 }
 
 impl Database {
     pub fn open(path: impl AsRef<Path>) -> DatabaseResult<Self> {
-        let file_exists = path.as_ref().exists();
+        let is_initialized = path.as_ref().exists();
 
-        let file = OpenOptions::default()
+        let mut file = OpenOptions::default()
             .create(true)
             .read(true)
             .write(true)
@@ -148,24 +148,19 @@ impl Database {
             .lock(true)
             .open(&path)?;
 
-        let db_header = {
+        let db_header = if is_initialized {
             let buf = &mut [0; DATABASE_HEADER_SIZE];
-
-            if file_exists {
-                file.pread(0, buf)?;
-                DatabaseHeader::from_bytes(buf)
-            } else {
-                let h = DatabaseHeader::default();
-                h.write_to_buffer(buf);
-                file.pwrite(0, buf)?;
-                h
-            }
+            file.pread(0, buf)?;
+            DatabaseHeader::from_bytes(buf)
+        } else {
+            DatabaseHeader::default()
         };
 
         let db_file = Arc::new(BlockIO::new(
             file,
             db_header.get_page_size(),
             DATABASE_HEADER_SIZE,
+            true,
         ));
 
         let wal_file_path = {
@@ -196,12 +191,16 @@ impl Database {
             wal_file_path,
         )?);
 
-        let pager = Arc::new(Pager::new(db_header, db_file, buffer_pool, wal, cache));
+        let pager = Arc::new(Pager::new(
+            db_header,
+            db_file,
+            buffer_pool,
+            wal,
+            cache,
+            is_initialized,
+        )?);
 
-        Ok(Self {
-            pager,
-            initialized: file_exists,
-        })
+        Ok(Self { pager })
     }
 
     pub fn begin_read<'a>(&'a self) -> DatabaseResult<DatabaseReadTransaction<'a>> {

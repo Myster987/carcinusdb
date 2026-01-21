@@ -265,14 +265,17 @@ pub struct BlockIO<I> {
     /// Size of single block in **bytes**.
     block_size: usize,
     header_size: usize,
+    /// Indicates if header should be skipped when calculating offset.
+    skip_header: bool,
 }
 
 impl<I> BlockIO<I> {
-    pub fn new(io: I, block_size: usize, header_size: usize) -> Self {
+    pub fn new(io: I, block_size: usize, header_size: usize, skip_header: bool) -> Self {
         Self {
             io: UnsafeCell::new(io),
             block_size,
             header_size,
+            skip_header,
         }
     }
 
@@ -285,7 +288,14 @@ impl<I> BlockIO<I> {
         if block_number < 1 {
             return Err(io::Error::from(io::ErrorKind::NotFound));
         }
-        Ok(self.header_size + (block_number - 1) as usize * self.block_size)
+
+        let header_offset = if self.skip_header {
+            0
+        } else {
+            self.header_size
+        };
+
+        Ok(header_offset + (block_number - 1) as usize * self.block_size)
     }
 }
 

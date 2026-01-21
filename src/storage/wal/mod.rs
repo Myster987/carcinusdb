@@ -294,7 +294,12 @@ impl WalManager {
             header
         };
 
-        let wal_file = Arc::new(BlockIO::new(file, page_size as usize, WAL_HEADER_SIZE));
+        let wal_file = Arc::new(BlockIO::new(
+            file,
+            page_size as usize,
+            WAL_HEADER_SIZE,
+            false,
+        ));
 
         let global_wal = GlobalWal::new(wal_file, db_file, header, page_cache)?;
 
@@ -933,6 +938,7 @@ impl WriteAheadLog {
             file,
             db_header.page_size as usize,
             WAL_HEADER_SIZE,
+            false,
         ));
 
         Self::new(wal_file, db_file.clone(), header, page_cache.clone())
