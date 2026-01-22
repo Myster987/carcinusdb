@@ -160,7 +160,7 @@ impl Database {
             file,
             db_header.get_page_size(),
             DATABASE_HEADER_SIZE,
-            true,
+            false,
         ));
 
         let wal_file_path = {
