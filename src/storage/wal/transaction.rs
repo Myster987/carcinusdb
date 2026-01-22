@@ -5,9 +5,9 @@ use parking_lot::{MutexGuard, RwLockReadGuard};
 use crate::{
     storage::{
         self, FrameNumber,
-        wal::{Checksum, WriteAheadLog},
+        wal::{Checksum, READERS_NUM, WriteAheadLog},
     },
-    utils::concurrency::SemaphoreGuard,
+    utils::concurrency::SlotGuard,
 };
 
 /// Generic trait for both read and write transactions.
@@ -34,7 +34,7 @@ pub struct ReadTransaction<'a> {
     checkpoint_guard: RwLockReadGuard<'a, ()>,
     /// There can by only limited number of transactions running at the same
     /// time, so we have to acquire lock to even do something.
-    read_guard: SemaphoreGuard,
+    read_guard: SlotGuard<READERS_NUM>,
 
     /// Minimal frame visible to this transaction in WAL.
     min_frame: FrameNumber,
@@ -47,18 +47,16 @@ impl<'a> ReadTransaction<'a> {
     /// changed some metadata.
     pub fn begin(wal: &'a WriteAheadLog) -> storage::Result<Self> {
         let checkpoint_guard = wal.checkpoint_lock.read();
-        let read_guard = wal.readers.acquire();
 
         let min_frame = wal.get_min_frame();
         let max_frame = wal.get_max_frame();
 
-        // ignore for now because locks migth be enough
-        // // check if this changed and if so, we need to retry.
-        // // I don't know how this would affect locks but maybe
-        // // simple while loop would be enough
-        // if min_frame != wal.get_min_frame() || max_frame != wal.get_max_frame() {
-        //     return Err(storage::Error::RetryTransaction);
-        // }
+        let read_guard = wal.readers.acquire(min_frame);
+
+        // if durring acquiring reade guard frames change, we need to try again.
+        if min_frame != wal.get_min_frame() || max_frame != wal.get_max_frame() {
+            return Err(storage::Error::RetryTransaction);
+        }
 
         Ok(Self {
             checkpoint_guard,

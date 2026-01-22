@@ -11,11 +11,11 @@ use crate::storage::cache::ShardedClockCache;
 use crate::storage::page::{
     DATABASE_HEADER_PAGE_NUMBER, DATABASE_HEADER_SIZE, DatabaseHeader, PageType,
 };
+use crate::storage::wal::WriteAheadLog;
 use crate::storage::wal::transaction::{ReadTx, WriteTx};
-use crate::storage::wal::{LocalWal, WriteAheadLog};
 use crate::utils::io::BlockIO;
 
-use crate::storage::{self, PageNumber};
+use crate::storage::{self, FrameNumber, PageNumber};
 
 use super::page::Page;
 
@@ -38,7 +38,11 @@ impl MemPage {
     pub fn new(id: PageNumber) -> Self {
         Self {
             state: AtomicUsize::new(0),
-            inner: UnsafeCell::new(MemPageInner { id, content: None }),
+            inner: UnsafeCell::new(MemPageInner {
+                id,
+                frame_number: 0,
+                content: None,
+            }),
         }
     }
 
@@ -47,6 +51,7 @@ impl MemPage {
             state: AtomicUsize::new(0),
             inner: UnsafeCell::new(MemPageInner {
                 id,
+                frame_number: 0,
                 content: Some(page),
             }),
         }
@@ -225,6 +230,7 @@ impl MemPage {
 
 pub struct MemPageInner {
     id: PageNumber,
+    frame_number: FrameNumber,
     pub(super) content: Option<Page>,
 }
 
@@ -247,6 +253,10 @@ impl SharedPageGuard {
 
     pub fn id(&self) -> PageNumber {
         self.page.id()
+    }
+
+    pub fn frame_number(&self) -> FrameNumber {
+        self.page.inner().frame_number
     }
 
     pub fn is_error(&self) -> bool {
@@ -335,6 +345,14 @@ impl ExclusivePageGuard {
 
     pub fn id(&self) -> PageNumber {
         self.page.id()
+    }
+
+    pub fn frame_number(&self) -> FrameNumber {
+        self.page.inner().frame_number
+    }
+
+    pub fn set_frame_number(&mut self, value: FrameNumber) {
+        self.page.inner().frame_number = value;
     }
 
     pub fn is_error(&self) -> bool {
@@ -470,6 +488,7 @@ impl Pager {
         {
             let guard = master_page.lock_exclusive();
             guard.write_db_header(DatabaseHeader::default());
+            guard.set_dirty();
         }
 
         self.write_page(&mut tx, master_page)?;
@@ -694,7 +713,7 @@ mod tests {
         {
             let tx = db.begin_read()?;
             let mut cursor = tx.cursor(1);
-            let test = cursor.seek(&BTreeKey::new_table_row_id(1, None));
+            let test = cursor.seek(&BTreeKey::new_table_row_id(10, None));
 
             println!("result: {:?}", test);
 
