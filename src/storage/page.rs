@@ -55,6 +55,7 @@ pub struct DatabaseHeader {
     pub freelist_pages: u32,
     /// Number of `pages` to cache.
     pub default_page_cache_size: u32,
+    pub version_valid_for: u32,
 }
 
 impl DatabaseHeader {
@@ -75,6 +76,7 @@ impl DatabaseHeader {
         let first_freelist_page = u32::from_le_bytes(buffer[18..22].try_into().unwrap());
         let freelist_pages = u32::from_le_bytes(buffer[22..26].try_into().unwrap());
         let default_page_cache_size = u32::from_le_bytes(buffer[26..30].try_into().unwrap());
+        let version_valid_for = u32::from_le_bytes(buffer[30..34].try_into().unwrap());
 
         Self {
             version,
@@ -85,6 +87,7 @@ impl DatabaseHeader {
             first_freelist_page,
             freelist_pages,
             default_page_cache_size,
+            version_valid_for,
         }
     }
 
@@ -103,6 +106,7 @@ impl DatabaseHeader {
         buffer[18..22].copy_from_slice(&self.first_freelist_page.to_le_bytes());
         buffer[22..26].copy_from_slice(&self.freelist_pages.to_le_bytes());
         buffer[26..30].copy_from_slice(&self.default_page_cache_size.to_le_bytes());
+        buffer[30..34].copy_from_slice(&self.version_valid_for.to_le_bytes());
     }
 }
 
@@ -117,6 +121,7 @@ impl Default for DatabaseHeader {
             first_freelist_page: 0,
             freelist_pages: 0,
             default_page_cache_size: DEFAULT_CACHE_SIZE,
+            version_valid_for: 1,
         }
     }
 }

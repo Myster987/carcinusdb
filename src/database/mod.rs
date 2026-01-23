@@ -1,5 +1,4 @@
 use std::{
-    io::Write,
     path::Path,
     sync::{
         Arc,
@@ -61,6 +60,7 @@ pub struct MemDatabaseHeader {
     first_freelist_page: AtomicU32,
     freelist_pages: AtomicU32,
     pub default_page_cache_size: u32,
+    version_valid_for: AtomicU32,
 }
 
 impl MemDatabaseHeader {
@@ -74,6 +74,7 @@ impl MemDatabaseHeader {
             first_freelist_page: self.get_first_freelist_page(),
             freelist_pages: self.get_freelist_pages(),
             default_page_cache_size: self.default_page_cache_size,
+            version_valid_for: self.get_version_valid_for(),
         }
     }
 
@@ -114,6 +115,14 @@ impl MemDatabaseHeader {
                 Some(val.saturating_sub(sub))
             });
     }
+
+    pub fn get_version_valid_for(&self) -> u32 {
+        self.version_valid_for.load(Ordering::Acquire)
+    }
+
+    pub fn increment_version_valid_for(&self) {
+        self.version_valid_for.fetch_add(1, Ordering::Release);
+    }
 }
 
 impl From<DatabaseHeader> for MemDatabaseHeader {
@@ -127,6 +136,7 @@ impl From<DatabaseHeader> for MemDatabaseHeader {
             first_freelist_page: AtomicU32::new(db_header.first_freelist_page),
             freelist_pages: AtomicU32::new(db_header.freelist_pages),
             default_page_cache_size: db_header.default_page_cache_size,
+            version_valid_for: AtomicU32::new(db_header.version_valid_for),
         }
     }
 }
