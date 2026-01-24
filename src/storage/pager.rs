@@ -38,11 +38,7 @@ impl MemPage {
     pub fn new(id: PageNumber) -> Self {
         Self {
             state: AtomicUsize::new(0),
-            inner: UnsafeCell::new(MemPageInner {
-                id,
-                frame_number: 0,
-                content: None,
-            }),
+            inner: UnsafeCell::new(MemPageInner { id, content: None }),
         }
     }
 
@@ -51,7 +47,6 @@ impl MemPage {
             state: AtomicUsize::new(0),
             inner: UnsafeCell::new(MemPageInner {
                 id,
-                frame_number: 0,
                 content: Some(page),
             }),
         }
@@ -230,7 +225,6 @@ impl MemPage {
 
 pub struct MemPageInner {
     id: PageNumber,
-    frame_number: FrameNumber,
     pub(super) content: Option<Page>,
 }
 
@@ -253,10 +247,6 @@ impl SharedPageGuard {
 
     pub fn id(&self) -> PageNumber {
         self.page.id()
-    }
-
-    pub fn frame_number(&self) -> FrameNumber {
-        self.page.inner().frame_number
     }
 
     pub fn is_error(&self) -> bool {
@@ -345,14 +335,6 @@ impl ExclusivePageGuard {
 
     pub fn id(&self) -> PageNumber {
         self.page.id()
-    }
-
-    pub fn frame_number(&self) -> FrameNumber {
-        self.page.inner().frame_number
-    }
-
-    pub fn set_frame_number(&mut self, value: FrameNumber) {
-        self.page.inner().frame_number = value;
     }
 
     pub fn is_error(&self) -> bool {
@@ -480,18 +462,13 @@ impl Pager {
     }
 
     pub fn init(&self) -> storage::Result<()> {
+        log::debug!("Initializing database.");
         let mut tx = self.wal.begin_write_tx()?;
 
-        let master_table_page_number = self.btree_create(&mut tx, BTreeType::Table)?;
-        let master_page = self.read_page(&tx, master_table_page_number)?;
+        let _ = self.btree_create(&mut tx, BTreeType::Table)?;
 
-        {
-            let guard = master_page.lock_exclusive();
-            guard.write_db_header(DatabaseHeader::default());
-            guard.set_dirty();
-        }
+        self.write_header(&mut tx)?;
 
-        self.write_page(&mut tx, master_page)?;
         self.wal.commit(tx)?;
 
         self.wal.force_checkpoint()?;
@@ -586,6 +563,7 @@ impl Pager {
         tx: &mut Tx,
         btree_type: BTreeType,
     ) -> storage::Result<PageNumber> {
+        log::debug!("Creating new B-tree.");
         let page_type = match btree_type {
             BTreeType::Index => PageType::IndexLeaf,
             BTreeType::Table => PageType::TableLeaf,
@@ -708,7 +686,9 @@ mod tests {
 
     #[test]
     fn test_pager() -> anyhow::Result<()> {
-        let db = crate::database::Database::open("./db-file")?;
+        simple_logger::init_with_level(log::Level::Debug).unwrap();
+
+        let db = crate::database::Database::open("./test-db.db")?;
 
         {
             let tx = db.begin_read()?;
