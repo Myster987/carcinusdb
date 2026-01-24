@@ -14,7 +14,7 @@ use crate::{
         btree::BTreeCursor,
         buffer_pool::BufferPool,
         cache::ShardedClockCache,
-        page::{DATABASE_HEADER_SIZE, DatabaseHeader, Page},
+        page::{DATABASE_HEADER_SIZE, DatabaseHeader},
         pager::Pager,
         wal::{
             WriteAheadLog,
@@ -22,7 +22,7 @@ use crate::{
         },
     },
     tcp::server::{TcpServer, connection::Connection},
-    utils::io::{BlockIO, FileOps, IO},
+    utils::io::{BlockIO, IO},
 };
 
 const CARCINUSDB_MASTER_TABLE: &'static str = "carcinusdb_master";
@@ -120,8 +120,12 @@ impl MemDatabaseHeader {
         self.version_valid_for.load(Ordering::Acquire)
     }
 
-    pub fn increment_version_valid_for(&self) {
-        self.version_valid_for.fetch_add(1, Ordering::Release);
+    pub fn set_version_valid_for(&self, value: u32) {
+        self.version_valid_for.store(value, Ordering::Release);
+    }
+
+    pub fn is_consistent(&self) -> bool {
+        self.get_change_counter() == self.get_version_valid_for()
     }
 }
 
@@ -149,7 +153,7 @@ impl Database {
     pub fn open(path: impl AsRef<Path>) -> DatabaseResult<Self> {
         let is_initialized = path.as_ref().exists();
 
-        let mut file = OpenOptions::default()
+        let file = OpenOptions::default()
             .create(true)
             .read(true)
             .write(true)
@@ -170,20 +174,26 @@ impl Database {
             file,
             db_header.get_page_size(),
             DATABASE_HEADER_SIZE,
-            false,
         ));
 
         let wal_file_path = {
-            let mut path = path.as_ref().to_path_buf();
+            let mut path_buf = path.as_ref().to_path_buf();
 
-            if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
-                let new_file_name = format!("{}-wal", file_name);
-                path.set_file_name(new_file_name);
-            } else {
-                panic!("Expected to include database file name in path: {:?}", path);
-            }
+            let file_name = path_buf
+                .file_prefix()
+                .map(|s| s.to_str().unwrap())
+                .expect("Expected to provide database file name.");
 
-            path
+            let extension = path_buf
+                .extension()
+                .map(|s| format!(".{}", s.to_str().unwrap()))
+                .unwrap_or("".to_string());
+
+            let wal_file = format!("{file_name}-wal{extension}");
+
+            path_buf.set_file_name(wal_file);
+
+            path_buf
         };
 
         let buffer_pool = Arc::new(BufferPool::default(db_header.get_page_size()));
@@ -199,6 +209,7 @@ impl Database {
             &db_header,
             &cache,
             wal_file_path,
+            !db_header.is_consistent(),
         )?);
 
         let pager = Arc::new(Pager::new(
