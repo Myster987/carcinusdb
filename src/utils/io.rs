@@ -265,17 +265,14 @@ pub struct BlockIO<I> {
     /// Size of single block in **bytes**.
     block_size: usize,
     header_size: usize,
-    /// Indicates if header should be skipped when calculating offset.
-    include_header_offser: bool,
 }
 
 impl<I> BlockIO<I> {
-    pub fn new(io: I, block_size: usize, header_size: usize, include_header_offser: bool) -> Self {
+    pub fn new(io: I, block_size: usize, header_size: usize) -> Self {
         Self {
             io: UnsafeCell::new(io),
             block_size,
             header_size,
-            include_header_offser,
         }
     }
 
@@ -289,13 +286,7 @@ impl<I> BlockIO<I> {
             return Err(io::Error::from(io::ErrorKind::NotFound));
         }
 
-        let header_offset = if self.include_header_offser {
-            self.header_size
-        } else {
-            0
-        };
-
-        Ok(header_offset + (block_number - 1) as usize * self.block_size)
+        Ok((block_number - 1) as usize * self.block_size)
     }
 }
 
@@ -357,12 +348,13 @@ impl<I: IO> BlockIO<I> {
         &self,
         block_number: BlockNumber,
         buffers: &mut [IoSlice],
+        skip: usize,
     ) -> io::Result<usize> {
         if buffers.len() % 2 != 0 {
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
         }
 
-        let offset = self.calculate_offset(block_number)?;
+        let offset = self.calculate_offset(block_number)? + skip;
 
         self.get_io().pwrite_vec(offset, buffers)
     }
