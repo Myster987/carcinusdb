@@ -272,10 +272,18 @@ impl Page {
         self.write_u32(Self::RIGTH_CHILD_OFFSET, 0);
     }
 
+    /// Returns reference to whole page buffer.
+    pub fn raw(&self) -> &[u8] {
+        self.buffer.as_slice()
+    }
+
+    /// Returns mutable pointer to page content. Skiping `offset` bytes (only
+    /// applied for first db page, when we skip database header).
     pub fn as_ptr(&self) -> &mut [u8] {
         &mut self.buffer.as_mut_slice()[self.offset..]
     }
 
+    /// Returns size of space we can use for cell allocation.
     fn usable_space(&self) -> usize {
         self.buffer.size() - self.header_size()
     }
