@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU32, Ordering},
     },
 };
 
@@ -20,14 +20,14 @@ use crate::{
         self, Error, FrameNumber, PageNumber,
         buffer_pool::BufferPool,
         cache::ShardedClockCache,
-        page::{MAX_PAGE_SIZE, Page},
+        page::Page,
         pager::{self, ExclusivePageGuard},
         wal::transaction::{ReadTransaction, ReadTx, WriteTransaction, WriteTx},
     },
     utils::{
         self,
-        bytes::{byte_swap_u32, pack_u64},
-        concurrency::{AtomicArray, PackedU64, Semaphore},
+        bytes::checksum_crc32,
+        concurrency::AtomicArray,
         io::{BlockIO, FileOps, IO},
     },
 };
@@ -35,13 +35,13 @@ use crate::{
 pub mod transaction;
 
 const WAL_HEADER_SIZE: usize = size_of::<WalHeader>();
-const WAL_HEADER_SIZE_NO_CHECKSUM: usize = WAL_HEADER_SIZE - size_of::<[u32; 2]>();
+const WAL_HEADER_SIZE_NO_CHECKSUM: usize = WAL_HEADER_SIZE - size_of::<u32>();
 const FRAME_HEADER_SIZE: usize = size_of::<FrameHeader>();
 pub const READERS_NUM: usize = 5;
 
 const DEFAULT_CHECKPOINT_SIZE: FrameNumber = 1000;
 
-type Checksum = (u32, u32);
+type Checksum = u32;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -56,8 +56,8 @@ pub struct WalHeader {
     db_size: u32,
     /// Number of frames transfered from WAL to DB.
     backfilled_number: u32,
-    /// Padding to make header size divisible by 8.
-    padding: [u8; 4],
+    // /// Padding to make header size divisible by 8.
+    // padding: [u8; 4],
     /// Checksum of header
     checksum: Checksum,
 }
@@ -65,7 +65,7 @@ pub struct WalHeader {
 impl WalHeader {
     /// Recalculates checksum of all fields except `checksum`.
     pub fn update_checksum(&mut self) {
-        self.checksum = self.checksum_self(None);
+        self.checksum = self.checksum_self();
     }
 
     pub fn default(page_size: u32, db_size: u32) -> Self {
@@ -75,24 +75,20 @@ impl WalHeader {
             last_checkpointed: 0,
             db_size,
             backfilled_number: 0,
-            checksum: (0, 0),
-            padding: [0; 4],
+            checksum: 0,
         };
         wal_header.update_checksum();
         wal_header
     }
 
+    /// Rebuilds header from buffer of bytes.
     pub fn from_bytes(buffer: &[u8]) -> Self {
         let page_size = u32::from_le_bytes(buffer[0..4].try_into().unwrap());
         let checkpoint_seq_num = u32::from_le_bytes(buffer[4..8].try_into().unwrap());
         let last_checkpointed = u32::from_le_bytes(buffer[8..12].try_into().unwrap());
         let db_size = u32::from_le_bytes(buffer[12..16].try_into().unwrap());
         let backfilled_number = u32::from_le_bytes(buffer[16..20].try_into().unwrap());
-        let padding = buffer[20..24].try_into().unwrap();
-        let checksum = (
-            u32::from_le_bytes(buffer[24..28].try_into().unwrap()),
-            u32::from_le_bytes(buffer[28..32].try_into().unwrap()),
-        );
+        let checksum = u32::from_le_bytes(buffer[20..24].try_into().unwrap());
 
         Self {
             page_size,
@@ -101,40 +97,47 @@ impl WalHeader {
             db_size,
             backfilled_number,
             checksum,
-            padding,
         }
     }
 
+    /// Returns bytes representation of header.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buffer = vec![0; WAL_HEADER_SIZE];
         self.write_to_buffer(&mut buffer);
         buffer
     }
 
+    /// Writes WAL header to given `buffer`.
+    ///
+    /// # Safety
+    ///
+    /// Given `buffer` must be at least `WAL_HEADER_SIZE` long. This function
+    /// writes all header content at the beginning of `buffer`, so keep this
+    /// in mind.
     pub fn write_to_buffer(&self, buffer: &mut [u8]) {
         buffer[0..4].copy_from_slice(&self.page_size.to_le_bytes());
         buffer[4..8].copy_from_slice(&self.checkpoint_seq_num.to_le_bytes());
         buffer[8..12].copy_from_slice(&self.last_checkpointed.to_le_bytes());
         buffer[12..16].copy_from_slice(&self.db_size.to_le_bytes());
         buffer[16..20].copy_from_slice(&self.backfilled_number.to_le_bytes());
-        buffer[20..24].copy_from_slice(&self.padding);
-        buffer[24..28].copy_from_slice(&self.checksum.0.to_le_bytes());
-        buffer[28..32].copy_from_slice(&self.checksum.1.to_le_bytes());
+        buffer[20..24].copy_from_slice(&self.checksum.to_le_bytes());
     }
 
-    fn checksum_self(&self, seed: Option<Checksum>) -> Checksum {
+    /// Returns checksum of header without checksum field.
+    fn checksum_self(&self) -> Checksum {
         let header_bytes = &utils::cast::bytes_of(self)[..WAL_HEADER_SIZE_NO_CHECKSUM];
-        checksum_bytes(header_bytes, seed)
+        checksum_crc32(header_bytes)
     }
 }
 
+/// Memory representation of WAL header.
 pub struct MemWalHeader {
     pub page_size: u32,
     checkpoint_seq_num: AtomicU32,
     last_checkpointed: AtomicU32,
     db_size: AtomicU32,
     backfilled_number: AtomicU32,
-    checksum: AtomicU64,
+    checksum: AtomicU32,
 }
 
 impl MemWalHeader {
@@ -146,12 +149,11 @@ impl MemWalHeader {
             db_size: self.get_db_size(),
             backfilled_number: self.get_backfilled_number(),
             checksum: self.get_checksum(),
-            padding: [0; 4],
         }
     }
 
     pub fn update_checksum(&self) {
-        let checksum = self.into_raw_header().checksum_self(None);
+        let checksum = self.into_raw_header().checksum_self();
         self.set_checksum(checksum);
     }
 
@@ -172,7 +174,7 @@ impl MemWalHeader {
     }
 
     pub fn get_checksum(&self) -> Checksum {
-        self.checksum.load_packed(Ordering::Acquire)
+        self.checksum.load(Ordering::Acquire)
     }
 
     pub fn increment_checkpoint_seq_num(&self) {
@@ -195,8 +197,8 @@ impl MemWalHeader {
         self.backfilled_number.fetch_add(value, Ordering::Relaxed);
     }
 
-    pub fn set_checksum(&self, (val_1, val_2): Checksum) {
-        self.checksum.store_packed(val_1, val_2, Ordering::Release);
+    pub fn set_checksum(&self, value: Checksum) {
+        self.checksum.store(value, Ordering::Release);
     }
 }
 
@@ -208,7 +210,7 @@ impl From<WalHeader> for MemWalHeader {
             last_checkpointed: AtomicU32::new(wal_header.last_checkpointed),
             db_size: AtomicU32::new(wal_header.db_size),
             backfilled_number: AtomicU32::new(wal_header.backfilled_number),
-            checksum: AtomicU64::new(pack_u64(wal_header.checksum.0, wal_header.checksum.1)),
+            checksum: AtomicU32::new(wal_header.checksum),
         }
     }
 }
@@ -229,10 +231,7 @@ impl FrameHeader {
     pub fn from_bytes(buffer: &[u8]) -> Self {
         let page_number = u32::from_le_bytes(buffer[0..4].try_into().unwrap());
         let db_size = u32::from_le_bytes(buffer[4..8].try_into().unwrap());
-        let checksum = (
-            u32::from_le_bytes(buffer[8..12].try_into().unwrap()),
-            u32::from_le_bytes(buffer[12..16].try_into().unwrap()),
-        );
+        let checksum = u32::from_le_bytes(buffer[8..12].try_into().unwrap());
 
         Self {
             page_number,
@@ -244,8 +243,7 @@ impl FrameHeader {
     pub fn to_bytes(&self, buffer: &mut [u8]) {
         buffer[0..4].copy_from_slice(&self.page_number.to_le_bytes());
         buffer[4..8].copy_from_slice(&self.db_size.to_le_bytes());
-        buffer[8..12].copy_from_slice(&self.checksum.0.to_le_bytes());
-        buffer[12..16].copy_from_slice(&self.checksum.1.to_le_bytes());
+        buffer[8..12].copy_from_slice(&self.checksum.to_le_bytes());
     }
 }
 
@@ -257,6 +255,8 @@ pub struct WriteAheadLog {
 
     /// Size of WAL in pages after which we should trigger checkpoint.
     trigger_checkpoint: u32,
+    /// Database header in memory.
+    db_header: Arc<MemDatabaseHeader>,
     /// WAL header loaded to memory.
     header: Arc<MemWalHeader>,
     /// WAL index that sppeds up searching for frame.
@@ -267,8 +267,8 @@ pub struct WriteAheadLog {
     // min_frame: AtomicU32,
     /// Last commited frame in transaction.
     max_frame: AtomicU32,
-    /// Checksum of last frame in WAL. It is cumulative checksum of all pages. Stored as two u32 packed in single atomic.
-    last_checksum: AtomicU64,
+    // /// Checksum of last frame in WAL. It is cumulative checksum of all pages. Stored as two u32 packed in single atomic.
+    // last_checksum: AtomicU32,
 
     // /// Number of frames transfered to DB from WAL.
     // backfilled_number: AtomicU32,
@@ -290,6 +290,7 @@ impl WriteAheadLog {
         db_header: &Arc<MemDatabaseHeader>,
         page_cache: &Arc<ShardedClockCache>,
         wal_file_path: PathBuf,
+        replay_wal: bool,
     ) -> storage::Result<Self> {
         let file_exists = wal_file_path.exists();
 
@@ -303,6 +304,7 @@ impl WriteAheadLog {
             .open(wal_file_path)?;
 
         if !file_exists {
+            log::debug!("Initializing WAL.");
             let buf = &mut [0; WAL_HEADER_SIZE];
             let default_header =
                 WalHeader::default(db_header.page_size, db_header.get_database_size());
@@ -319,7 +321,7 @@ impl WriteAheadLog {
             let header = WalHeader::from_bytes(buf);
 
             // validate header checksum
-            if header.checksum != header.checksum_self(None) {
+            if header.checksum != header.checksum_self() {
                 return Err(Error::InvalidChecksum);
             }
             header
@@ -329,45 +331,47 @@ impl WriteAheadLog {
             file,
             db_header.page_size as usize,
             WAL_HEADER_SIZE,
-            true,
         ));
 
-        Self::new(wal_file, db_file.clone(), header, page_cache.clone())
+        Self::new(
+            wal_file,
+            db_file.clone(),
+            db_header.clone(),
+            header,
+            page_cache.clone(),
+            replay_wal,
+        )
     }
 
     pub fn new(
         wal_file: Arc<BlockIO<File>>,
         db_file: Arc<BlockIO<File>>,
+        db_header: Arc<MemDatabaseHeader>,
         header: WalHeader,
         page_cache: Arc<ShardedClockCache>,
+        replay_wal: bool,
     ) -> storage::Result<Self> {
         let frame_size = header.page_size as usize + FRAME_HEADER_SIZE;
-        // let backfilled_number = header.backfilled_number;
-        // let checkpoint_seq_num = header.checkpoint_seq_num;
         let index = Arc::new(WalIndex::new());
-
-        let checksum = header.checksum;
 
         let wal = Self {
             wal_file,
             db_file,
             frame_size,
             trigger_checkpoint: DEFAULT_CHECKPOINT_SIZE,
+            db_header,
             header: Arc::new(MemWalHeader::from(header)),
             index,
             page_cache,
-            // min_frame: AtomicU32::new(min_frame),
             max_frame: AtomicU32::new(0),
-            last_checksum: AtomicU64::new(pack_u64(checksum.0, checksum.1)),
-            // backfilled_number: AtomicU32::new(backfilled_number),
-            // checkpoint_seq_num: AtomicU32::new(checkpoint_seq_num),
-            // by default it is set to u32::MAX to indicate that it is free and it is quite not possible for WAL to outgrow 17 TB of 4KB pages.
             readers: Arc::new(AtomicArray::new()),
             writer: Mutex::new(()),
             checkpoint_lock: RwLock::new(()),
         };
 
-        wal.replay()?;
+        if replay_wal {
+            wal.replay()?;
+        }
 
         Ok(wal)
     }
@@ -375,6 +379,8 @@ impl WriteAheadLog {
     /// Reconstructs all the changes registered in WAL and if needed performs
     /// checkpoint.
     pub fn replay(&self) -> storage::Result<()> {
+        log::debug!("Replaying WAL.");
+
         // block all other operations. needs exclusive access.
         let checkpoint_guard = self.checkpoint_lock.write();
         // raw WAL header.
@@ -384,23 +390,17 @@ impl WriteAheadLog {
         let frame_size = header.page_size as usize + FRAME_HEADER_SIZE;
 
         // increases after each valid checkpoint.
-        let mut max_frame = 0;
-        let mut transaction_frames = vec![];
+        let mut max_frame = self.header.get_last_checkpointed();
+        let mut transaction_frames = Vec::new();
 
-        // we start with wal header checksum as if WAL was empty.
-        let mut running_checksum = header.checksum_self(None);
         let mut buffer = vec![0; frame_size];
 
-        // start at the beginning of WAL.
-        let mut frame_number = 1;
+        // start after last checkpointed entry.
+        let mut frame_number = max_frame + 1;
 
         loop {
-            let (valid, is_commit, page_number) = validate_frame(
-                &self.wal_file,
-                frame_number,
-                &mut running_checksum,
-                &mut buffer,
-            )?;
+            let (valid, is_commit, page_number) =
+                validate_frame(&self.wal_file, frame_number, &mut buffer)?;
             if !valid {
                 break;
             }
@@ -418,7 +418,6 @@ impl WriteAheadLog {
         }
 
         self.set_max_frame(max_frame);
-        self.set_last_checksum(running_checksum);
 
         drop(checkpoint_guard);
 
@@ -443,21 +442,12 @@ impl WriteAheadLog {
         self.max_frame.load(Ordering::Acquire)
     }
 
-    pub fn get_last_checksum(&self) -> Checksum {
-        self.last_checksum.load_packed(Ordering::Acquire)
-    }
-
     pub fn set_min_frame(&self, value: FrameNumber) {
         self.header.set_last_checkpointed(value);
     }
 
     pub fn set_max_frame(&self, value: FrameNumber) {
         self.max_frame.store(value, Ordering::Release);
-    }
-
-    pub fn set_last_checksum(&self, value: Checksum) {
-        self.last_checksum
-            .store_packed(value.0, value.1, Ordering::Release);
     }
 }
 
@@ -475,8 +465,13 @@ impl WriteAheadLog {
         std::mem::forget(tx);
 
         self.wal_file.persist()?;
-        self.set_last_checksum(inner.last_checksum);
+        // self.set_last_checksum(inner.last_checksum);
         self.set_max_frame(inner.max_frame);
+
+        // increment db change counter.
+        self.db_header.increment_change_counter();
+        self.db_file
+            .write_header(&self.db_header.into_raw_header().to_bytes())?;
 
         drop(inner.checkpoint_guard);
 
@@ -497,7 +492,8 @@ impl WriteAheadLog {
 
     /// Reads only page from WAL (skips header).
     fn read_raw(&self, frame_number: FrameNumber, buffer: &mut [u8]) -> storage::Result<usize> {
-        let offset = self.calculate_frame_offset(frame_number)? + FRAME_HEADER_SIZE;
+        let offset =
+            self.calculate_frame_offset(frame_number)? + WAL_HEADER_SIZE + FRAME_HEADER_SIZE;
         self.wal_file
             .raw_read(offset, buffer)
             .map_err(|err| err.into())
@@ -516,8 +512,6 @@ impl WriteAheadLog {
             return Ok(None);
         }
 
-        // pager::begin_read_page(&page)?;
-
         let visible_frame_number = self
             .index
             .get(&page_number, transaction.tx_max_frame())
@@ -525,11 +519,11 @@ impl WriteAheadLog {
 
         let mut buffer = buffer_pool.get();
 
-        let read_result = self
-            .wal_file
-            .read(visible_frame_number, &mut buffer, FRAME_HEADER_SIZE);
-
-        // complete_read_page(&read_result, &page, buffer);
+        let read_result = self.wal_file.read(
+            visible_frame_number,
+            &mut buffer,
+            WAL_HEADER_SIZE + FRAME_HEADER_SIZE,
+        );
 
         match read_result {
             Ok(bytes_read) => {
@@ -566,16 +560,11 @@ impl WriteAheadLog {
             .map(|_| vec![0; FRAME_HEADER_SIZE])
             .collect();
 
-        let mut running_checksum = transaction.tx_last_checksum();
-
         for (i, page) in pages.iter().enumerate() {
-            // begin_write_page(page)?;
-
             let page_number = page.id();
-            let page_content = page.as_ptr();
-            let checksum = checksum_bytes(page_content, Some(running_checksum));
+            let page_content = page.raw();
+            let checksum = checksum_crc32(page_content);
 
-            running_checksum = checksum;
             let commit_db_size = if i + 1 == pages.len() { db_size } else { 0 };
 
             let frame_header = FrameHeader {
@@ -594,19 +583,19 @@ impl WriteAheadLog {
 
         let frame_number = transaction.tx_max_frame() + 1;
 
-        let write_result = self.wal_file.write_vectored(frame_number, &mut io_buffers);
+        let write_result =
+            self.wal_file
+                .write_vectored(frame_number, &mut io_buffers, WAL_HEADER_SIZE);
 
         for page in pages.iter_mut() {
             pager::complete_write_page(&write_result, page, false);
         }
 
-        transaction.tx_set_last_checksum(running_checksum);
         transaction.tx_set_max_frame(transaction.tx_max_frame() + pages_number as FrameNumber);
 
         for (i, page) in pages.iter_mut().enumerate() {
             let current_frame_number = frame_number + i as FrameNumber;
             self.index.insert(page.id(), current_frame_number);
-            page.set_frame_number(current_frame_number);
         }
 
         Ok(())
@@ -632,7 +621,6 @@ impl WriteAheadLog {
 
     fn _checkpoint(&self) -> storage::Result<()> {
         let exclusive_lock = self.checkpoint_lock.write();
-        // let mut wal_header = self.global_wal.header.lock();
 
         let max_frame = self.get_max_frame();
         let min_visible_frame = self.readers.min_visible_frame();
@@ -640,7 +628,7 @@ impl WriteAheadLog {
         let frames_to_checkpoint = self.index.latest_frames_sorted(max_frame);
 
         let to_backfill = frames_to_checkpoint.len() as u32;
-        let mut temp_buffer = vec![0; self.frame_size - FRAME_HEADER_SIZE];
+        let mut temp_buffer = vec![0; self.db_header.page_size as usize];
         let mut successfully_backfilled = 0;
 
         // iterates over pages that should be moved to db file. If they are
@@ -657,7 +645,7 @@ impl WriteAheadLog {
             let offset = self.db_file.calculate_offset(page_number)?;
             if let Some(mem_page) = self.page_cache.get(&page_number) {
                 let guard = mem_page.lock_exclusive();
-                self.db_file.raw_write(offset, guard.as_ptr())?;
+                self.db_file.raw_write(offset, guard.raw())?;
                 guard.clear_dirty();
             } else {
                 self.read_raw(frame_number, &mut temp_buffer)?;
@@ -668,32 +656,47 @@ impl WriteAheadLog {
         // persist changes to db file
         self.db_file.persist()?;
 
-        self.header.increment_checkpoint_seq_num();
-
         let is_full_checkpoint = to_backfill == successfully_backfilled;
 
         if is_full_checkpoint {
+            // increment db change counter and mark it as consistent.
+            self.db_header.increment_change_counter();
+            self.db_header
+                .set_version_valid_for(self.db_header.get_change_counter());
+            self.db_file
+                .write_header(&self.db_header.into_raw_header().to_bytes())?;
+            self.db_file.persist()?;
+
             // change wal header params, because it will be truncated
+            self.header.increment_checkpoint_seq_num();
             self.set_min_frame(0);
             self.set_max_frame(0);
             self.header.set_backfilled_number(0);
             self.header.update_checksum();
+
+            // write header to WAL
+            self.write_header()?;
+
+            // persist changes to WAL header
+            self.wal_file.persist()?;
+
+            self.index.clear();
+            self.wal_file.truncate(0)?;
         } else {
+            // increment db change counter.
+            self.db_header.increment_change_counter();
+            self.db_file
+                .write_header(&self.db_header.into_raw_header().to_bytes())?;
+            self.db_file.persist()?;
+
+            self.header.increment_checkpoint_seq_num();
             self.set_min_frame(min_visible_frame.unwrap());
             self.header.add_backfilled_number(successfully_backfilled);
-        }
 
-        // write header to WAL
-        self.write_header()?;
+            self.write_header()?;
 
-        // persist changes to WAL header
-        self.wal_file.persist()?;
+            self.wal_file.persist()?;
 
-        if to_backfill == successfully_backfilled {
-            // removes all frames from WAL leaving the header
-            self.wal_file.truncate(0)?;
-            self.index.clear();
-        } else {
             for (page_number, frame_number) in
                 &frames_to_checkpoint[..successfully_backfilled as usize]
             {
@@ -786,70 +789,28 @@ impl WalIndex {
     }
 }
 
-/// Validates if given frame is valid and WAL isn't corrupted. If if frame isn't valid,
-/// it won't update `running_checksum`. Returns two boolean variables and page number.
-/// First bool is true if frame checksum is valid and second bool is true if this frame
-///  was commit frame.
-///
-/// # Note
-///
-/// Use this function only when scanning WAL from beginning. \
-/// Otherwise checksum will not be calculated correctly
+/// Validates if given frame is valid and WAL isn't corrupted. Returns two
+/// boolean variables and page number. First bool is true if frame checksum
+/// is valid and second bool is true if this frame was commit frame.
 fn validate_frame(
     wal_file: &Arc<BlockIO<File>>,
     frame_number: FrameNumber,
-    running_checksum: &mut Checksum,
     buffer: &mut [u8],
 ) -> storage::Result<(bool, bool, PageNumber)> {
-    let offset = wal_file.calculate_offset(frame_number)?;
+    let offset = wal_file.calculate_offset(frame_number)? + WAL_HEADER_SIZE;
     if wal_file.raw_read(offset, buffer).is_err() {
         return Ok((false, false, 0));
     }
 
     let frame_header = FrameHeader::from_bytes(buffer);
 
-    // calculates checksum of given frame's page content with previous frame checksum as seed.
-    let new_checksum = checksum_bytes(&buffer[FRAME_HEADER_SIZE..], Some(*running_checksum));
+    // calculates checksum of given frame without checksum filed itself.
+    let new_checksum = checksum_crc32(&buffer[FRAME_HEADER_SIZE..]);
 
     let valid = frame_header.checksum == new_checksum;
     let is_commit = frame_header.db_size != 0;
 
-    if valid {
-        *running_checksum = new_checksum;
-    }
-
     Ok((valid, is_commit, frame_header.page_number))
-}
-
-pub fn checksum_bytes(data: &[u8], seed: Option<Checksum>) -> Checksum {
-    let mut s1 = 0;
-    let mut s2 = 0;
-
-    if let Some((seed_1, seed_2)) = seed {
-        s1 = seed_1;
-        s2 = seed_2;
-    }
-
-    let len = data.len();
-
-    assert!(
-        len >= 8 && len % 8 == 0 && len <= MAX_PAGE_SIZE,
-        "{} needs to be divisible by 8",
-        len
-    );
-
-    // we need to cast it into u32
-    let data = utils::cast::cast_slice(data);
-
-    for chunk in data.chunks(2) {
-        let a = chunk[0];
-        let b = chunk[1];
-
-        s1 = s1.wrapping_add(byte_swap_u32(a).wrapping_add(s2));
-        s2 = s2.wrapping_add(byte_swap_u32(b).wrapping_add(s1));
-    }
-
-    (s1, s2)
 }
 
 #[cfg(test)]

@@ -20,12 +20,12 @@ pub trait ReadTx {
 
 /// Trait for write transaction. Write transaction must allow both read and write.
 pub trait WriteTx: ReadTx {
-    /// Returns last_checksum stored by transaction locally.
-    fn tx_last_checksum(&self) -> Checksum;
+    // /// Returns last_checksum stored by transaction locally.
+    // fn tx_last_checksum(&self) -> Checksum;
     /// Sets new local max_frame for transaction.
     fn tx_set_max_frame(&mut self, new_max_frame: FrameNumber);
-    /// Sets new local last_checksum for transaction.
-    fn tx_set_last_checksum(&mut self, new_checksum: Checksum);
+    // /// Sets new local last_checksum for transaction.
+    // fn tx_set_last_checksum(&mut self, new_checksum: Checksum);
 }
 
 /// Read transaction that holds all the necessary guards and local variables.
@@ -90,7 +90,7 @@ pub struct WriteTransactionInner<'a> {
     pub write_guard: MutexGuard<'a, ()>,
     pub min_frame: FrameNumber,
     pub max_frame: FrameNumber,
-    pub last_checksum: Checksum,
+    // pub last_checksum: Checksum,
 }
 
 impl<'a> WriteTransaction<'a> {
@@ -100,7 +100,7 @@ impl<'a> WriteTransaction<'a> {
 
         let min_frame = wal.get_min_frame();
         let max_frame = wal.get_max_frame();
-        let last_checksum = wal.get_last_checksum();
+        // let last_checksum = wal.get_last_checksum();
 
         // ignore for now because locks migth be enough
         // // check if this changed and if so, we need to retry.
@@ -120,7 +120,7 @@ impl<'a> WriteTransaction<'a> {
                 write_guard,
                 min_frame,
                 max_frame,
-                last_checksum,
+                // last_checksum,
             }),
         })
     }
@@ -147,18 +147,18 @@ impl ReadTx for WriteTransaction<'_> {
 }
 
 impl WriteTx for WriteTransaction<'_> {
-    #[inline]
-    fn tx_last_checksum(&self) -> Checksum {
-        self.inner.last_checksum
-    }
+    // #[inline]
+    // fn tx_last_checksum(&self) -> Checksum {
+    //     self.inner.last_checksum
+    // }
 
     #[inline]
     fn tx_set_max_frame(&mut self, new_max_frame: FrameNumber) {
         self.inner.max_frame = new_max_frame;
     }
 
-    #[inline]
-    fn tx_set_last_checksum(&mut self, new_checksum: Checksum) {
-        self.inner.last_checksum = new_checksum;
-    }
+    // #[inline]
+    // fn tx_set_last_checksum(&mut self, new_checksum: Checksum) {
+    //     self.inner.last_checksum = new_checksum;
+    // }
 }
