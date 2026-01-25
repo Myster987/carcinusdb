@@ -15,7 +15,7 @@ use crate::storage::wal::WriteAheadLog;
 use crate::storage::wal::transaction::{ReadTx, WriteTx};
 use crate::utils::io::BlockIO;
 
-use crate::storage::{self, FrameNumber, PageNumber};
+use crate::storage::{self, PageNumber};
 
 use super::page::Page;
 
@@ -241,10 +241,6 @@ impl SharedPageGuard {
             .expect("Page shouldn't be None")
     }
 
-    pub fn into_pin<T>(self, inner: T) -> PagePin<Self, T> {
-        PagePin::new(self, inner)
-    }
-
     pub fn id(&self) -> PageNumber {
         self.page.id()
     }
@@ -329,10 +325,6 @@ impl ExclusivePageGuard {
         self.page.inner().content.take()
     }
 
-    pub fn into_pin<T>(self, inner: T) -> PagePin<Self, T> {
-        PagePin::new(self, inner)
-    }
-
     pub fn id(&self) -> PageNumber {
         self.page.id()
     }
@@ -391,35 +383,6 @@ impl DerefMut for ExclusivePageGuard {
 impl Drop for ExclusivePageGuard {
     fn drop(&mut self) {
         self.page.unlock_exclusive();
-    }
-}
-
-/// Wrapper that will hold lock to page until it's dropped.
-pub struct PagePin<G, T> {
-    pub guard: G,
-    inner: Option<T>,
-}
-
-impl<G, T> PagePin<G, T> {
-    pub fn new(guard: G, inner: T) -> Self {
-        Self {
-            guard,
-            inner: Some(inner),
-        }
-    }
-}
-
-impl<G, T> Deref for PagePin<G, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.inner.as_ref().unwrap()
-    }
-}
-
-impl<T> DerefMut for PagePin<ExclusivePageGuard, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.inner.as_mut().unwrap()
     }
 }
 
@@ -699,10 +662,6 @@ mod tests {
 
             tx.commit()?;
         }
-
-        // let mut pager = db.pager();
-
-        // println!("{:?}", *pager.read_page(new_page)?.lock_shared());
 
         Ok(())
     }
