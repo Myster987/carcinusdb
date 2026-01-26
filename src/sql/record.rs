@@ -34,6 +34,10 @@ impl<'a> Record<'a> {
         Self::new(Cow::Owned(payload))
     }
 
+    pub fn raw(&'a self) -> &'a [u8] {
+        &self.payload
+    }
+
     pub fn get_value(&'a self, index: usize) -> ValueRef<'a> {
         self.try_get_value(index).unwrap()
     }
@@ -48,6 +52,17 @@ impl<'a> Record<'a> {
 
     pub fn len(&self) -> usize {
         self.cursor.borrow_mut().len(&self.payload)
+    }
+
+    pub fn values(&'a self) -> Vec<ValueRef<'a>> {
+        let len = self.len();
+        let mut values = Vec::with_capacity(len);
+
+        for i in 0..len {
+            values.push(self.get_value(i));
+        }
+
+        values
     }
 
     pub fn to_owned(&self) -> Record<'static> {
@@ -163,6 +178,7 @@ impl RecordCursor {
         parse_value(payload, serial_type)
     }
 
+    /// Returns number of columns in this record.
     pub fn len(&mut self, payload: &[u8]) -> usize {
         let _ = self.full_parse(payload);
         self.serial_types.len()
