@@ -1,5 +1,7 @@
 use std::{
+    cell::RefCell,
     path::Path,
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
@@ -228,7 +230,7 @@ impl Database {
         let wal_tx = self.pager.wal.begin_read_tx()?;
 
         Ok(DatabaseReadTransaction {
-            wal_tx,
+            wal_tx: Rc::new(RefCell::new(wal_tx)),
             pager: self.pager.clone(),
         })
     }
@@ -237,20 +239,20 @@ impl Database {
         let wal_tx = self.pager.wal.begin_write_tx()?;
 
         Ok(DatabaseWriteTransaction {
-            wal_tx,
+            wal_tx: Rc::new(RefCell::new(wal_tx)),
             pager: self.pager.clone(),
         })
     }
 }
 
 pub struct DatabaseReadTransaction<'tx> {
-    wal_tx: ReadTransaction<'tx>,
+    wal_tx: Rc<RefCell<ReadTransaction<'tx>>>,
     pager: Arc<Pager>,
 }
 
 impl<'tx> DatabaseReadTransaction<'tx> {
-    pub fn cursor(&'tx self, root: PageNumber) -> BTreeCursor<'tx, ReadTransaction<'tx>> {
-        BTreeCursor::new(&self.wal_tx, &self.pager, root)
+    pub fn cursor(&self, root: PageNumber) -> BTreeCursor<'_, ReadTransaction<'tx>> {
+        BTreeCursor::new(self.wal_tx.clone(), &self.pager, root)
     }
 
     pub fn commit(self) -> DatabaseResult<()> {
@@ -259,17 +261,21 @@ impl<'tx> DatabaseReadTransaction<'tx> {
 }
 
 pub struct DatabaseWriteTransaction<'tx> {
-    wal_tx: WriteTransaction<'tx>,
+    wal_tx: Rc<RefCell<WriteTransaction<'tx>>>,
     pager: Arc<Pager>,
 }
 
 impl<'tx> DatabaseWriteTransaction<'tx> {
-    pub fn cursor(&'tx self, root: PageNumber) -> BTreeCursor<'tx, WriteTransaction<'tx>> {
-        BTreeCursor::new(&self.wal_tx, &self.pager, root)
+    pub fn cursor(&self, root: PageNumber) -> BTreeCursor<'_, WriteTransaction<'tx>> {
+        BTreeCursor::new(self.wal_tx.clone(), &self.pager, root)
     }
 
     pub fn commit(self) -> DatabaseResult<()> {
-        self.pager.wal.commit(self.wal_tx)?;
+        let wal_tx = Rc::into_inner(self.wal_tx)
+            .expect("Something is still using this transaction")
+            .into_inner();
+
+        self.pager.wal.commit(wal_tx)?;
 
         Ok(())
     }

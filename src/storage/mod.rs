@@ -43,6 +43,10 @@ pub enum Error {
     #[error("could not begin transaction correctly. please try again")]
     RetryTransaction,
 
+    // b-tree
+    #[error("attempted to insert key, that already exists.")]
+    DuplicateKey,
+
     // cache
     #[error(transparent)]
     Cache(#[from] cache::Error),

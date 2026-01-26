@@ -1,43 +1,58 @@
-use std::{borrow::Cow, cmp::Ordering, sync::Arc};
+use std::{borrow::Cow, cell::RefCell, cmp::Ordering, rc::Rc, sync::Arc};
 
 use crate::{
     sql::record::{Record, compare_records, records_equal},
     storage::{
         self, PageNumber, SlotNumber,
-        page::{BTreeCellRef, CellOps, Page},
+        page::{
+            BTreeCell, BTreeCellRef, CellOps, IndexLeafCell, Page, TableLeafCell, cell_overflows,
+        },
         pager::{Pager, SharedPageGuard},
-        wal::transaction::{ReadTx, WriteTransaction},
+        wal::transaction::{ReadTx, WriteTx},
     },
+    utils::bytes::VarInt,
 };
 
 #[derive(Debug)]
 pub enum BTreeKey<'a> {
-    TableRowId((i64, Option<Record<'a>>)),
+    TableKey((i64, Option<Record<'a>>)),
     IndexKey(Record<'a>),
 }
 
 impl<'a> BTreeKey<'a> {
-    pub fn new_table_row_id(row_id: i64, record: Option<Record<'a>>) -> Self {
-        BTreeKey::TableRowId((row_id, record))
+    pub fn new_table_key(row_id: i64, record: Option<Record<'a>>) -> Self {
+        Self::TableKey((row_id, record))
     }
 
     pub fn new_index_key(record: Record<'a>) -> Self {
-        BTreeKey::IndexKey(record)
+        Self::IndexKey(record)
     }
 
     pub fn get_record(&self) -> Option<Record<'a>> {
         match self {
-            BTreeKey::TableRowId((_, record)) => record.clone(),
-            BTreeKey::IndexKey(record) => Some(record.clone()),
+            Self::TableKey((_, record)) => record.clone(),
+            Self::IndexKey(record) => Some(record.clone()),
+        }
+    }
+
+    /// Returns row id of this B-tree key.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure that this is valid table key.
+    pub fn row_id(&self) -> i64 {
+        match self {
+            Self::TableKey((row_id, _)) => *row_id,
+            _ => panic!("Shouldn't be called on index keys."),
         }
     }
 
     pub fn to_owned(&self) -> BTreeKey<'static> {
         match self {
-            BTreeKey::TableRowId((row_id, record)) => {
-                BTreeKey::TableRowId((*row_id, record.as_ref().map(|r| r.to_owned())))
+            Self::TableKey((row_id, record)) => {
+                BTreeKey::TableKey((*row_id, record.as_ref().map(|r| r.to_owned())))
             }
-            BTreeKey::IndexKey(record) => BTreeKey::IndexKey(record.to_owned()),
+            Self::IndexKey(record) => BTreeKey::IndexKey(record.to_owned()),
         }
     }
 }
@@ -45,7 +60,7 @@ impl<'a> BTreeKey<'a> {
 impl PartialEq for BTreeKey<'_> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::TableRowId((id1, _)), Self::TableRowId((id2, _))) => id1 == id2,
+            (Self::TableKey((id1, _)), Self::TableKey((id2, _))) => id1 == id2,
             (Self::IndexKey(r1), Self::IndexKey(r2)) => records_equal(r1, r2),
             _ => false, // Different key types are never equal
         }
@@ -64,14 +79,14 @@ impl Ord for BTreeKey<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
             // Table keys: compare only by row_id
-            (Self::TableRowId((id1, _)), Self::TableRowId((id2, _))) => id1.cmp(id2),
+            (Self::TableKey((id1, _)), Self::TableKey((id2, _))) => id1.cmp(id2),
 
             // Index keys: compare records lexicographically
             (Self::IndexKey(r1), Self::IndexKey(r2)) => compare_records(r1, r2),
 
             // Different types: table keys < index keys (arbitrary but consistent)
-            (Self::TableRowId(_), Self::IndexKey(_)) => Ordering::Less,
-            (Self::IndexKey(_), Self::TableRowId(_)) => Ordering::Greater,
+            (Self::TableKey(_), Self::IndexKey(_)) => Ordering::Less,
+            (Self::IndexKey(_), Self::TableKey(_)) => Ordering::Greater,
         }
     }
 }
@@ -127,7 +142,7 @@ pub trait DatabaseCursor {
 }
 
 pub struct BTreeCursor<'tx, Tx> {
-    tx: &'tx Tx,
+    tx: Rc<RefCell<Tx>>,
     pager: &'tx Arc<Pager>,
     root: PageNumber,
     page_guard: Option<SharedPageGuard>,
@@ -137,7 +152,7 @@ pub struct BTreeCursor<'tx, Tx> {
 }
 
 impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
-    pub fn new(tx: &'tx Tx, pager: &'tx Arc<Pager>, root: PageNumber) -> Self {
+    pub fn new(tx: Rc<RefCell<Tx>>, pager: &'tx Arc<Pager>, root: PageNumber) -> Self {
         Self {
             tx,
             pager,
@@ -217,10 +232,10 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
                 let record = Record::new(reassembled_payload);
                 Ok(BTreeKey::new_index_key(record))
             }
-            BTreeCellRef::TableInternal(cell) => Ok(BTreeKey::new_table_row_id(cell.row_id, None)),
+            BTreeCellRef::TableInternal(cell) => Ok(BTreeKey::new_table_key(cell.row_id, None)),
             BTreeCellRef::TableLeaf(cell) => {
                 let record = Record::new(reassembled_payload);
-                Ok(BTreeKey::new_table_row_id(cell.row_id, Some(record)))
+                Ok(BTreeKey::new_table_key(cell.row_id, Some(record)))
             }
         }
     }
@@ -255,7 +270,7 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
         let mut current_overflow = first_overflow;
 
         while result.len() < total_size {
-            let overflow_page = self.pager.read_page(self.tx, current_overflow)?;
+            let overflow_page = self.pager.read_page(&*self.tx.borrow(), current_overflow)?;
             let guard = overflow_page.lock_shared();
 
             result.extend_from_slice(guard.overflow_payload());
@@ -281,7 +296,9 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
         self.current_page = self.root;
 
         loop {
-            let page = self.pager.read_page(self.tx, self.current_page)?;
+            let page = self
+                .pager
+                .read_page(&*self.tx.borrow(), self.current_page)?;
             let guard = page.lock_shared();
 
             // we need to move to rigth node
@@ -323,7 +340,9 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
 
     fn seek_first(&mut self) -> storage::Result<bool> {
         loop {
-            let page = self.pager.read_page(self.tx, self.current_page)?;
+            let page = self
+                .pager
+                .read_page(&*self.tx.borrow(), self.current_page)?;
             let guard = page.lock_shared();
 
             if guard.is_leaf() {
@@ -370,7 +389,7 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
             }
 
             if let Some(rigth_sibling) = page.try_rigth_sibling() {
-                let next_page = self.pager.read_page(self.tx, rigth_sibling)?;
+                let next_page = self.pager.read_page(&*self.tx.borrow(), rigth_sibling)?;
                 let guard = next_page.lock_shared();
 
                 self.current_slot = guard.first_data_offset();
@@ -408,5 +427,89 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
 
     fn position(&self) -> (PageNumber, SlotNumber) {
         (self.current_page, self.current_slot)
+    }
+}
+
+impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
+    pub fn insert_leaf(&mut self, entry: BTreeKey<'_>) -> storage::Result<()> {
+        let record = entry
+            .get_record()
+            .expect("Entry should contain record in order to be inserted");
+
+        let payload = record.raw();
+        let payload_size = payload.len();
+
+        let page = self
+            .pager
+            .read_page(&*self.tx.borrow(), self.current_page)?;
+        let guard = page.lock_exclusive();
+
+        let (is_overflowing, local_payload_size) = cell_overflows(
+            payload_size,
+            guard.min_cell_size(),
+            guard.max_cell_size(),
+            guard.usable_space(),
+        );
+
+        let first_overflow = if is_overflowing {
+            // build linked list of overflow pages by going backwards, from end to start.
+            let overflow_payload = &payload[local_payload_size..];
+
+            let mut overflows = payload_size - local_payload_size;
+
+            let max_overflow_size_per_page = guard.can_fit_in_overflow();
+
+            let mut prev_overflow_page = 0;
+
+            while overflows > 0 {
+                let overflow_page_number =
+                    self.pager.alloc_empty_page(&mut *self.tx.borrow_mut())?;
+                let overflow_page = self
+                    .pager
+                    .read_page(&*self.tx.borrow(), overflow_page_number)?;
+                let overflow_page_guard = overflow_page.lock_exclusive();
+
+                overflow_page_guard.set_next_overflow(prev_overflow_page);
+
+                let mut current_content = overflows % max_overflow_size_per_page;
+
+                if current_content == 0 {
+                    current_content = max_overflow_size_per_page;
+                }
+
+                overflow_page_guard.set_overflow_payload_size(current_content as u16);
+
+                let payload = &overflow_payload[overflows - current_content..overflows];
+
+                overflow_page_guard.set_overflow_payload(payload);
+                overflows -= current_content;
+
+                prev_overflow_page = overflow_page_number;
+            }
+
+            Some(prev_overflow_page)
+        } else {
+            None
+        };
+
+        let local_payload = &payload[..local_payload_size];
+
+        let cell = match entry {
+            BTreeKey::IndexKey(_) => BTreeCell::IndexLeaf(IndexLeafCell::new(
+                payload_size as VarInt,
+                local_payload,
+                first_overflow,
+            )),
+            BTreeKey::TableKey(_) => BTreeCell::TableLeaf(TableLeafCell::new(
+                entry.row_id(),
+                payload_size as VarInt,
+                payload,
+                first_overflow,
+            )),
+        };
+
+        guard.insert_cell(self.current_slot, cell);
+
+        Ok(())
     }
 }
