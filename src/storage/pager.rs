@@ -537,7 +537,8 @@ impl Pager {
 
     /// Allocates new page in db file. By default tries to use page from
     /// freelist and if freelist is empty, then it creates new page at the
-    /// end of db file.
+    /// end of db file. Page is initialize as B-tree page, so if you want
+    /// plain page, use `Self::alloc_empty_page`.
     pub fn alloc_page<Tx: WriteTx>(
         &self,
         tx: &mut Tx,
@@ -588,6 +589,50 @@ impl Pager {
         Ok(free_page)
     }
 
+    pub fn alloc_empty_page<Tx: WriteTx>(&self, tx: &mut Tx) -> storage::Result<PageNumber> {
+        let first_freelist_page = self.db_header.get_first_freelist_page();
+
+        let free_page = if first_freelist_page == 0 {
+            let page_number = self.db_header.add_database_size(1);
+            let offset = if page_number == DATABASE_HEADER_PAGE_NUMBER {
+                DATABASE_HEADER_SIZE
+            } else {
+                0
+            };
+
+            let new_page = Page::new(offset, self.buffer_pool.get());
+
+            let new_page = Arc::new(MemPage::from_page(page_number, new_page));
+            new_page.set_dirty();
+            new_page.set_loaded();
+
+            // we have to manually insert new page to cache and set it dirty
+            self.page_cache.insert(page_number, new_page)?;
+
+            page_number
+        } else {
+            // loads to cache for use.
+            let tx = self.wal.begin_read_tx()?;
+            let free_page = self.read_page(&tx, first_freelist_page)?;
+
+            self.db_header
+                .set_first_freelist_page(free_page.lock_shared().freelist_next());
+            self.db_header.sub_freelist_pages(1);
+
+            {
+                let guard = free_page.lock_exclusive();
+                guard.set_dirty();
+                guard.set_loaded();
+            }
+
+            free_page.id()
+        };
+
+        self.write_header(tx)?;
+
+        Ok(free_page)
+    }
+
     pub fn flush(&mut self) -> storage::Result<()> {
         Ok(self.io.flush()?)
     }
@@ -596,32 +641,6 @@ impl Pager {
         Ok(self.io.sync()?)
     }
 }
-
-// /// Should be universal to both disk and wal reads. Takes `IoResult` with page
-// /// and buffer and if it is an error it will set proper flags on page. Otherwise
-// /// it will set correct state and value for page.
-// /// ### Note that `page` should be locked before calling this function (use `begin_read_page` to setup page for read)
-// pub fn complete_read_page(read_result: &io::Result<usize>, page: &MemPageRef, buffer: Buffer) {
-//     if let Ok(bytes_read) = read_result {
-//         if *bytes_read != buffer.size() {
-//             page.set_error();
-//             page.clear_loaded();
-//             page.clear_locked();
-//             return;
-//         }
-//     }
-//     if let Err(_) = read_result {
-//         page.set_error();
-//         page.clear_locked();
-//         return;
-//     }
-
-//     let content = Page::new(buffer);
-
-//     page.get().content = Some(content);
-//     page.set_loaded();
-//     page.clear_locked();
-// }
 
 /// Takes reference to write result and consumes exclusive lock to page. If
 /// write result is successful, then it clears dirty state and if `clean` is
@@ -655,8 +674,9 @@ mod tests {
 
         {
             let tx = db.begin_read()?;
+
             let mut cursor = tx.cursor(1);
-            let test = cursor.seek(&BTreeKey::new_table_row_id(10, None));
+            let test = cursor.seek(&BTreeKey::new_table_key(10, None));
 
             println!("result: {:?}", test);
 
