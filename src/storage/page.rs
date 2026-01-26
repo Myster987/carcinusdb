@@ -284,18 +284,22 @@ impl Page {
     }
 
     /// Returns size of space we can use for cell allocation.
-    fn usable_space(&self) -> usize {
+    pub fn usable_space(&self) -> usize {
         self.buffer.size() - self.header_size()
     }
 
     /// Amount of payload that will be stored if cell overflows.
-    fn min_cell_size(&self) -> usize {
+    pub fn min_cell_size(&self) -> usize {
         min_cell_size(self.usable_space())
     }
 
     /// Max allowed payload that will be stored if cell doesn't overflow.
-    fn max_cell_size(&self) -> usize {
+    pub fn max_cell_size(&self) -> usize {
         max_cell_size(self.usable_space())
+    }
+
+    pub fn can_fit_in_overflow(&self) -> usize {
+        self.buffer.size() - size_of::<PageNumber>() - size_of::<u16>()
     }
 
     fn total_free_space(&self) -> u16 {
@@ -723,9 +727,17 @@ impl Page {
         if next == 0 { None } else { Some(next) }
     }
 
+    pub fn set_next_overflow(&self, value: PageNumber) {
+        self.write_u32(Self::NEXT_OVERFLOW_OFFSET, value);
+    }
+
     /// Use only when page type is overflow.
     pub fn overflow_payload_size(&self) -> u16 {
         self.read_u16(Self::PAYLOAD_SIZE_OFFSET)
+    }
+
+    pub fn set_overflow_payload_size(&self, value: u16) {
+        self.write_u16(Self::PAYLOAD_SIZE_OFFSET, value);
     }
 
     /// Use only when page type is overflow.
@@ -733,6 +745,15 @@ impl Page {
         let start = Self::PAYLOAD_OFFSET;
         let end = start + self.overflow_payload_size() as usize;
         &self.as_ptr()[start..end]
+    }
+
+    pub fn set_overflow_payload(&self, payload: &[u8]) {
+        assert!(payload.len() == self.overflow_payload_size() as usize);
+
+        let start = 6;
+        let end = start + payload.len();
+
+        self.as_ptr()[start..end].copy_from_slice(payload);
     }
 }
 
