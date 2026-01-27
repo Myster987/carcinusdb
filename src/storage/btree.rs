@@ -5,9 +5,10 @@ use crate::{
     storage::{
         self, PageNumber, SlotNumber,
         page::{
-            BTreeCell, BTreeCellRef, CellOps, IndexLeafCell, Page, TableLeafCell, cell_overflows,
+            BTreeCell, BTreeCellRef, CellOps, IndexInternalCell, IndexLeafCell, Page, PageType,
+            TableInternalCell, TableLeafCell, cell_overflows,
         },
-        pager::{Pager, SharedPageGuard},
+        pager::Pager,
         wal::transaction::{ReadTx, WriteTx},
     },
     utils::bytes::VarInt,
@@ -26,6 +27,19 @@ impl<'a> BTreeKey<'a> {
 
     pub fn new_index_key(record: Record<'a>) -> Self {
         Self::IndexKey(record)
+    }
+
+    #[inline]
+    pub fn is_index(&self) -> bool {
+        match self {
+            Self::IndexKey(_) => true,
+            _ => false,
+        }
+    }
+
+    #[inline]
+    pub fn is_table(&self) -> bool {
+        !self.is_index()
     }
 
     pub fn get_record(&self) -> Option<Record<'a>> {
@@ -123,19 +137,21 @@ pub trait DatabaseCursor {
     /// end of btree.
     fn next(&mut self) -> storage::Result<bool>;
 
-    /// Attempts to extract key at current cursor position. By design cursor
-    /// should hold guard to page that it's currently on. Without this protection
-    /// key could be moved out durring balancing.
-    fn key(&mut self) -> storage::Result<BTreeKey<'_>>;
+    // /// Attempts to extract key at current cursor position. By design cursor
+    // /// should hold guard to page that it's currently on. Without this protection
+    // /// key could be moved out durring balancing.
+    // fn key(&mut self) -> storage::Result<BTreeKey<'_>>;
 
-    /// Extracts record from current position of cursor. This function also
-    /// depends on cursor holding page guard in advance.
-    fn value(&mut self) -> storage::Result<Option<Record<'_>>>;
+    // /// Extracts record from current position of cursor. This function also
+    // /// depends on cursor holding page guard in advance.
+    // fn value(&mut self) -> storage::Result<Option<Record<'_>>>;
 
-    /// The same as `DatabaseCursor::key` but returns owned data.
-    fn key_owned(&mut self) -> storage::Result<BTreeKey<'static>>;
-    /// The same as `DatabaseCursor::value` but returns owned data.
-    fn value_owned(&mut self) -> storage::Result<Option<Record<'static>>>;
+    // /// The same as `DatabaseCursor::key` but returns owned data.
+    // fn key_owned(&mut self) -> storage::Result<BTreeKey<'static>>;
+    // /// The same as `DatabaseCursor::value` but returns owned data.
+    // fn value_owned(&mut self) -> storage::Result<Option<Record<'static>>>;
+
+    fn record(&self) -> storage::Result<Record<'static>>;
 
     /// Returns current page and slot that cursor is on.
     fn position(&self) -> (PageNumber, SlotNumber);
@@ -145,9 +161,10 @@ pub struct BTreeCursor<'tx, Tx> {
     tx: Rc<RefCell<Tx>>,
     pager: &'tx Arc<Pager>,
     root: PageNumber,
-    page_guard: Option<SharedPageGuard>,
     current_page: PageNumber,
     current_slot: SlotNumber,
+    // current_record: Option<Record<'static>>,
+    init: bool,
     done: bool,
 }
 
@@ -157,9 +174,10 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
             tx,
             pager,
             root,
-            page_guard: None,
             current_page: root,
             current_slot: 0,
+            // current_record: None,
+            init: false,
             done: false,
         }
     }
@@ -312,7 +330,6 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
             let search_result = self.binary_search(&guard, key)?;
 
             if let Ok(slot) = search_result {
-                self.page_guard = Some(guard);
                 // mark that we can search for data from here
                 self.done = false;
 
@@ -322,7 +339,6 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
                 });
             }
             if guard.is_leaf() {
-                self.page_guard = Some(guard);
                 // even if page is doesn't match it could be used for range scans
                 // at least I think it can :D
                 self.done = false;
@@ -353,7 +369,6 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
                     self.done = true;
                 }
 
-                self.page_guard = Some(guard);
                 break;
             }
 
@@ -369,13 +384,16 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
         }
 
         // cursor needs to position itself.
-        if self.page_guard.is_none() {
+        if !self.init {
             self.seek_first()?;
+            self.init = true;
             // return if there are cells present.
             return Ok(!self.done);
         }
 
-        if let Some(page) = self.page_guard.as_ref() {
+        if let Ok(current_page) = self.pager.read_page(&*self.tx.borrow(), self.current_page) {
+            let page = current_page.lock_shared();
+
             if page.is_empty() {
                 self.done = true;
                 return Ok(false);
@@ -395,8 +413,6 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
                 self.current_slot = guard.first_data_offset();
                 self.current_page = rigth_sibling;
 
-                self.page_guard = Some(guard);
-
                 return Ok(true);
             }
         }
@@ -405,25 +421,38 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
         Ok(false)
     }
 
-    fn key(&mut self) -> storage::Result<BTreeKey<'_>> {
+    fn record(&self) -> storage::Result<Record<'static>> {
         let page = self
-            .page_guard
-            .as_ref()
-            .ok_or(storage::Error::InvalidPageType)?;
-        self.extracty_key(page, self.current_slot)
+            .pager
+            .read_page(&*self.tx.borrow(), self.current_page)?;
+        let guard = page.lock_shared();
+
+        let key = self.extracty_key(&guard, self.current_slot)?;
+
+        key.get_record()
+            .ok_or(storage::Error::InvalidPageType)
+            .map(|r| r.to_owned())
     }
 
-    fn value(&mut self) -> storage::Result<Option<Record<'_>>> {
-        self.key().map(|key| key.get_record())
-    }
+    // fn key(&mut self) -> storage::Result<BTreeKey<'_>> {
+    //     let page = self
+    //         .page_guard
+    //         .as_ref()
+    //         .ok_or(storage::Error::InvalidPageType)?;
+    //     self.extracty_key(page, self.current_slot)
+    // }
 
-    fn key_owned(&mut self) -> storage::Result<BTreeKey<'static>> {
-        self.key().map(|key| key.to_owned())
-    }
+    // fn value(&mut self) -> storage::Result<Option<Record<'_>>> {
+    //     self.key().map(|key| key.get_record())
+    // }
 
-    fn value_owned(&mut self) -> storage::Result<Option<Record<'static>>> {
-        self.value().map(|val| val.map(|record| record.to_owned()))
-    }
+    // fn key_owned(&mut self) -> storage::Result<BTreeKey<'static>> {
+    //     self.key().map(|key| key.to_owned())
+    // }
+
+    // fn value_owned(&mut self) -> storage::Result<Option<Record<'static>>> {
+    //     self.value().map(|val| val.map(|record| record.to_owned()))
+    // }
 
     fn position(&self) -> (PageNumber, SlotNumber) {
         (self.current_page, self.current_slot)
@@ -431,7 +460,52 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
 }
 
 impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
-    pub fn insert_leaf(&mut self, entry: BTreeKey<'_>) -> storage::Result<()> {
+    pub fn insert(&mut self, entry: BTreeKey<'_>) -> storage::Result<()> {
+        let search_result = self.seek(&entry)?;
+
+        match search_result {
+            SearchResult::Found { page: _, slot: _ } => Err(storage::Error::DuplicateKey),
+            SearchResult::NotFound { page: _, slot: _ } => self.insert_into_leaf(entry),
+        }
+    }
+
+    fn insert_into_leaf(&mut self, entry: BTreeKey<'_>) -> storage::Result<()> {
+        let page = self
+            .pager
+            .read_page(&*self.tx.borrow(), self.current_page)?;
+        let guard = page.lock_exclusive();
+
+        // page is empty (only in case of root page)
+        if !guard.has_high_key() {
+            let high_key = self.build_high_key(&guard, &entry)?;
+            guard.insert_cell(0, high_key);
+            self.current_slot += 1
+        }
+
+        let cell = self.build_cell(&guard, entry)?;
+
+        guard.insert_cell(self.current_slot, cell);
+
+        Ok(())
+    }
+
+    fn build_high_key(&mut self, page: &Page, entry: &BTreeKey<'_>) -> storage::Result<BTreeCell> {
+        let page_type = page.page_type();
+
+        if matches!(page_type, PageType::TableInternal | PageType::TableLeaf) {
+            let cell = match page_type {
+                PageType::TableInternal => {
+                    BTreeCell::TableInternal(TableInternalCell::new(entry.row_id(), 0))
+                }
+                PageType::TableLeaf => {
+                    BTreeCell::TableLeaf(TableLeafCell::new(entry.row_id(), 0, &[], None))
+                }
+                _ => unreachable!(),
+            };
+
+            return Ok(cell);
+        }
+
         let record = entry
             .get_record()
             .expect("Entry should contain record in order to be inserted");
@@ -439,55 +513,56 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         let payload = record.raw();
         let payload_size = payload.len();
 
-        let page = self
-            .pager
-            .read_page(&*self.tx.borrow(), self.current_page)?;
-        let guard = page.lock_exclusive();
-
         let (is_overflowing, local_payload_size) = cell_overflows(
             payload_size,
-            guard.min_cell_size(),
-            guard.max_cell_size(),
-            guard.usable_space(),
+            page.min_cell_size(),
+            page.max_cell_size(),
+            page.usable_space(),
         );
 
         let first_overflow = if is_overflowing {
-            // build linked list of overflow pages by going backwards, from end to start.
-            let overflow_payload = &payload[local_payload_size..];
+            self.build_overflow_chain(page, payload, local_payload_size)?
+        } else {
+            None
+        };
 
-            let mut overflows = payload_size - local_payload_size;
+        let local_payload = &payload[..local_payload_size];
 
-            let max_overflow_size_per_page = guard.can_fit_in_overflow();
+        let cell = match page_type {
+            PageType::IndexInternal => BTreeCell::IndexInternal(IndexInternalCell::new(
+                0,
+                payload_size as VarInt,
+                local_payload,
+                first_overflow,
+            )),
+            PageType::IndexLeaf => BTreeCell::IndexLeaf(IndexLeafCell::new(
+                payload_size as VarInt,
+                local_payload,
+                first_overflow,
+            )),
+            _ => unreachable!(),
+        };
 
-            let mut prev_overflow_page = 0;
+        Ok(cell)
+    }
 
-            while overflows > 0 {
-                let overflow_page_number =
-                    self.pager.alloc_empty_page(&mut *self.tx.borrow_mut())?;
-                let overflow_page = self
-                    .pager
-                    .read_page(&*self.tx.borrow(), overflow_page_number)?;
-                let overflow_page_guard = overflow_page.lock_exclusive();
+    fn build_cell(&mut self, page: &Page, entry: BTreeKey<'_>) -> storage::Result<BTreeCell> {
+        let record = entry
+            .get_record()
+            .expect("Entry should contain record in order to be inserted");
 
-                overflow_page_guard.set_next_overflow(prev_overflow_page);
+        let payload = record.raw();
+        let payload_size = payload.len();
 
-                let mut current_content = overflows % max_overflow_size_per_page;
+        let (is_overflowing, local_payload_size) = cell_overflows(
+            payload_size,
+            page.min_cell_size(),
+            page.max_cell_size(),
+            page.usable_space(),
+        );
 
-                if current_content == 0 {
-                    current_content = max_overflow_size_per_page;
-                }
-
-                overflow_page_guard.set_overflow_payload_size(current_content as u16);
-
-                let payload = &overflow_payload[overflows - current_content..overflows];
-
-                overflow_page_guard.set_overflow_payload(payload);
-                overflows -= current_content;
-
-                prev_overflow_page = overflow_page_number;
-            }
-
-            Some(prev_overflow_page)
+        let first_overflow = if is_overflowing {
+            self.build_overflow_chain(page, payload, local_payload_size)?
         } else {
             None
         };
@@ -508,8 +583,68 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             )),
         };
 
-        guard.insert_cell(self.current_slot, cell);
-
-        Ok(())
+        Ok(cell)
     }
+
+    fn build_overflow_chain(
+        &mut self,
+        page: &Page,
+        payload: &[u8],
+        local_payload_size: usize,
+    ) -> storage::Result<Option<PageNumber>> {
+        let payload_size = payload.len();
+
+        // build linked list of overflow pages by going backwards, from end to start.
+        let overflow_payload = &payload[local_payload_size..];
+
+        let mut overflows = payload_size - local_payload_size;
+
+        let max_overflow_size_per_page = page.can_fit_in_overflow();
+
+        let mut prev_overflow_page = 0;
+
+        while overflows > 0 {
+            let overflow_page_number = self.pager.alloc_empty_page(&mut *self.tx.borrow_mut())?;
+            let overflow_page = self
+                .pager
+                .read_page(&*self.tx.borrow(), overflow_page_number)?;
+            let overflow_page_guard = overflow_page.lock_exclusive();
+
+            overflow_page_guard.set_next_overflow(prev_overflow_page);
+
+            let mut current_content = overflows % max_overflow_size_per_page;
+
+            if current_content == 0 {
+                current_content = max_overflow_size_per_page;
+            }
+
+            overflow_page_guard.set_overflow_payload_size(current_content as u16);
+
+            let payload = &overflow_payload[overflows - current_content..overflows];
+
+            overflow_page_guard.set_overflow_payload(payload);
+            overflows -= current_content;
+
+            prev_overflow_page = overflow_page_number;
+        }
+
+        Ok(Some(prev_overflow_page))
+    }
+
+    // fn try_invalidate_high_key(&mut self, page: &Page, new_entry: &BTreeKey<'_>) -> storage::Result<()>{
+
+    //     let current_high_key = self.extract_high_key(page)?;
+
+    //     if let Some(current) = current_high_key {
+    //         todo!()
+    //     } else {
+    //         match new_entry {
+    //             BTreeKey::IndexKey(record) => {
+    //                 BTreeCell::IndexLeaf(IndexLeafCell::new(, payload, first_overflow))
+    //             }
+    //         }
+    //     }
+
+    //     Ok(())
+    // }
 }
