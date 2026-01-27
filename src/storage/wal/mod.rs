@@ -544,13 +544,13 @@ impl WriteAheadLog {
         page: ExclusivePageGuard,
         db_size: u32,
     ) -> storage::Result<()> {
-        self.append_vectored(transaction, vec![page], db_size)
+        self.append_vectored(transaction, &mut [page], db_size)
     }
 
     pub fn append_vectored<Tx: WriteTx>(
         &self,
         transaction: &mut Tx,
-        mut pages: Vec<ExclusivePageGuard>,
+        pages: &mut [ExclusivePageGuard],
         db_size: u32,
     ) -> storage::Result<()> {
         let pages_number = pages.len();

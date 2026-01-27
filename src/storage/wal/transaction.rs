@@ -90,7 +90,6 @@ pub struct WriteTransactionInner<'a> {
     pub write_guard: MutexGuard<'a, ()>,
     pub min_frame: FrameNumber,
     pub max_frame: FrameNumber,
-    // pub last_checksum: Checksum,
 }
 
 impl<'a> WriteTransaction<'a> {
