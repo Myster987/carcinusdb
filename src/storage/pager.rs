@@ -4,6 +4,8 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use dashmap::DashSet;
+
 use crate::database::MemDatabaseHeader;
 use crate::storage::btree::BTreeType;
 use crate::storage::buffer_pool::BufferPool;
@@ -398,6 +400,7 @@ pub struct Pager {
     pub wal: Arc<WriteAheadLog>,
     /// Reference to global LRU cache
     pub page_cache: Arc<ShardedClockCache>,
+    pub dirty_pages: Arc<DashSet<PageNumber>>,
 }
 
 impl Pager {
@@ -415,6 +418,7 @@ impl Pager {
             buffer_pool,
             wal,
             page_cache,
+            dirty_pages: Arc::new(DashSet::new()),
         };
 
         if !is_initialized {
@@ -558,7 +562,7 @@ impl Pager {
             new_page.initialize(page_type);
 
             let new_page = Arc::new(MemPage::from_page(page_number, new_page));
-            new_page.set_dirty();
+            self.add_dirty(&new_page);
             new_page.set_loaded();
 
             // we have to manually insert new page to cache and set it dirty
@@ -577,9 +581,10 @@ impl Pager {
             {
                 let guard = free_page.lock_exclusive();
                 guard.initialize(page_type);
-                guard.set_dirty();
                 guard.set_loaded();
             }
+
+            self.add_dirty(&free_page);
 
             free_page.id()
         };
@@ -603,7 +608,7 @@ impl Pager {
             let new_page = Page::new(offset, self.buffer_pool.get());
 
             let new_page = Arc::new(MemPage::from_page(page_number, new_page));
-            new_page.set_dirty();
+            self.add_dirty(&new_page);
             new_page.set_loaded();
 
             // we have to manually insert new page to cache and set it dirty
@@ -621,9 +626,10 @@ impl Pager {
 
             {
                 let guard = free_page.lock_exclusive();
-                guard.set_dirty();
                 guard.set_loaded();
             }
+
+            self.add_dirty(&free_page);
 
             free_page.id()
         };
@@ -631,6 +637,11 @@ impl Pager {
         self.write_header(tx)?;
 
         Ok(free_page)
+    }
+
+    pub fn add_dirty(&self, page: &MemPageRef) {
+        self.dirty_pages.insert(page.id());
+        page.set_dirty();
     }
 
     pub fn flush(&mut self) -> storage::Result<()> {
@@ -663,8 +674,13 @@ pub fn complete_write_page(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::storage::btree::{BTreeKey, DatabaseCursor};
+    use crate::{
+        sql::{
+            record::RecordBuilder,
+            types::{Value, text::Text},
+        },
+        storage::btree::{BTreeKey, DatabaseCursor},
+    };
 
     #[test]
     fn test_pager() -> anyhow::Result<()> {
@@ -672,13 +688,37 @@ mod tests {
 
         let db = crate::database::Database::open("./test-db.db")?;
 
+        // {
+        //     let tx = db.begin_write()?;
+
+        //     let mut cursor = tx.cursor(1);
+
+        //     let mut record = RecordBuilder::new();
+
+        //     record.add(Value::Null);
+        //     record.add(Value::Int(123));
+        //     record.add(Value::Text(Text::new("Maciek".into())));
+
+        //     cursor.insert(BTreeKey::new_table_key(
+        //         10,
+        //         Some(record.serialize_to_record()),
+        //     ))?;
+
+        //     drop(cursor);
+
+        //     tx.commit()?;
+        // }
+
         {
             let tx = db.begin_read()?;
 
             let mut cursor = tx.cursor(1);
-            let test = cursor.seek(&BTreeKey::new_table_key(10, None));
+
+            let test = cursor.seek(&BTreeKey::new_table_key(10, None))?;
 
             println!("result: {:?}", test);
+
+            // println!("{:?}", cursor.record()?);
 
             tx.commit()?;
         }

@@ -271,9 +271,27 @@ impl<'tx> DatabaseWriteTransaction<'tx> {
     }
 
     pub fn commit(self) -> DatabaseResult<()> {
-        let wal_tx = Rc::into_inner(self.wal_tx)
+        let mut wal_tx = Rc::into_inner(self.wal_tx)
             .expect("Something is still using this transaction")
             .into_inner();
+
+        let dirty_pages: Vec<_> = self
+            .pager
+            .dirty_pages
+            .iter()
+            .map(|pn| self.pager.read_page(&wal_tx, *pn).unwrap())
+            .collect();
+
+        let mut page_guards: Vec<_> = dirty_pages
+            .iter()
+            .map(|page| page.lock_exclusive())
+            .collect();
+
+        self.pager.wal.append_vectored(
+            &mut wal_tx,
+            &mut page_guards,
+            self.pager.db_header.get_database_size(),
+        )?;
 
         self.pager.wal.commit(wal_tx)?;
 
