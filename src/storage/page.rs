@@ -266,7 +266,7 @@ impl Page {
         self.write_u8(0, page_type as u8);
         self.set_first_freeblock(0);
         self.set_len(0);
-        self.set_last_used_offset(self.buffer.size() as u16);
+        self.set_last_used_offset(self.as_ptr().len() as u16);
         self.set_free_fragments(0);
         self.write_u32(Self::RIGTH_SIBLING_OFFSET, 0);
         self.write_u32(Self::RIGTH_CHILD_OFFSET, 0);
@@ -285,7 +285,7 @@ impl Page {
 
     /// Returns size of space we can use for cell allocation.
     pub fn usable_space(&self) -> usize {
-        self.buffer.size() - self.header_size()
+        self.buffer.size() - self.header_size() - self.offset
     }
 
     /// Amount of payload that will be stored if cell overflows.
@@ -340,9 +340,9 @@ impl Page {
         }
     }
 
-    /// Returns avalible space without header.
+    /// Returns avalible space without header and offset.
     pub fn storage_space(&self) -> u16 {
-        (self.buffer.size() - self.header_size()) as u16
+        (self.buffer.size() - self.header_size() - self.offset) as u16
     }
 
     /// Total space that will be used by cell.
@@ -352,7 +352,8 @@ impl Page {
 
     /// Free space between slot array and last cell.
     pub fn free_space(&self) -> u16 {
-        self.last_used_offset() - ((self.header_size()) as u16 + self.len() * 2)
+        self.last_used_offset()
+            - (self.offset as u16 + (self.header_size()) as u16 + self.len() * 2)
     }
 
     pub fn first_data_offset(&self) -> SlotNumber {
@@ -677,15 +678,6 @@ impl Page {
     pub fn add_free_fragment(&self, value: u8) {
         self.set_free_fragments(self.free_fragments() + value)
     }
-
-    // pub fn try_high_key_offset(&self) -> Option<u16> {
-    //     let offset = self.read_u16(Self::HIGH_KEY_OFFSET);
-    //     if offset != 0 { Some(offset) } else { None }
-    // }
-
-    // pub fn set_high_key_offset(&self, value: u16) {
-    //     self.write_u16(Self::HIGH_KEY_OFFSET, value);
-    // }
 
     pub fn try_rigth_sibling(&self) -> Option<PageNumber> {
         let next = self.read_u32(Self::RIGTH_SIBLING_OFFSET);
