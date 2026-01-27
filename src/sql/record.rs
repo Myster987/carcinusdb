@@ -206,7 +206,7 @@ impl RecordBuilder {
         size_of_serial_types + varint_size(size_of_serial_types as VarInt)
     }
 
-    pub fn serialize(&self) -> Vec<u8> {
+    pub fn serialize_to_bytes(&self) -> Vec<u8> {
         let mut total_size = 0;
         let mut size_of_serial_types = 0;
 
@@ -267,6 +267,12 @@ impl RecordBuilder {
         }
 
         cursor.into_inner()
+    }
+
+    pub fn serialize_to_record(&self) -> Record<'static> {
+        let serialized = self.serialize_to_bytes();
+
+        Record::from_owned(serialized)
     }
 
     pub fn get(&self, index: usize) -> &Value {
@@ -370,7 +376,7 @@ mod tests {
         builder.add(Value::Bool(true));
         builder.add(Value::Int(125));
 
-        let serialized = builder.serialize();
+        let serialized = builder.serialize_to_bytes();
         let record = Record::from_borrowed(&serialized);
 
         println!("{:?}", serialized);
