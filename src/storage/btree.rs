@@ -465,26 +465,28 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
         match search_result {
             SearchResult::Found { page: _, slot: _ } => Err(storage::Error::DuplicateKey),
-            SearchResult::NotFound { page: _, slot: _ } => self.insert_into_leaf(entry),
+            SearchResult::NotFound { page: _, slot: _ } => self.try_insert_into_leaf(entry),
         }
     }
 
-    fn insert_into_leaf(&mut self, entry: BTreeKey<'_>) -> storage::Result<()> {
+    fn try_insert_into_leaf(&mut self, entry: BTreeKey<'_>) -> storage::Result<()> {
         let page = self
             .pager
             .read_page(&*self.tx.borrow(), self.current_page)?;
         let guard = page.lock_exclusive();
 
-        // page is empty (only in case of root page)
-        if !guard.has_high_key() {
-            let high_key = self.build_high_key(&guard, &entry)?;
-            guard.insert_cell(0, high_key);
-            self.current_slot += 1
-        }
+        // // page is empty (only in case of root page)
+        // if !guard.has_high_key() {
+        //     let high_key = self.build_high_key(&guard, &entry)?;
+        //     guard.insert_cell(0, high_key);
+        //     self.current_slot += 1
+        // }
 
         let cell = self.build_cell(&guard, entry)?;
 
         guard.insert_cell(self.current_slot, cell);
+
+        self.pager.add_dirty(&page);
 
         Ok(())
     }
@@ -631,20 +633,18 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         Ok(Some(prev_overflow_page))
     }
 
-    // fn try_invalidate_high_key(&mut self, page: &Page, new_entry: &BTreeKey<'_>) -> storage::Result<()>{
+    fn balance(&mut self) -> storage::Result<()> {
+        let page = self
+            .pager
+            .read_page(&*self.tx.borrow(), self.current_page)?;
+        let page_guard = page.lock_exclusive();
 
-    //     let current_high_key = self.extract_high_key(page)?;
+        let is_root = self.current_page == self.root;
 
-    //     if let Some(current) = current_high_key {
-    //         todo!()
-    //     } else {
-    //         match new_entry {
-    //             BTreeKey::IndexKey(record) => {
-    //                 BTreeCell::IndexLeaf(IndexLeafCell::new(, payload, first_overflow))
-    //             }
-    //         }
-    //     }
+        let is_underflow = page_guard.is_empty() || !is_root && page_guard.is_underflow();
 
-    //     Ok(())
-    // }
+        todo!();
+
+        Ok(())
+    }
 }
