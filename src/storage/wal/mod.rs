@@ -20,7 +20,7 @@ use crate::{
         self, Error, FrameNumber, PageNumber,
         buffer_pool::BufferPool,
         cache::ShardedClockCache,
-        page::Page,
+        page::{DATABASE_HEADER_PAGE_NUMBER, DATABASE_HEADER_SIZE, Page},
         pager::{self, ExclusivePageGuard},
         wal::transaction::{ReadTransaction, ReadTx, WriteTransaction, WriteTx},
     },
@@ -408,6 +408,8 @@ impl WriteAheadLog {
             transaction_frames.push((page_number, frame_number));
 
             if is_commit {
+                log::debug!("Replaying commit with frames: {:?}", transaction_frames);
+
                 for (pn, f) in transaction_frames.drain(..) {
                     self.index.insert_latest(pn, f);
                 }
@@ -517,6 +519,8 @@ impl WriteAheadLog {
             .get(&page_number, transaction.tx_max_frame())
             .ok_or(Error::PageNotFoundInWal(page_number))?;
 
+        log::debug!("Reading frame: {}", visible_frame_number);
+
         let mut buffer = buffer_pool.get();
 
         let read_result = self.wal_file.read(
@@ -528,7 +532,11 @@ impl WriteAheadLog {
         match read_result {
             Ok(bytes_read) => {
                 if bytes_read == buffer.size() {
-                    let offset = if page_number == 1 { WAL_HEADER_SIZE } else { 0 };
+                    let offset = if page_number == DATABASE_HEADER_PAGE_NUMBER {
+                        DATABASE_HEADER_SIZE
+                    } else {
+                        0
+                    };
                     Ok(Some(Page::new(offset, buffer)))
                 } else {
                     Err(Error::PageNotFoundInWal(page_number))
