@@ -5,7 +5,7 @@ use parking_lot::{MutexGuard, RwLockReadGuard};
 use crate::{
     storage::{
         self, FrameNumber,
-        wal::{Checksum, READERS_NUM, WriteAheadLog},
+        wal::{READERS_NUM, WriteAheadLog},
     },
     utils::concurrency::SlotGuard,
 };
@@ -99,7 +99,6 @@ impl<'a> WriteTransaction<'a> {
 
         let min_frame = wal.get_min_frame();
         let max_frame = wal.get_max_frame();
-        // let last_checksum = wal.get_last_checksum();
 
         // ignore for now because locks migth be enough
         // // check if this changed and if so, we need to retry.
@@ -114,24 +113,14 @@ impl<'a> WriteTransaction<'a> {
 
         Ok(Self {
             inner: ManuallyDrop::new(WriteTransactionInner {
-                // wal,
                 checkpoint_guard,
                 write_guard,
                 min_frame,
                 max_frame,
-                // last_checksum,
             }),
         })
     }
 }
-
-// impl Drop for WriteTransaction<'_> {
-//     fn drop(&mut self) {
-//         panic!(
-//             "WriteTransaction must be explicitly ended with wal.commit(). Do not drop directly."
-//         );
-//     }
-// }
 
 impl ReadTx for WriteTransaction<'_> {
     #[inline]
@@ -146,18 +135,8 @@ impl ReadTx for WriteTransaction<'_> {
 }
 
 impl WriteTx for WriteTransaction<'_> {
-    // #[inline]
-    // fn tx_last_checksum(&self) -> Checksum {
-    //     self.inner.last_checksum
-    // }
-
     #[inline]
     fn tx_set_max_frame(&mut self, new_max_frame: FrameNumber) {
         self.inner.max_frame = new_max_frame;
     }
-
-    // #[inline]
-    // fn tx_set_last_checksum(&mut self, new_checksum: Checksum) {
-    //     self.inner.last_checksum = new_checksum;
-    // }
 }
