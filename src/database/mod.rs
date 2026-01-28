@@ -9,7 +9,7 @@ use std::{
 };
 
 use crate::{
-    error::{DatabaseError, DatabaseResult},
+    error::DatabaseResult,
     os::{Open, OpenOptions},
     storage::{
         PageNumber,
@@ -84,14 +84,17 @@ impl MemDatabaseHeader {
         self.change_counter.load(Ordering::Acquire)
     }
 
+    /// Returns database size in pages.
     pub fn get_database_size(&self) -> u32 {
         self.database_size.load(Ordering::Acquire)
     }
 
+    /// Returns "head" of linked list of free pages.
     pub fn get_first_freelist_page(&self) -> PageNumber {
         self.first_freelist_page.load(Ordering::Acquire)
     }
 
+    /// Returns number of free pages, that can be reused.
     pub fn get_freelist_pages(&self) -> PageNumber {
         self.freelist_pages.load(Ordering::Acquire)
     }
@@ -118,6 +121,10 @@ impl MemDatabaseHeader {
             });
     }
 
+    pub fn add_freelist_pages(&self, add: u32) {
+        self.freelist_pages.fetch_add(add, Ordering::Release);
+    }
+
     pub fn get_version_valid_for(&self) -> u32 {
         self.version_valid_for.load(Ordering::Acquire)
     }
@@ -126,6 +133,8 @@ impl MemDatabaseHeader {
         self.version_valid_for.store(value, Ordering::Release);
     }
 
+    /// Returns true if database is in complete state and doesn't need to
+    /// replay WAL. Otherwise returns false.
     pub fn is_consistent(&self) -> bool {
         self.get_change_counter() == self.get_version_valid_for()
     }
@@ -152,6 +161,16 @@ pub struct Database {
 }
 
 impl Database {
+    /// Calling this function will open existing db. In case that db file
+    /// doesn't exist, it will create new one. Write Ahead Log (WAL) will
+    /// also be initialized with "{path}-wal{.extension}" file name.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// // this will create "test-db.db" and "test-db-wal.db"
+    /// let db = Database::open("./test-db.db");
+    /// ```
     pub fn open(path: impl AsRef<Path>) -> DatabaseResult<Self> {
         let is_initialized = path.as_ref().exists();
 
@@ -255,6 +274,7 @@ impl<'tx> DatabaseReadTransaction<'tx> {
         BTreeCursor::new(self.wal_tx.clone(), &self.pager, root)
     }
 
+    #[must_use]
     pub fn commit(self) -> DatabaseResult<()> {
         Ok(())
     }
@@ -270,14 +290,16 @@ impl<'tx> DatabaseWriteTransaction<'tx> {
         BTreeCursor::new(self.wal_tx.clone(), &self.pager, root)
     }
 
+    /// Flushes dirty pages into WAL and marks them as clean. Might run checkpoint.
+    #[must_use]
     pub fn commit(self) -> DatabaseResult<()> {
         let mut wal_tx = Rc::into_inner(self.wal_tx)
             .expect("Something is still using this transaction")
             .into_inner();
 
-        let dirty_pages: Vec<_> = self
-            .pager
-            .dirty_pages
+        let dirty_page_numbers: Vec<_> = self.pager.dirty_pages.iter().map(|pn| *pn).collect();
+
+        let dirty_pages: Vec<_> = dirty_page_numbers
             .iter()
             .map(|pn| self.pager.read_page(&wal_tx, *pn).unwrap())
             .collect();
@@ -292,6 +314,10 @@ impl<'tx> DatabaseWriteTransaction<'tx> {
             &mut page_guards,
             self.pager.db_header.get_database_size(),
         )?;
+
+        dirty_page_numbers.iter().for_each(|pn| {
+            self.pager.dirty_pages.remove(&*pn);
+        });
 
         self.pager.wal.commit(wal_tx)?;
 
