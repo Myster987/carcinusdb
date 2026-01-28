@@ -332,6 +332,10 @@ impl Page {
         !self.overflow_map().is_empty()
     }
 
+    pub fn is_underflow(&self) -> bool {
+        self.total_free_space() > self.usable_space() as u16 / 2
+    }
+
     /// Depending on `PageType`, this function returns 12 or 8.
     pub fn header_size(&self) -> usize {
         match self.page_type() {
