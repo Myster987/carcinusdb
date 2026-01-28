@@ -10,9 +10,7 @@ use crate::database::MemDatabaseHeader;
 use crate::storage::btree::BTreeType;
 use crate::storage::buffer_pool::BufferPool;
 use crate::storage::cache::ShardedClockCache;
-use crate::storage::page::{
-    DATABASE_HEADER_PAGE_NUMBER, DATABASE_HEADER_SIZE, DatabaseHeader, PageType,
-};
+use crate::storage::page::{DATABASE_HEADER_PAGE_NUMBER, DATABASE_HEADER_SIZE, PageType};
 use crate::storage::wal::WriteAheadLog;
 use crate::storage::wal::transaction::{ReadTx, WriteTx};
 use crate::utils::io::BlockIO;
@@ -453,6 +451,13 @@ impl Pager {
         self.wal.append_frame(tx, guard, raw_header.database_size)
     }
 
+    /// Reads given `page_number` in following order:
+    ///
+    /// - Cache (page in memory)
+    /// - WAL (disk read)
+    /// - DB (disk read)
+    ///
+    /// In case of cache miss it will insert page into cache for future use.
     pub fn read_page<Tx: ReadTx>(
         &self,
         tx: &Tx,
@@ -471,9 +476,9 @@ impl Pager {
 
             // check wall...
             if let Ok(Some(page)) = self.wal.read_frame(tx, page_number, &self.buffer_pool) {
-                *guard = page;
+                guard.replace(page);
             } else {
-                // read from disk
+                // read from db file
                 let page = self.read_page_from_disk(page_number)?;
                 guard.replace(page);
             }
@@ -525,12 +530,13 @@ impl Pager {
             .append_frame(tx, guard, self.db_header.get_database_size())
     }
 
+    /// Allocates new B-tree in database.
     pub fn btree_create<Tx: WriteTx>(
         &self,
         tx: &mut Tx,
         btree_type: BTreeType,
     ) -> storage::Result<PageNumber> {
-        log::debug!("Creating new B-tree.");
+        log::debug!("Creating new {:?} B-tree.", btree_type);
         let page_type = match btree_type {
             BTreeType::Index => PageType::IndexLeaf,
             BTreeType::Table => PageType::TableLeaf,
@@ -565,14 +571,13 @@ impl Pager {
             self.add_dirty(&new_page);
             new_page.set_loaded();
 
-            // we have to manually insert new page to cache and set it dirty
+            // we have to manually insert new page to cache.
             self.page_cache.insert(page_number, new_page)?;
 
             page_number
         } else {
             // loads to cache for use.
-            let tx = self.wal.begin_read_tx()?;
-            let free_page = self.read_page(&tx, first_freelist_page)?;
+            let free_page = self.read_page(tx, first_freelist_page)?;
 
             self.db_header
                 .set_first_freelist_page(free_page.lock_shared().freelist_next());
@@ -594,6 +599,8 @@ impl Pager {
         Ok(free_page)
     }
 
+    /// Allocates empty page in database. Can be used to build linked list of
+    /// overflow cells.
     pub fn alloc_empty_page<Tx: WriteTx>(&self, tx: &mut Tx) -> storage::Result<PageNumber> {
         let first_freelist_page = self.db_header.get_first_freelist_page();
 
@@ -608,17 +615,17 @@ impl Pager {
             let new_page = Page::new(offset, self.buffer_pool.get());
 
             let new_page = Arc::new(MemPage::from_page(page_number, new_page));
+
             self.add_dirty(&new_page);
             new_page.set_loaded();
 
-            // we have to manually insert new page to cache and set it dirty
+            // we have to manually insert new page to cache.
             self.page_cache.insert(page_number, new_page)?;
 
             page_number
         } else {
             // loads to cache for use.
-            let tx = self.wal.begin_read_tx()?;
-            let free_page = self.read_page(&tx, first_freelist_page)?;
+            let free_page = self.read_page(tx, first_freelist_page)?;
 
             self.db_header
                 .set_first_freelist_page(free_page.lock_shared().freelist_next());
@@ -639,18 +646,43 @@ impl Pager {
         Ok(free_page)
     }
 
+    /// Adds page to global freelist.
+    pub fn free_page<Tx: WriteTx>(
+        &self,
+        tx: &mut Tx,
+        page_number: PageNumber,
+    ) -> storage::Result<()> {
+        let page = self.read_page(tx, page_number)?;
+
+        let prev_head = self.db_header.get_first_freelist_page();
+
+        // set new head to point to prev freelist head.
+        {
+            let guard = page.lock_exclusive();
+            guard.freelist_set(prev_head);
+        }
+
+        self.db_header.set_first_freelist_page(page_number);
+        self.db_header.add_freelist_pages(1);
+
+        self.add_dirty(&page);
+
+        self.write_header(tx)
+    }
+
+    /// Marks page as dirty to later identify page to flush durring checkpoint.
     pub fn add_dirty(&self, page: &MemPageRef) {
         self.dirty_pages.insert(page.id());
         page.set_dirty();
     }
 
-    pub fn flush(&mut self) -> storage::Result<()> {
-        Ok(self.io.flush()?)
-    }
+    // pub fn flush(&mut self) -> storage::Result<()> {
+    //     Ok(self.io.flush()?)
+    // }
 
-    pub fn sync(&self) -> storage::Result<()> {
-        Ok(self.io.sync()?)
-    }
+    // pub fn sync(&self) -> storage::Result<()> {
+    //     Ok(self.io.sync()?)
+    // }
 }
 
 /// Takes reference to write result and consumes exclusive lock to page. If
@@ -688,26 +720,27 @@ mod tests {
 
         let db = crate::database::Database::open("./test-db.db")?;
 
-        // {
-        //     let tx = db.begin_write()?;
+        {
+            let tx = db.begin_write()?;
 
-        //     let mut cursor = tx.cursor(1);
+            {
+                // scope cursor to drop before tx commit.
+                let mut cursor = tx.cursor(1);
 
-        //     let mut record = RecordBuilder::new();
+                let mut record = RecordBuilder::new();
 
-        //     record.add(Value::Null);
-        //     record.add(Value::Int(123));
-        //     record.add(Value::Text(Text::new("Maciek".into())));
+                record.add(Value::Null);
+                record.add(Value::Int(123));
+                record.add(Value::Text(Text::new("Maciek".into())));
 
-        //     cursor.insert(BTreeKey::new_table_key(
-        //         10,
-        //         Some(record.serialize_to_record()),
-        //     ))?;
+                cursor.insert(BTreeKey::new_table_key(
+                    10,
+                    Some(record.serialize_to_record()),
+                ))?;
+            }
 
-        //     drop(cursor);
-
-        //     tx.commit()?;
-        // }
+            tx.commit()?;
+        }
 
         {
             let tx = db.begin_read()?;
@@ -718,7 +751,10 @@ mod tests {
 
             println!("result: {:?}", test);
 
-            // println!("{:?}", cursor.record()?);
+            let record = cursor.record()?;
+
+            println!("{:?}", record);
+            println!("text: {:?}", record.get_value(2));
 
             tx.commit()?;
         }
