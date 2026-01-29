@@ -3,6 +3,7 @@ use std::{
     collections::{BinaryHeap, HashMap},
     fmt::Debug,
     io::IoSlice,
+    ops::{Bound, RangeBounds},
 };
 
 use crate::{
@@ -349,11 +350,6 @@ impl Page {
         (self.buffer.size() - self.header_size() - self.offset) as u16
     }
 
-    /// Total space that will be used by cell.
-    pub fn storage_size(&self, cell_size: u16) -> u16 {
-        SLOT_SIZE as u16 + cell_size
-    }
-
     /// Free space between slot array and last cell.
     pub fn free_space(&self) -> u16 {
         self.last_used_offset()
@@ -433,9 +429,7 @@ impl Page {
     }
 
     fn get_cell_size(&self, offset: u16) -> u16 {
-        self.get_cell_at_offset(offset)
-            .unwrap()
-            .local_storage_size() as u16
+        self.get_cell_at_offset(offset).unwrap().local_size() as u16
     }
 
     /// Returns cell at given offset.
@@ -475,10 +469,7 @@ impl Page {
     }
 
     pub fn insert_cell(&self, index: SlotNumber, cell: BTreeCell) {
-        assert!(
-            cell.local_storage_size() <= self.max_cell_size(),
-            "can't fit cell"
-        );
+        assert!(cell.local_size() <= self.max_cell_size(), "can't fit cell");
 
         if self.is_overflow() {
             self.overflow_map().insert(index, cell);
@@ -492,8 +483,8 @@ impl Page {
     fn try_insert_cell(&self, index: SlotNumber, cell: BTreeCell) -> Result<SlotNumber, BTreeCell> {
         assert!(index <= self.count(), "Index out of range");
 
-        let cell_size = cell.local_storage_size();
-        let storage_cell_size = cell_size + SLOT_SIZE;
+        let cell_size = cell.local_size();
+        let storage_cell_size = cell.storage_size();
 
         let total_free_space = self.total_free_space() as usize;
 
@@ -545,8 +536,8 @@ impl Page {
         new_cell: BTreeCell,
     ) -> Result<BTreeCell, BTreeCell> {
         let old_cell = self.get_cell(index).unwrap();
-        let old_cell_size = old_cell.local_storage_size();
-        let new_cell_size = new_cell.local_storage_size();
+        let old_cell_size = old_cell.local_size();
+        let new_cell_size = new_cell.local_size();
 
         let total_free_space = self.total_free_space();
 
@@ -585,9 +576,58 @@ impl Page {
         let offset = self.slot_array().remove(index);
 
         self.freeblock_list()
-            .push_freeblock(offset, removed_cell.local_storage_size() as u16);
+            .push_freeblock(offset, removed_cell.local_size() as u16);
 
         return removed_cell;
+    }
+
+    /// Functions like [`Vec::drain`], but removes elements only when consumed.
+    ///
+    /// # Note
+    ///
+    /// This function doesn't care about high key, so you have to make sure to
+    /// either include it or not.
+    pub fn drain(&self, range: impl RangeBounds<SlotNumber>) -> impl Iterator<Item = BTreeCell> {
+        let start = match range.start_bound() {
+            Bound::Unbounded => 0,
+            Bound::Excluded(i) => i + 1,
+            Bound::Included(i) => *i,
+        };
+
+        let end = match range.end_bound() {
+            Bound::Unbounded => self.len(),
+            Bound::Excluded(i) => *i,
+            Bound::Included(i) => i + 1,
+        };
+
+        let mut drain_index = start;
+        let mut slot_index = start;
+
+        std::iter::from_fn(move || {
+            if drain_index < end {
+                let cell = self.overflow_map().remove(&drain_index).unwrap_or_else(|| {
+                    let cell = self.get_cell(slot_index).unwrap().to_owned();
+                    slot_index += 1;
+                    cell
+                });
+
+                drain_index += 1;
+
+                Some(cell)
+            } else {
+                let mut slot_array = self.slot_array();
+
+                for slot in start..slot_index {
+                    let offset = slot_array.get(slot);
+                    let size = self.get_cell(slot).unwrap().local_size() as u16;
+
+                    self.freeblock_list().push_freeblock(offset, size);
+                    slot_array.remove(slot);
+                }
+
+                None
+            }
+        })
     }
 
     pub fn child(&self, index: SlotNumber) -> PageNumber {
@@ -1084,8 +1124,10 @@ impl<'a> Iterator for CellIterator<'a> {
 }
 
 pub trait CellOps {
-    /// Size of cell including header, but only stored locally (not total)
-    fn local_storage_size(&self) -> usize;
+    /// Size of cell including header, but only stored locally (not total).
+    fn local_size(&self) -> usize;
+    /// Required size to store this cell (cell size + slot number size).
+    fn storage_size(&self) -> usize;
     /// Returns reference to whole cell content.
     fn raw(&self) -> &[u8];
     /// Takes buffer and writtes cell content to it.
@@ -1125,12 +1167,21 @@ pub enum BTreeCell {
 }
 
 impl CellOps for BTreeCell {
-    fn local_storage_size(&self) -> usize {
+    fn local_size(&self) -> usize {
         match self {
-            Self::IndexInternal(cell) => cell.local_storage_size(),
-            Self::IndexLeaf(cell) => cell.local_storage_size(),
-            Self::TableInternal(cell) => cell.local_storage_size(),
-            Self::TableLeaf(cell) => cell.local_storage_size(),
+            Self::IndexInternal(cell) => cell.local_size(),
+            Self::IndexLeaf(cell) => cell.local_size(),
+            Self::TableInternal(cell) => cell.local_size(),
+            Self::TableLeaf(cell) => cell.local_size(),
+        }
+    }
+
+    fn storage_size(&self) -> usize {
+        match self {
+            Self::IndexInternal(cell) => cell.storage_size(),
+            Self::IndexLeaf(cell) => cell.storage_size(),
+            Self::TableInternal(cell) => cell.storage_size(),
+            Self::TableLeaf(cell) => cell.storage_size(),
         }
     }
 
@@ -1254,10 +1305,17 @@ impl IndexInternalCell {
 }
 
 impl CellOps for IndexInternalCell {
-    fn local_storage_size(&self) -> usize {
+    #[inline]
+    fn local_size(&self) -> usize {
         self.raw.len()
     }
 
+    #[inline]
+    fn storage_size(&self) -> usize {
+        SLOT_SIZE + self.local_size()
+    }
+
+    #[inline]
     fn raw(&self) -> &[u8] {
         &self.raw
     }
@@ -1267,6 +1325,7 @@ impl CellOps for IndexInternalCell {
         buffer[..end].copy_from_slice(&self.raw);
     }
 
+    #[inline]
     fn is_overflowing(&self) -> bool {
         self.first_overflow.is_some()
     }
@@ -1277,14 +1336,17 @@ impl CellOps for IndexInternalCell {
         &self.raw()[start..end]
     }
 
+    #[inline]
     fn first_overflow(&self) -> Option<PageNumber> {
         self.first_overflow
     }
 
+    #[inline]
     fn payload_size(&self) -> VarInt {
         self.payload_size
     }
 
+    #[inline]
     fn payload_ref(&self) -> PayloadRef {
         self.payload_ref
     }
@@ -1333,10 +1395,17 @@ impl IndexLeafCell {
 }
 
 impl CellOps for IndexLeafCell {
-    fn local_storage_size(&self) -> usize {
+    #[inline]
+    fn local_size(&self) -> usize {
         self.raw.len()
     }
 
+    #[inline]
+    fn storage_size(&self) -> usize {
+        SLOT_SIZE + self.local_size()
+    }
+
+    #[inline]
     fn raw(&self) -> &[u8] {
         &self.raw
     }
@@ -1346,6 +1415,7 @@ impl CellOps for IndexLeafCell {
         buffer[..end].copy_from_slice(&self.raw);
     }
 
+    #[inline]
     fn is_overflowing(&self) -> bool {
         self.first_overflow.is_some()
     }
@@ -1356,14 +1426,17 @@ impl CellOps for IndexLeafCell {
         &self.raw()[start..end]
     }
 
+    #[inline]
     fn first_overflow(&self) -> Option<PageNumber> {
         self.first_overflow
     }
 
+    #[inline]
     fn payload_size(&self) -> VarInt {
         self.payload_size
     }
 
+    #[inline]
     fn payload_ref(&self) -> PayloadRef {
         self.payload_ref
     }
@@ -1398,10 +1471,17 @@ impl TableInternalCell {
 }
 
 impl CellOps for TableInternalCell {
-    fn local_storage_size(&self) -> usize {
+    #[inline]
+    fn local_size(&self) -> usize {
         self.raw.len()
     }
 
+    #[inline]
+    fn storage_size(&self) -> usize {
+        SLOT_SIZE + self.local_size()
+    }
+
+    #[inline]
     fn raw(&self) -> &[u8] {
         &self.raw
     }
@@ -1416,18 +1496,22 @@ impl CellOps for TableInternalCell {
         false
     }
 
+    #[inline]
     fn payload(&self) -> &[u8] {
         &self.raw[..self.payload_size() as usize]
     }
 
+    #[inline(always)]
     fn first_overflow(&self) -> Option<PageNumber> {
         None
     }
 
+    #[inline]
     fn payload_size(&self) -> VarInt {
         (self.raw.len() - size_of::<PageNumber>()) as VarInt
     }
 
+    #[inline]
     fn payload_ref(&self) -> PayloadRef {
         PayloadRef {
             offset: 0,
@@ -1488,10 +1572,17 @@ impl TableLeafCell {
 }
 
 impl CellOps for TableLeafCell {
-    fn local_storage_size(&self) -> usize {
+    #[inline]
+    fn local_size(&self) -> usize {
         self.raw.len()
     }
 
+    #[inline]
+    fn storage_size(&self) -> usize {
+        SLOT_SIZE + self.local_size()
+    }
+
+    #[inline]
     fn raw(&self) -> &[u8] {
         &self.raw
     }
@@ -1501,6 +1592,7 @@ impl CellOps for TableLeafCell {
         buffer[..end].copy_from_slice(&self.raw);
     }
 
+    #[inline]
     fn is_overflowing(&self) -> bool {
         self.first_overflow.is_some()
     }
@@ -1511,14 +1603,17 @@ impl CellOps for TableLeafCell {
         &self.raw()[start..end]
     }
 
+    #[inline]
     fn first_overflow(&self) -> Option<PageNumber> {
         self.first_overflow
     }
 
+    #[inline]
     fn payload_size(&self) -> VarInt {
         self.payload_size
     }
 
+    #[inline]
     fn payload_ref(&self) -> PayloadRef {
         self.payload_ref
     }
@@ -1533,12 +1628,21 @@ pub enum BTreeCellRef<'a> {
 }
 
 impl<'a> CellOps for BTreeCellRef<'a> {
-    fn local_storage_size(&self) -> usize {
+    fn local_size(&self) -> usize {
         match self {
-            Self::IndexInternal(cell) => cell.local_storage_size(),
-            Self::IndexLeaf(cell) => cell.local_storage_size(),
-            Self::TableInternal(cell) => cell.local_storage_size(),
-            Self::TableLeaf(cell) => cell.local_storage_size(),
+            Self::IndexInternal(cell) => cell.local_size(),
+            Self::IndexLeaf(cell) => cell.local_size(),
+            Self::TableInternal(cell) => cell.local_size(),
+            Self::TableLeaf(cell) => cell.local_size(),
+        }
+    }
+
+    fn storage_size(&self) -> usize {
+        match self {
+            Self::IndexInternal(cell) => cell.storage_size(),
+            Self::IndexLeaf(cell) => cell.storage_size(),
+            Self::TableInternal(cell) => cell.storage_size(),
+            Self::TableLeaf(cell) => cell.storage_size(),
         }
     }
 
@@ -1660,10 +1764,17 @@ pub struct IndexInternalCellRef<'a> {
 }
 
 impl<'a> CellOps for IndexInternalCellRef<'a> {
-    fn local_storage_size(&self) -> usize {
+    #[inline]
+    fn local_size(&self) -> usize {
         self.raw.len()
     }
 
+    #[inline]
+    fn storage_size(&self) -> usize {
+        SLOT_SIZE + self.local_size()
+    }
+
+    #[inline]
     fn raw(&self) -> &[u8] {
         &self.raw
     }
@@ -1673,6 +1784,7 @@ impl<'a> CellOps for IndexInternalCellRef<'a> {
         buffer[..end].copy_from_slice(&self.raw);
     }
 
+    #[inline]
     fn is_overflowing(&self) -> bool {
         self.first_overflow.is_some()
     }
@@ -1683,14 +1795,17 @@ impl<'a> CellOps for IndexInternalCellRef<'a> {
         &self.raw()[start..end]
     }
 
+    #[inline]
     fn first_overflow(&self) -> Option<PageNumber> {
         self.first_overflow
     }
 
+    #[inline]
     fn payload_size(&self) -> VarInt {
         self.payload_size
     }
 
+    #[inline]
     fn payload_ref(&self) -> PayloadRef {
         self.payload_ref
     }
@@ -1705,10 +1820,17 @@ pub struct IndexLeafCellRef<'a> {
 }
 
 impl<'a> CellOps for IndexLeafCellRef<'a> {
-    fn local_storage_size(&self) -> usize {
+    #[inline]
+    fn local_size(&self) -> usize {
         self.raw.len()
     }
 
+    #[inline]
+    fn storage_size(&self) -> usize {
+        SLOT_SIZE + self.local_size()
+    }
+
+    #[inline]
     fn raw(&self) -> &[u8] {
         &self.raw
     }
@@ -1718,6 +1840,7 @@ impl<'a> CellOps for IndexLeafCellRef<'a> {
         buffer[..end].copy_from_slice(&self.raw);
     }
 
+    #[inline]
     fn is_overflowing(&self) -> bool {
         self.first_overflow.is_some()
     }
@@ -1728,14 +1851,17 @@ impl<'a> CellOps for IndexLeafCellRef<'a> {
         &self.raw()[start..end]
     }
 
+    #[inline]
     fn first_overflow(&self) -> Option<PageNumber> {
         self.first_overflow
     }
 
+    #[inline]
     fn payload_size(&self) -> VarInt {
         self.payload_size
     }
 
+    #[inline]
     fn payload_ref(&self) -> PayloadRef {
         self.payload_ref
     }
@@ -1749,10 +1875,17 @@ pub struct TableInternalCellRef<'a> {
 }
 
 impl<'a> CellOps for TableInternalCellRef<'a> {
-    fn local_storage_size(&self) -> usize {
+    #[inline]
+    fn local_size(&self) -> usize {
         self.raw.len()
     }
 
+    #[inline]
+    fn storage_size(&self) -> usize {
+        SLOT_SIZE + self.local_size()
+    }
+
+    #[inline]
     fn raw(&self) -> &[u8] {
         &self.raw
     }
@@ -1761,23 +1894,28 @@ impl<'a> CellOps for TableInternalCellRef<'a> {
         let end = self.raw.len();
         buffer[..end].copy_from_slice(&self.raw);
     }
+
     #[inline(always)]
     fn is_overflowing(&self) -> bool {
         false
     }
 
+    #[inline]
     fn payload(&self) -> &[u8] {
         &self.raw[..self.payload_size() as usize]
     }
 
+    #[inline]
     fn first_overflow(&self) -> Option<PageNumber> {
         None
     }
 
+    #[inline]
     fn payload_size(&self) -> VarInt {
         (self.raw.len() - size_of::<PageNumber>()) as VarInt
     }
 
+    #[inline]
     fn payload_ref(&self) -> PayloadRef {
         PayloadRef {
             offset: 0,
@@ -1796,10 +1934,17 @@ pub struct TableLeafCellRef<'a> {
 }
 
 impl<'a> CellOps for TableLeafCellRef<'a> {
-    fn local_storage_size(&self) -> usize {
+    #[inline]
+    fn local_size(&self) -> usize {
         self.raw.len()
     }
 
+    #[inline]
+    fn storage_size(&self) -> usize {
+        SLOT_SIZE + self.local_size()
+    }
+
+    #[inline]
     fn raw(&self) -> &[u8] {
         &self.raw
     }
@@ -1809,6 +1954,7 @@ impl<'a> CellOps for TableLeafCellRef<'a> {
         buffer[..end].copy_from_slice(&self.raw);
     }
 
+    #[inline]
     fn is_overflowing(&self) -> bool {
         self.first_overflow.is_some()
     }
@@ -1819,14 +1965,17 @@ impl<'a> CellOps for TableLeafCellRef<'a> {
         &self.raw()[start..end]
     }
 
+    #[inline]
     fn first_overflow(&self) -> Option<PageNumber> {
         self.first_overflow
     }
 
+    #[inline]
     fn payload_size(&self) -> VarInt {
         self.payload_size
     }
 
+    #[inline]
     fn payload_ref(&self) -> PayloadRef {
         self.payload_ref
     }
