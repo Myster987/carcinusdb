@@ -720,27 +720,25 @@ mod tests {
 
         let db = crate::database::Database::open("./test-db.db")?;
 
+        let tx = db.begin_write()?;
+
         {
-            let tx = db.begin_write()?;
+            // scope cursor to drop before tx commit.
+            let mut cursor = tx.cursor(1);
 
-            {
-                // scope cursor to drop before tx commit.
-                let mut cursor = tx.cursor(1);
+            let mut record = RecordBuilder::new();
 
-                let mut record = RecordBuilder::new();
+            record.add(Value::Null);
+            record.add(Value::Int(123));
+            record.add(Value::Text(Text::new("Maciek".into())));
 
-                record.add(Value::Null);
-                record.add(Value::Int(123));
-                record.add(Value::Text(Text::new("Maciek".into())));
-
-                cursor.insert(BTreeKey::new_table_key(
-                    10,
-                    Some(record.serialize_to_record()),
-                ))?;
-            }
-
-            tx.commit()?;
+            cursor.insert(BTreeKey::new_table_key(
+                10,
+                Some(record.serialize_to_record()),
+            ))?;
         }
+
+        tx.commit()?;
 
         {
             let tx = db.begin_read()?;
@@ -751,7 +749,7 @@ mod tests {
 
             println!("result: {:?}", test);
 
-            let record = cursor.record()?;
+            let record = cursor.try_record()?;
 
             println!("{:?}", record);
             println!("text: {:?}", record.get_value(2));
