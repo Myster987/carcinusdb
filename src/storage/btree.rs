@@ -151,7 +151,8 @@ pub trait DatabaseCursor {
     // /// The same as `DatabaseCursor::value` but returns owned data.
     // fn value_owned(&mut self) -> storage::Result<Option<Record<'static>>>;
 
-    fn record(&self) -> storage::Result<Record<'static>>;
+    /// Returns record at current cursor position.
+    fn try_record(&self) -> storage::Result<Record<'static>>;
 
     /// Returns current page and slot that cursor is on.
     fn position(&self) -> (PageNumber, SlotNumber);
@@ -163,7 +164,7 @@ pub struct BTreeCursor<'tx, Tx> {
     root: PageNumber,
     current_page: PageNumber,
     current_slot: SlotNumber,
-    // current_record: Option<Record<'static>>,
+    path_stack: Vec<(PageNumber, SlotNumber)>,
     init: bool,
     done: bool,
 }
@@ -176,7 +177,7 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
             root,
             current_page: root,
             current_slot: 0,
-            // current_record: None,
+            path_stack: Vec::new(),
             init: false,
             done: false,
         }
@@ -349,8 +350,11 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
                 });
             }
 
+            let child_slot = search_result.unwrap();
+
+            self.path_stack.push((self.current_page, child_slot));
             // go to child which may contain searched key
-            self.current_page = guard.child(search_result.unwrap_err());
+            self.current_page = guard.child(child_slot);
         }
     }
 
@@ -421,7 +425,7 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
         Ok(false)
     }
 
-    fn record(&self) -> storage::Result<Record<'static>> {
+    fn try_record(&self) -> storage::Result<Record<'static>> {
         let page = self
             .pager
             .read_page(&*self.tx.borrow(), self.current_page)?;
@@ -434,32 +438,14 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
             .map(|r| r.to_owned())
     }
 
-    // fn key(&mut self) -> storage::Result<BTreeKey<'_>> {
-    //     let page = self
-    //         .page_guard
-    //         .as_ref()
-    //         .ok_or(storage::Error::InvalidPageType)?;
-    //     self.extracty_key(page, self.current_slot)
-    // }
-
-    // fn value(&mut self) -> storage::Result<Option<Record<'_>>> {
-    //     self.key().map(|key| key.get_record())
-    // }
-
-    // fn key_owned(&mut self) -> storage::Result<BTreeKey<'static>> {
-    //     self.key().map(|key| key.to_owned())
-    // }
-
-    // fn value_owned(&mut self) -> storage::Result<Option<Record<'static>>> {
-    //     self.value().map(|val| val.map(|record| record.to_owned()))
-    // }
-
     fn position(&self) -> (PageNumber, SlotNumber) {
         (self.current_page, self.current_slot)
     }
 }
 
 impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
+    const BALANCE_SIBLINGS_PER_SIDE: usize = 3;
+
     pub fn insert(&mut self, entry: BTreeKey<'_>) -> storage::Result<()> {
         let search_result = self.seek(&entry)?;
 
@@ -634,17 +620,48 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     }
 
     fn balance(&mut self) -> storage::Result<()> {
-        let page = self
+        let current_page = self
             .pager
             .read_page(&*self.tx.borrow(), self.current_page)?;
-        let page_guard = page.lock_exclusive();
+        let current_page_guard = current_page.lock_exclusive();
 
         let is_root = self.current_page == self.root;
 
-        let is_underflow = page_guard.is_empty() || !is_root && page_guard.is_underflow();
+        let is_underflow =
+            current_page_guard.is_empty() || !is_root && current_page_guard.is_underflow();
 
-        todo!();
+        // tree is balanced.
+        if !current_page_guard.is_overflow() && !is_underflow {
+            return Ok(());
+        }
+
+        // // root is empty.
+        // if is_root && is_underflow {
+        //     // root is the only page, so we can't do anything.
+        //     if current_page_guard.is_leaf() {
+        //         return Ok(());
+        //     }
+
+        //     let child_page = current_page_guard.try_rigth_child().unwrap();
+        //     let
+        // }
+
+        if current_page_guard.is_overflow() {
+            let new_page = self
+                .pager
+                .alloc_page(&mut *self.tx.borrow_mut(), current_page_guard.page_type())?;
+
+            let cells: Vec<_> = current_page_guard
+                .drain(current_page_guard.first_data_offset()..)
+                .collect();
+
+            // let total_size = cells.iter().map(|cell| Page::storage_size(&self, cell_size))
+        }
 
         Ok(())
     }
+
+    // fn load_siblings(&mut self, page_number: PageNumber, parent_page: PageNumber) -> Vec<(PageNumber, SlotNumber)> {
+
+    // }
 }
