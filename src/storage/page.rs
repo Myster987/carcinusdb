@@ -1158,7 +1158,7 @@ impl PayloadRef {
 }
 
 /// Wraps possible types of cell stored in `Page`. On disk each variable is stored in little endian except varints.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BTreeCell {
     IndexInternal(IndexInternalCell),
     IndexLeaf(IndexLeafCell),
@@ -1249,7 +1249,7 @@ impl CellOps for BTreeCell {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct IndexInternalCell {
     /// Pointer to whole cell content. (used for copying cell).
     raw: Vec<u8>,
@@ -1352,7 +1352,7 @@ impl CellOps for IndexInternalCell {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct IndexLeafCell {
     /// Pointer to whole cell content. (used for copying cell).
     raw: Vec<u8>,
@@ -1442,7 +1442,7 @@ impl CellOps for IndexLeafCell {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TableInternalCell {
     /// Pointer to whole cell content. (used for copying cell).
     raw: Vec<u8>,
@@ -1520,7 +1520,7 @@ impl CellOps for TableInternalCell {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TableLeafCell {
     /// Pointer to whole cell content. (used for copying cell).
     raw: Vec<u8>,
