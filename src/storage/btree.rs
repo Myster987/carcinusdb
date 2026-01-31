@@ -1,4 +1,4 @@
-use std::{borrow::Cow, cell::RefCell, cmp::Ordering, rc::Rc, sync::Arc};
+use std::{borrow::Cow, cell::RefCell, cmp::Ordering, collections::VecDeque, rc::Rc, sync::Arc};
 
 use crate::{
     sql::record::{Record, compare_records, records_equal},
@@ -217,7 +217,7 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
     /// when page was splited and key we are looking for is there.
     pub fn key_in_range(&self, page: &Page, key: &BTreeKey) -> storage::Result<bool> {
         if let Some(high_key) = self.extract_high_key(page)? {
-            Ok(*key <= high_key)
+            Ok(*key < high_key)
         } else {
             Ok(true)
         }
@@ -651,11 +651,11 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 .pager
                 .alloc_page(&mut *self.tx.borrow_mut(), current_page_guard.page_type())?;
 
-            let cells: Vec<_> = current_page_guard
-                .drain(current_page_guard.first_data_offset()..)
-                .collect();
+            let cells: VecDeque<_> = current_page_guard.drain(..).collect();
 
-            // let total_size = cells.iter().map(|cell| Page::storage_size(&self, cell_size))
+            let cell_sizes = cells.iter().map(|c| c.local_size());
+
+            todo!()
         }
 
         Ok(())
@@ -664,4 +664,29 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     // fn load_siblings(&mut self, page_number: PageNumber, parent_page: PageNumber) -> Vec<(PageNumber, SlotNumber)> {
 
     // }
+}
+
+type CellSplit = (Option<BTreeCell>, VecDeque<BTreeCell>);
+
+// fn calculate_split_ratio(cell_sizes: impl Iterator<Item = usize>, split_thre) -> Vec<usize> {}
+
+fn split_cells(mut cells: VecDeque<BTreeCell>, has_high_key: bool) -> (CellSplit, CellSplit) {
+    let len = cells.len();
+    let mid = len.div_ceil(2);
+
+    let mut rigth_high_key = None;
+
+    if has_high_key {
+        rigth_high_key = cells.pop_front();
+    }
+
+    let rigth = cells.split_off(mid);
+    let left = cells;
+
+    let left_high_key = rigth[0].clone();
+
+    let left_split = (Some(left_high_key), left);
+    let rigth_split = (rigth_high_key, rigth);
+
+    (left_split, rigth_split)
 }
