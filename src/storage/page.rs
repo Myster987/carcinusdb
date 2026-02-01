@@ -191,8 +191,8 @@ impl TryFrom<u8> for PageType {
 /// | length            | 2     | 3         | number of slots in slot array.
 /// | last_used_offset  | 2     | 5         | offset to last used space. Used to calculate if new data can fit in Page.
 /// | free_fragments    | 1     | 7         | number of free fragments. Tiny gaps between cells, to small to fit new data.
-/// | rigth_sibling     | 4     | 8         | points to rigth sibling of this page (at the same level in B-Tree).
-/// | rigth_child       | 4     | 12        | present only in Internal Pages. Points to next B-Tree page > current.
+/// | right_sibling     | 4     | 8         | points to right sibling of this page (at the same level in B-Tree).
+/// | right_child       | 4     | 12        | present only in Internal Pages. Points to next B-Tree page > current.
 ///
 /// Total size: 16 bytes (Internal Pages) or 12 bytes (Leaf Pages) bytes long.
 ///
@@ -226,8 +226,8 @@ impl Page {
     const LENGTH_OFFSET: usize = Self::FIRST_FREEBLOCK_OFFSET + size_of::<SlotNumber>();
     const LAST_USED_OFFSET: usize = Self::LENGTH_OFFSET + size_of::<SlotNumber>();
     const FREE_FRAGMENTS_OFFSET: usize = Self::LAST_USED_OFFSET + size_of::<SlotNumber>();
-    const RIGTH_SIBLING_OFFSET: usize = Self::FREE_FRAGMENTS_OFFSET + size_of::<u8>();
-    const RIGTH_CHILD_OFFSET: usize = Self::RIGTH_SIBLING_OFFSET + size_of::<PageNumber>();
+    const RIGHT_SIBLING_OFFSET: usize = Self::FREE_FRAGMENTS_OFFSET + size_of::<u8>();
+    const RIGHT_CHILD_OFFSET: usize = Self::RIGHT_SIBLING_OFFSET + size_of::<PageNumber>();
 
     pub const HIGH_KEY_SLOT: SlotNumber = 0;
     const FIRST_DATA_KEY: SlotNumber = Self::HIGH_KEY_SLOT + 1;
@@ -269,8 +269,8 @@ impl Page {
         self.set_len(0);
         self.set_last_used_offset(self.as_ptr().len() as u16);
         self.set_free_fragments(0);
-        self.write_u32(Self::RIGTH_SIBLING_OFFSET, 0);
-        self.write_u32(Self::RIGTH_CHILD_OFFSET, 0);
+        self.write_u32(Self::RIGHT_SIBLING_OFFSET, 0);
+        self.write_u32(Self::RIGHT_CHILD_OFFSET, 0);
     }
 
     /// Returns reference to whole page buffer.
@@ -639,7 +639,7 @@ impl Page {
             "Invalid page type."
         );
         if index == self.count() {
-            self.try_rigth_child().unwrap()
+            self.try_right_child().unwrap()
         } else {
             match self.get_cell(index).unwrap() {
                 BTreeCellRef::IndexInternal(cell) => cell.left_child,
@@ -651,7 +651,7 @@ impl Page {
 
     #[inline]
     pub fn has_high_key(&self) -> bool {
-        self.try_rigth_sibling().is_some()
+        self.try_right_sibling().is_some()
     }
 }
 
@@ -723,17 +723,21 @@ impl Page {
         self.set_free_fragments(self.free_fragments() + value)
     }
 
-    pub fn try_rigth_sibling(&self) -> Option<PageNumber> {
-        let next = self.read_u32(Self::RIGTH_SIBLING_OFFSET);
+    pub fn try_right_sibling(&self) -> Option<PageNumber> {
+        let next = self.read_u32(Self::RIGHT_SIBLING_OFFSET);
 
         if next != 0 { Some(next) } else { None }
     }
 
+    pub fn set_right_sibling(&self, value: PageNumber) {
+        self.write_u32(Self::RIGHT_SIBLING_OFFSET, value);
+    }
+
     /// Returns next `PageNumber` if `PageType` is internal or None if `Page` is Leaf.
-    pub fn try_rigth_child(&self) -> Option<PageNumber> {
+    pub fn try_right_child(&self) -> Option<PageNumber> {
         match self.page_type() {
             PageType::IndexInternal | PageType::TableInternal => {
-                Some(self.read_u32(Self::RIGTH_CHILD_OFFSET))
+                Some(self.read_u32(Self::RIGHT_CHILD_OFFSET))
             }
             PageType::IndexLeaf | PageType::TableLeaf => None,
         }
@@ -825,7 +829,8 @@ impl Debug for Page {
             .field("num_slots", &self.len())
             .field("last_used_offset", &self.last_used_offset())
             .field("num_free_fragments", &self.free_fragments())
-            .field("rigth_child", &self.try_rigth_child())
+            .field("right_sibling", &self.try_right_sibling())
+            .field("right_child", &self.try_right_child())
             .field("slot_array", &self.slot_array())
             .field(
                 "cells",

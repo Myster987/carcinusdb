@@ -323,7 +323,7 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
             // we need to move to rigth node
             if !self.key_in_range(&guard, key)? {
                 self.current_page = guard
-                    .try_rigth_sibling()
+                    .try_right_sibling()
                     .expect("page was splited and should contain sibling");
                 continue;
             }
@@ -410,7 +410,7 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
                 return Ok(true);
             }
 
-            if let Some(rigth_sibling) = page.try_rigth_sibling() {
+            if let Some(rigth_sibling) = page.try_right_sibling() {
                 let next_page = self.pager.read_page(&*self.tx.borrow(), rigth_sibling)?;
                 let guard = next_page.lock_shared();
 
@@ -651,9 +651,40 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 .pager
                 .alloc_page(&mut *self.tx.borrow_mut(), current_page_guard.page_type())?;
 
-            let cells: VecDeque<_> = current_page_guard.drain(..).collect();
+            let mut cells: VecDeque<_> = current_page_guard.drain(..).collect();
 
-            let cell_sizes = cells.iter().map(|c| c.local_size());
+            let cell_sizes: Vec<_> = cells.iter().map(|c| c.local_size()).collect();
+
+            let (left_high_key, right_high_key, split_index) = calculate_split_ratio(
+                &cell_sizes,
+                current_page_guard.raw().len(),
+                current_page_guard.has_high_key(),
+            );
+
+            let right_high_key = right_high_key.map(|right| cells[right].clone());
+            let left_high_key = left_high_key.map(|left| cells[left].clone());
+
+            let rigth = cells.split_off(split_index);
+
+            // remove old high key
+            let _ = cells.pop_front();
+            {
+                let new_page = self.pager.read_page(&*self.tx.borrow(), new_page)?;
+                let new_page_guard = new_page.lock_exclusive();
+
+                new_page_guard.insert_cell(0, left_high_key.unwrap());
+
+                let mut current_index = 1;
+
+                for cell in rigth {
+                    new_page_guard.insert_cell(current_index, cell);
+                    current_index += 1;
+                }
+
+                new_page_guard.set_right_sibling(self.current_page);
+
+                self.pager.add_dirty(&new_page);
+            }
 
             todo!()
         }
@@ -666,27 +697,72 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     // }
 }
 
-type CellSplit = (Option<BTreeCell>, VecDeque<BTreeCell>);
+type CellSplit = (Option<usize>, Vec<usize>);
 
-// fn calculate_split_ratio(cell_sizes: impl Iterator<Item = usize>, split_thre) -> Vec<usize> {}
+fn calculate_split_ratio(
+    cell_sizes: &[usize],
+    split_threshold: usize,
+    has_high_key: bool,
+) -> (Option<usize>, Option<usize>, usize) {
+    let cell_sizes = cell_sizes.iter().copied();
 
-fn split_cells(mut cells: VecDeque<BTreeCell>, has_high_key: bool) -> (CellSplit, CellSplit) {
-    let len = cells.len();
-    let mid = len.div_ceil(2);
+    let mut running = 0;
 
-    let mut rigth_high_key = None;
+    let mut right_high_key = None;
+    let mut split_index = 0;
 
-    if has_high_key {
-        rigth_high_key = cells.pop_front();
+    for (i, size) in cell_sizes.enumerate() {
+        if has_high_key && right_high_key.is_none() {
+            right_high_key = Some(i);
+            continue;
+        }
+
+        if running >= split_threshold {
+            split_index = i;
+            break;
+        }
+
+        running += size;
     }
 
-    let rigth = cells.split_off(mid);
-    let left = cells;
+    let left_high_key = Some(split_index);
 
-    let left_high_key = rigth[0].clone();
+    (left_high_key, right_high_key, split_index)
+}
 
-    let left_split = (Some(left_high_key), left);
-    let rigth_split = (rigth_high_key, rigth);
+#[cfg(test)]
+mod tests {
+    use crate::storage::page;
 
-    (left_split, rigth_split)
+    use super::*;
+
+    #[test]
+    fn test_split_ratio() {
+        let usable_space = page::DEFAULT_PAGE_SIZE as usize;
+        let split_threshold = usable_space / 2;
+        let has_high_key = true;
+
+        let min_cell_size = page::min_cell_size(usable_space);
+        let max_cell_size = page::max_cell_size(usable_space);
+
+        let mut cell_sizes = Vec::new();
+        let mut total = 0;
+
+        if has_high_key {
+            cell_sizes.push(rand::random_range(min_cell_size..max_cell_size));
+        }
+
+        while total < usable_space {
+            let size = rand::random_range(min_cell_size..max_cell_size);
+            total += size;
+            cell_sizes.push(size);
+        }
+
+        let ratio = calculate_split_ratio(&cell_sizes, split_threshold, has_high_key);
+
+        println!("min: {min_cell_size}, max: {max_cell_size}");
+        println!("cells: {:?}", cell_sizes);
+        println!("split threshold: {split_threshold}");
+        println!("{:?}", ratio);
+    }
 }
