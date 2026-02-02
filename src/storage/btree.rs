@@ -646,6 +646,92 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         //     let
         // }
 
+        if is_root && current_page_guard.is_overflow() {
+            let child_page_type = current_page_guard.page_type();
+
+            let left_child = self
+                .pager
+                .alloc_page(&mut *self.tx.borrow_mut(), child_page_type)?;
+            let right_child = self
+                .pager
+                .alloc_page(&mut *self.tx.borrow_mut(), child_page_type)?;
+
+            let mut cells: VecDeque<_> = current_page_guard.drain(..).collect();
+
+            let cell_sizes: Vec<_> = cells.iter().map(|c| c.local_size()).collect();
+
+            let (left_high_key, right_high_key, split_index) = calculate_split_ratio(
+                &cell_sizes,
+                current_page_guard.raw().len(),
+                current_page_guard.has_high_key(),
+            );
+
+            let right_high_key = right_high_key.map(|right| cells[right].clone());
+            let left_high_key = left_high_key.map(|left| cells[left].clone());
+
+            let split_cell = cells[split_index].clone();
+
+            let right_cells = cells.split_off(split_index);
+
+            let _ = cells.pop_front();
+            let left_cells = cells;
+
+            {
+                let left_child = self.pager.read_page(&*self.tx.borrow(), left_child)?;
+                let left_child_guard = left_child.lock_exclusive();
+
+                left_child_guard.insert_cell(0, left_high_key.unwrap());
+
+                let mut current_index = 1;
+
+                for cell in left_cells {
+                    left_child_guard.insert_cell(current_index, cell);
+                    current_index += 1;
+                }
+
+                left_child_guard.set_right_sibling(right_child);
+
+                self.pager.add_dirty(&left_child);
+            }
+
+            {
+                let right_child = self.pager.read_page(&*self.tx.borrow(), right_child)?;
+                let right_child_guard = right_child.lock_exclusive();
+
+                let mut current_index = 0;
+
+                if let Some(right_high_key) = right_high_key {
+                    right_child_guard.insert_cell(current_index, right_high_key);
+                    current_index += 1;
+                }
+
+                for cell in right_cells {
+                    right_child_guard.insert_cell(current_index, cell);
+                    current_index += 1;
+                }
+
+                right_child_guard.set_right_sibling(0);
+
+                self.pager.add_dirty(&right_child);
+            }
+
+            // convert into internal cell.
+            let split_cell = match split_cell {
+                cell @ BTreeCell::IndexInternal(_) => cell,
+                cell @ BTreeCell::TableInternal(_) => cell,
+
+                BTreeCell::IndexLeaf(cell) => {
+                    BTreeCell::IndexInternal(cell.into_internal(left_child))
+                }
+                BTreeCell::TableLeaf(cell) => {
+                    BTreeCell::TableInternal(cell.into_internal(left_child))
+                }
+            };
+
+            current_page_guard.insert_cell(0, split_cell);
+            current_page_guard.set_right_child(right_child);
+        }
+
         if current_page_guard.is_overflow() {
             let new_page = self
                 .pager
@@ -664,7 +750,9 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             let right_high_key = right_high_key.map(|right| cells[right].clone());
             let left_high_key = left_high_key.map(|left| cells[left].clone());
 
-            let rigth = cells.split_off(split_index);
+            let split_cell = cells[split_index].clone();
+
+            let right = cells.split_off(split_index);
 
             // remove old high key
             let _ = cells.pop_front();
@@ -676,7 +764,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
                 let mut current_index = 1;
 
-                for cell in rigth {
+                for cell in right {
                     new_page_guard.insert_cell(current_index, cell);
                     current_index += 1;
                 }
