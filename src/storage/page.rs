@@ -743,6 +743,10 @@ impl Page {
         }
     }
 
+    pub fn set_right_child(&self, value: PageNumber) {
+        self.write_u32(Self::RIGHT_CHILD_OFFSET, value);
+    }
+
     /// Returns number of slots in `Page`. Includes high key cell.
     pub fn len(&self) -> u16 {
         self.read_u16(Self::LENGTH_OFFSET)
@@ -1397,6 +1401,15 @@ impl IndexLeafCell {
             first_overflow,
         }
     }
+
+    pub fn into_internal(self, left_child: PageNumber) -> IndexInternalCell {
+        IndexInternalCell::new(
+            left_child,
+            self.payload_size,
+            self.payload(),
+            self.first_overflow,
+        )
+    }
 }
 
 impl CellOps for IndexLeafCell {
@@ -1573,6 +1586,10 @@ impl TableLeafCell {
             payload_ref,
             first_overflow,
         }
+    }
+
+    pub fn into_internal(self, left_child: PageNumber) -> TableInternalCell {
+        TableInternalCell::new(self.row_id, left_child)
     }
 }
 
