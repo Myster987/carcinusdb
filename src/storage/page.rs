@@ -337,7 +337,7 @@ impl Page {
         self.total_free_space() > self.usable_space() as u16 / 2
     }
 
-    /// Depending on `PageType`, this function returns 12 or 8.
+    /// Depending on `PageType`, this function returns 12 or 16.
     pub fn header_size(&self) -> usize {
         match self.page_type() {
             PageType::IndexInternal | PageType::TableInternal => Self::INTERNAL_PAGE_HEADER_SIZE,
@@ -600,6 +600,8 @@ impl Page {
             Bound::Included(i) => i + 1,
         };
 
+        log::trace!("drain range: {start} {end}");
+
         let mut drain_index = start;
         let mut slot_index = start;
 
@@ -616,13 +618,13 @@ impl Page {
                 Some(cell)
             } else {
                 let mut slot_array = self.slot_array();
+                let mut offsets = slot_array.drain(start..slot_index).into_iter();
 
                 for slot in start..slot_index {
-                    let offset = slot_array.get(slot);
+                    let offset = offsets.next().unwrap();
                     let size = self.get_cell(slot).unwrap().local_size() as u16;
 
                     self.freeblock_list().push_freeblock(offset, size);
-                    slot_array.remove(slot);
                 }
 
                 None
@@ -886,9 +888,13 @@ impl<'a> SlotArray<'a> {
         self.set_len(new_len);
     }
 
-    pub fn decrement_len(&mut self) {
-        let new_len = self.len() - 1;
+    pub fn sub_len(&mut self, sub: SlotNumber) {
+        let new_len = self.len() - sub;
         self.set_len(new_len);
+    }
+
+    pub fn decrement_len(&mut self) {
+        self.sub_len(1);
     }
 
     #[inline]
@@ -965,6 +971,54 @@ impl<'a> SlotArray<'a> {
         self.decrement_len();
 
         removed_slot
+    }
+
+    pub fn drain(
+        &mut self,
+        range: impl RangeBounds<SlotNumber>,
+    ) -> impl Iterator<Item = SlotNumber> {
+        let start = match range.start_bound() {
+            Bound::Unbounded => 0,
+            Bound::Excluded(i) => i + 1,
+            Bound::Included(i) => *i,
+        } as usize;
+
+        let end = match range.end_bound() {
+            Bound::Unbounded => self.len(),
+            Bound::Excluded(i) => *i,
+            Bound::Included(i) => i + 1,
+        } as usize;
+
+        let old_len = self.len() as usize;
+        let removed_elements = end - start;
+
+        let mut finished = false;
+        let mut current = start;
+
+        std::iter::from_fn(move || {
+            if finished {
+                return None;
+            }
+
+            if current < end {
+                println!("slot array: {:?}", self);
+                println!("current: {}", current);
+                println!("end: {}", end);
+                let offset = self.get(current as SlotNumber);
+                current += 1;
+
+                Some(offset)
+            } else {
+                if end < old_len {
+                    self.slot_array_mut().copy_within(end.., start);
+                }
+
+                self.sub_len(removed_elements as SlotNumber);
+                finished = true;
+
+                None
+            }
+        })
     }
 }
 
@@ -2268,6 +2322,14 @@ mod tests {
         );
 
         println!("cell payload: {:?}", page.get_cell(0)?.payload());
+
+        println!("{:?}", page.slot_array());
+
+        for slot in page.slot_array().drain(..) {
+            println!("slot: {slot}");
+        }
+
+        println!("{:?}", page.slot_array());
 
         Ok(())
     }
