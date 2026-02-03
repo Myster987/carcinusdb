@@ -707,6 +707,7 @@ pub fn complete_write_page(
 #[cfg(test)]
 mod tests {
     use crate::{
+        database::{CARCINUSDB_MASTER_TABLE_ROOT, Database},
         sql::{
             record::RecordBuilder,
             types::{Value, text::Text},
@@ -716,26 +717,30 @@ mod tests {
 
     #[test]
     fn test_pager() -> anyhow::Result<()> {
-        simple_logger::init_with_level(log::Level::Debug).unwrap();
+        simple_logger::init()?;
 
-        let db = crate::database::Database::open("./test-db.db")?;
+        let db = Database::open("./test-db.db")?;
 
         let tx = db.begin_write()?;
 
         {
             // scope cursor to drop before tx commit.
-            let mut cursor = tx.cursor(1);
+            let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
 
-            let mut record = RecordBuilder::new();
+            let start = 1;
+            let end = 150;
 
-            record.add(Value::Null);
-            record.add(Value::Int(123));
-            record.add(Value::Text(Text::new("Maciek".into())));
+            for i in start..end {
+                let mut record = RecordBuilder::new();
 
-            cursor.insert(BTreeKey::new_table_key(
-                10,
-                Some(record.serialize_to_record()),
-            ))?;
+                record.add(Value::Null);
+                record.add(Value::Int(i));
+                record.add(Value::Text(Text::new(format!("Maciek Kowalski {i}"))));
+
+                let record = record.serialize_to_record();
+
+                cursor.insert(BTreeKey::new_table_key(i, Some(record)))?;
+            }
         }
 
         tx.commit()?;
@@ -743,9 +748,11 @@ mod tests {
         {
             let tx = db.begin_read()?;
 
-            let mut cursor = tx.cursor(1);
+            let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
 
-            let test = cursor.seek(&BTreeKey::new_table_key(10, None))?;
+            // cursor.print_current_page()?;
+
+            let test = cursor.seek(&BTreeKey::new_table_key(15, None))?;
 
             println!("result: {:?}", test);
 
@@ -756,6 +763,8 @@ mod tests {
 
             tx.commit()?;
         }
+
+        // println!("{:?}", )
 
         Ok(())
     }
