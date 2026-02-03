@@ -27,7 +27,8 @@ use crate::{
     utils::io::{BlockIO, IO},
 };
 
-const CARCINUSDB_MASTER_TABLE: &'static str = "carcinusdb_master";
+pub const CARCINUSDB_MASTER_TABLE: &'static str = "carcinusdb_master";
+pub const CARCINUSDB_MASTER_TABLE_ROOT: PageNumber = 1;
 
 pub async fn run(hostname: String, port: u16) -> DatabaseResult<()> {
     log::info!("Starting CarcinusDB...");
