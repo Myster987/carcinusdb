@@ -364,7 +364,7 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
                 });
             }
 
-            let child_slot = search_result.unwrap();
+            let child_slot = search_result.unwrap_err();
             let child_page = guard.child(child_slot);
 
             self.path_stack.push((self.current_page, child_slot));
@@ -461,8 +461,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     pub fn insert(&mut self, entry: BTreeKey<'_>) -> storage::Result<()> {
         let search_result = self.seek(&entry)?;
 
-        log::debug!("search result: {:?}", search_result);
-
         match search_result {
             SearchResult::Found { page: _, slot: _ } => Err(storage::Error::DuplicateKey),
             SearchResult::NotFound { page: _, slot } => self.try_insert_into_leaf(slot, entry),
@@ -482,10 +480,9 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         let cell = self.build_cell(&guard, entry)?;
         guard.insert_cell(slot_number, cell);
 
-        log::debug!("inserted new entry at slot {}.", slot_number);
-
         self.pager.add_dirty(&page);
 
+        // log::trace!("why?: {:?}", *guard);
         if guard.is_overflow() {
             let page_type = guard.page_type();
             drop(guard);
@@ -675,6 +672,13 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             root_guard.has_high_key(),
         );
 
+        log::trace!(
+            "left: {:?} right: {:?} separator index: {}",
+            right_high_key,
+            left_high_key,
+            separator_index
+        );
+
         let right_high_key = right_high_key.map(|right| cells[right].clone());
         let left_high_key = left_high_key.map(|left| cells[left].clone());
 
@@ -688,6 +692,8 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
         let _ = cells.pop_front();
         let left_cells = cells;
+
+        // log::trace!("left cells: {left_cells:?} right cells: {right_cells:?}");
 
         {
             log::trace!("Moving cells to left child");
@@ -738,8 +744,16 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             BTreeCell::TableLeaf(cell) => BTreeCell::TableInternal(cell.into_internal(left_child)),
         };
 
+        log::debug!("separator cell: {:?}", separator_cell);
+
         root_guard.insert_cell(0, separator_cell);
+
+        log::debug!("page after insert: {:?}", *root_guard);
+
         root_guard.set_right_child(right_child);
+        log::trace!("page type: {:?}", root_page_type);
+        log::trace!("into page type: {:?}", root_page_type.into_internal());
+        root_guard.set_page_type(root_page_type.into_internal());
 
         self.pager.add_dirty(&root_page);
 
@@ -926,9 +940,10 @@ type CellSplit = (Option<usize>, Vec<usize>);
 
 fn calculate_split_ratio(
     cell_sizes: &[usize],
-    split_threshold: usize,
+    page_size: usize,
     has_high_key: bool,
 ) -> (Option<usize>, Option<usize>, usize) {
+    let split_threshold = page_size / 2;
     let cell_sizes = cell_sizes.iter().copied();
 
     let mut running = 0;
