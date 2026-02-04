@@ -448,7 +448,9 @@ impl Pager {
         let guard = header_page.lock_exclusive();
         guard.write_db_header(raw_header);
 
-        self.wal.append_frame(tx, guard, raw_header.database_size)
+        self.add_dirty(&header_page);
+
+        Ok(())
     }
 
     /// Reads given `page_number` in following order:
@@ -717,7 +719,7 @@ mod tests {
 
     #[test]
     fn test_pager() -> anyhow::Result<()> {
-        simple_logger::init()?;
+        simple_logger::init_with_level(log::Level::Trace)?;
 
         let db = Database::open("./test-db.db")?;
 
@@ -750,7 +752,7 @@ mod tests {
 
             let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
 
-            // cursor.print_current_page()?;
+            cursor.print_current_page()?;
 
             let test = cursor.seek(&BTreeKey::new_table_key(15, None))?;
 
