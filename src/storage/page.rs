@@ -147,6 +147,15 @@ impl PageType {
     pub fn is_internal(&self) -> bool {
         !self.is_leaf()
     }
+
+    pub fn into_internal(self) -> PageType {
+        match self {
+            Self::IndexInternal => self,
+            Self::IndexLeaf => Self::IndexInternal,
+            Self::TableInternal => self,
+            Self::TableLeaf => Self::TableInternal,
+        }
+    }
 }
 
 impl TryFrom<u8> for PageType {
@@ -325,7 +334,7 @@ impl Page {
         }
     }
 
-    fn overflow_map(&self) -> &mut HashMap<SlotNumber, BTreeCell> {
+    pub(super) fn overflow_map(&self) -> &mut HashMap<SlotNumber, BTreeCell> {
         unsafe { self.overflow.get().as_mut().unwrap() }
     }
 
@@ -606,7 +615,7 @@ impl Page {
         let mut slot_index = start;
 
         std::iter::from_fn(move || {
-            if drain_index < end {
+            if drain_index <= end {
                 let cell = self.overflow_map().remove(&drain_index).unwrap_or_else(|| {
                     let cell = self.get_cell(slot_index).unwrap().to_owned();
                     slot_index += 1;
@@ -617,13 +626,10 @@ impl Page {
 
                 Some(cell)
             } else {
-                let mut slot_array = self.slot_array();
-                let mut offsets = slot_array.drain(start..slot_index).into_iter();
+                let offsets = self.slot_array().drain(start..slot_index);
 
-                for slot in start..slot_index {
-                    let offset = offsets.next().unwrap();
-                    let size = self.get_cell(slot).unwrap().local_size() as u16;
-
+                for offset in offsets {
+                    let size = self.get_cell_at_offset(offset).unwrap().local_size() as u16;
                     self.freeblock_list().push_freeblock(offset, size);
                 }
 
@@ -695,6 +701,10 @@ impl Page {
 
     pub fn page_type(&self) -> PageType {
         self.try_page_type().unwrap()
+    }
+
+    pub fn set_page_type(&self, value: PageType) {
+        self.write_u8(Self::PAGE_TYPE_OFFSET, value as u8);
     }
 
     pub fn first_freeblock(&self) -> u16 {
@@ -847,6 +857,7 @@ impl Debug for Page {
                     })
                     .collect::<Vec<BTreeCellRef>>(),
             )
+            .field("overflow_cells", self.overflow_map())
             .finish()
     }
 }
@@ -973,10 +984,7 @@ impl<'a> SlotArray<'a> {
         removed_slot
     }
 
-    pub fn drain(
-        &mut self,
-        range: impl RangeBounds<SlotNumber>,
-    ) -> impl Iterator<Item = SlotNumber> {
+    pub fn drain(&mut self, range: impl RangeBounds<SlotNumber>) -> Vec<u16> {
         let start = match range.start_bound() {
             Bound::Unbounded => 0,
             Bound::Excluded(i) => i + 1,
@@ -989,36 +997,15 @@ impl<'a> SlotArray<'a> {
             Bound::Included(i) => i + 1,
         } as usize;
 
-        let old_len = self.len() as usize;
-        let removed_elements = end - start;
+        let removed_elements = self.slot_array()[start..end].to_vec();
 
-        let mut finished = false;
-        let mut current = start;
+        if end < self.len() as usize {
+            self.slot_array_mut().copy_within(end.., start);
+        }
 
-        std::iter::from_fn(move || {
-            if finished {
-                return None;
-            }
+        self.sub_len(removed_elements.len() as SlotNumber);
 
-            if current < end {
-                println!("slot array: {:?}", self);
-                println!("current: {}", current);
-                println!("end: {}", end);
-                let offset = self.get(current as SlotNumber);
-                current += 1;
-
-                Some(offset)
-            } else {
-                if end < old_len {
-                    self.slot_array_mut().copy_within(end.., start);
-                }
-
-                self.sub_len(removed_elements as SlotNumber);
-                finished = true;
-
-                None
-            }
-        })
+        removed_elements
     }
 }
 
