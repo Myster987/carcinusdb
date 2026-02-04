@@ -327,11 +327,9 @@ impl WriteAheadLog {
             header
         };
 
-        let wal_file = Arc::new(BlockIO::new(
-            file,
-            db_header.page_size as usize,
-            WAL_HEADER_SIZE,
-        ));
+        let frame_size = db_header.page_size as usize + FRAME_HEADER_SIZE;
+
+        let wal_file = Arc::new(BlockIO::new(file, frame_size, WAL_HEADER_SIZE));
 
         Self::new(
             wal_file,
@@ -383,17 +381,12 @@ impl WriteAheadLog {
 
         // block all other operations. needs exclusive access.
         let checkpoint_guard = self.checkpoint_lock.write();
-        // raw WAL header.
-        let header = self.header.into_raw_header();
-
-        // size of each frame.
-        let frame_size = header.page_size as usize + FRAME_HEADER_SIZE;
 
         // increases after each valid checkpoint.
         let mut max_frame = self.header.get_last_checkpointed();
         let mut transaction_frames = Vec::new();
 
-        let mut buffer = vec![0; frame_size];
+        let mut buffer = vec![0; self.frame_size];
 
         // start after last checkpointed entry.
         let mut frame_number = max_frame + 1;
@@ -572,8 +565,10 @@ impl WriteAheadLog {
             let page_number = page.id();
             let page_content = page.raw();
             let checksum = checksum_crc32(page_content);
+            log::debug!("page {page_number} checksum {}", checksum);
 
             let commit_db_size = if i + 1 == pages.len() { db_size } else { 0 };
+            log::debug!("commit_db_size: {}", commit_db_size);
 
             let frame_header = FrameHeader {
                 page_number,
@@ -806,8 +801,14 @@ fn validate_frame(
     buffer: &mut [u8],
 ) -> storage::Result<(bool, bool, PageNumber)> {
     let offset = wal_file.calculate_offset(frame_number)? + WAL_HEADER_SIZE;
-    if wal_file.raw_read(offset, buffer).is_err() {
-        return Ok((false, false, 0));
+
+    match wal_file.raw_read(offset, buffer) {
+        Err(_) => return Ok((false, false, 0)),
+        Ok(bytes_read) => {
+            if bytes_read != buffer.len() {
+                return Ok((false, false, 0));
+            }
+        }
     }
 
     let frame_header = FrameHeader::from_bytes(buffer);
@@ -815,7 +816,7 @@ fn validate_frame(
     // calculates checksum of given frame without checksum filed itself.
     let new_checksum = checksum_crc32(&buffer[FRAME_HEADER_SIZE..]);
 
-    let valid = frame_header.checksum == new_checksum;
+    let valid = frame_header.checksum == new_checksum && frame_header.page_number != 0;
     let is_commit = frame_header.db_size != 0;
 
     Ok((valid, is_commit, frame_header.page_number))
