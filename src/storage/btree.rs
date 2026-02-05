@@ -10,7 +10,7 @@ use crate::{
             BTreeCell, BTreeCellRef, CellOps, IndexInternalCell, IndexLeafCell, Page, PageType,
             TableInternalCell, TableLeafCell, cell_overflows,
         },
-        pager::{ExclusivePageGuard, Pager},
+        pager::Pager,
         wal::transaction::{ReadTx, WriteTx},
     },
     utils::bytes::VarInt,
@@ -814,7 +814,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             }
 
             for cell in left_cells {
-                log::debug!("Inserting cell into left page: {:?}", cell);
                 page_guard.insert_cell(current_index, cell);
                 current_index += 1;
             }

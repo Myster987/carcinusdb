@@ -609,8 +609,6 @@ impl Page {
             Bound::Included(i) => i + 1,
         };
 
-        log::trace!("drain range: {start} {end}");
-
         let mut drain_index = start;
         let mut slot_index = start;
 
@@ -1142,7 +1140,7 @@ impl<'a> FreeblockList<'a> {
         if first_freeblock == 0 {
             self.set_freeblock(offset, 0, size);
         } else {
-            let (next, _) = self.get_freeblock(first_freeblock);
+            let next = self.first_freeblock();
             self.set_freeblock(offset, next, size);
         }
         self.set_first_freeblock(offset);
