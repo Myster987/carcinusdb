@@ -207,7 +207,13 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
 
             match search_key.cmp(&key) {
                 Ordering::Less => rigth = mid,
-                Ordering::Equal => return Ok(Ok(slot)),
+                Ordering::Equal => {
+                    if page.is_leaf() {
+                        return Ok(Ok(slot));
+                    } else {
+                        return Ok(Err(slot));
+                    }
+                }
                 Ordering::Greater => left = mid + 1,
             }
         }
@@ -417,7 +423,7 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
 
             // check if there are still cells that haven't been visited. we must
             // use page.len(), because current_slot often starts at 1.
-            if self.current_slot < page.len() {
+            if self.current_slot + 1 < page.len() {
                 self.current_slot += 1;
                 return Ok(true);
             }
@@ -432,6 +438,8 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
                 return Ok(true);
             }
         }
+
+        self.done = true;
 
         // end of iteration
         Ok(false)
@@ -482,11 +490,9 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
         self.pager.add_dirty(&page);
 
-        // log::trace!("why?: {:?}", *guard);
         if guard.is_overflow() {
-            let page_type = guard.page_type();
             drop(guard);
-            self.split_page(page_type)?;
+            self.split_page()?;
         }
 
         Ok(())
@@ -634,21 +640,33 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         Ok(Some(prev_overflow_page))
     }
 
-    fn split_page(&mut self, page_type: PageType) -> storage::Result<()> {
-        log::debug!("begin split page");
+    fn convert_to_internal_cell(&self, cell: BTreeCell, left_child: PageNumber) -> BTreeCell {
+        match cell {
+            BTreeCell::IndexLeaf(leaf) => BTreeCell::IndexInternal(leaf.into_internal(left_child)),
+            BTreeCell::TableLeaf(leaf) => BTreeCell::TableInternal(leaf.into_internal(left_child)),
+            other => other,
+        }
+    }
+
+    fn split_page(&mut self) -> storage::Result<()> {
+        log::debug!("Begin split page");
 
         let is_root = self.current_page == self.root;
 
         if is_root {
-            self.split_root(page_type)
+            self.split_root()
         } else {
             self.split_non_root()
         }
     }
 
-    fn split_root(&mut self, root_page_type: PageType) -> storage::Result<()> {
-        log::debug!("spliting root");
+    fn split_root(&mut self) -> storage::Result<()> {
+        log::debug!("Spliting root");
 
+        let root_page = self.pager.read_page(self.tx.borrow().deref(), self.root)?;
+        let root_page_type = root_page.lock_shared().page_type();
+
+        // alloc before locking root to avoid deadlock in case of master.
         let left_child = self
             .pager
             .alloc_page(&mut *self.tx.borrow_mut(), root_page_type)?;
@@ -656,11 +674,10 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             .pager
             .alloc_page(&mut *self.tx.borrow_mut(), root_page_type)?;
 
-        let root_page = self.pager.read_page(self.tx.borrow().deref(), self.root)?;
         let root_guard = root_page.lock_exclusive();
         let is_leaf = root_guard.is_leaf();
 
-        log::trace!("children allocated: left - {left_child} right - {right_child}");
+        log::debug!("Children allocated: left - {left_child} right - {right_child}");
 
         let mut cells: VecDeque<_> = root_guard.drain(..).collect();
 
@@ -672,13 +689,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             root_guard.has_high_key(),
         );
 
-        log::trace!(
-            "left: {:?} right: {:?} separator index: {}",
-            right_high_key,
-            left_high_key,
-            separator_index
-        );
-
         let right_high_key = right_high_key.map(|right| cells[right].clone());
         let left_high_key = left_high_key.map(|left| cells[left].clone());
 
@@ -686,17 +696,14 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
         let mut right_cells = cells.split_off(separator_index);
 
-        if is_leaf {
+        if !is_leaf {
             right_cells.pop_front();
         }
 
-        let _ = cells.pop_front();
         let left_cells = cells;
 
-        // log::trace!("left cells: {left_cells:?} right cells: {right_cells:?}");
-
         {
-            log::trace!("Moving cells to left child");
+            log::trace!("Moving cells to left child {}", left_child);
 
             let left_child = self.pager.read_page(self.tx.borrow().deref(), left_child)?;
             let left_child_guard = left_child.lock_exclusive();
@@ -714,7 +721,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         }
 
         {
-            log::trace!("Moving cells to right child");
+            log::trace!("Moving cells to right child {}", right_child);
 
             let right_child = self.pager.read_page(&*self.tx.borrow(), right_child)?;
             let right_child_guard = right_child.lock_exclusive();
@@ -736,24 +743,12 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             self.pager.add_dirty(&right_child);
         }
 
-        let separator_cell = match separator_cell {
-            cell @ BTreeCell::IndexInternal(_) => cell,
-            cell @ BTreeCell::TableInternal(_) => cell,
-
-            BTreeCell::IndexLeaf(cell) => BTreeCell::IndexInternal(cell.into_internal(left_child)),
-            BTreeCell::TableLeaf(cell) => BTreeCell::TableInternal(cell.into_internal(left_child)),
-        };
-
-        log::debug!("separator cell: {:?}", separator_cell);
-
-        root_guard.insert_cell(0, separator_cell);
-
-        log::debug!("page after insert: {:?}", *root_guard);
+        let separator_cell = self.convert_to_internal_cell(separator_cell, left_child);
 
         root_guard.set_right_child(right_child);
-        log::trace!("page type: {:?}", root_page_type);
-        log::trace!("into page type: {:?}", root_page_type.into_internal());
         root_guard.set_page_type(root_page_type.into_internal());
+
+        root_guard.insert_cell(0, separator_cell);
 
         self.pager.add_dirty(&root_page);
 
@@ -761,7 +756,135 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     }
 
     fn split_non_root(&mut self) -> storage::Result<()> {
-        todo!()
+        log::debug!("Splitting non root {}", self.current_page);
+
+        let page = self
+            .pager
+            .read_page(&*self.tx.borrow(), self.current_page)?;
+        let page_guard = page.lock_exclusive();
+
+        let page_type = page_guard.page_type();
+        let is_leaf = page_guard.is_leaf();
+
+        let new_right_sibling = self
+            .pager
+            .alloc_page(&mut *self.tx.borrow_mut(), page_type)?;
+
+        log::debug!(
+            "Split between page: {} and {}",
+            page.id(),
+            new_right_sibling
+        );
+
+        let mut cells = page_guard.drain(..).collect::<VecDeque<_>>();
+
+        let cell_sizes: Vec<_> = cells.iter().map(|c| c.local_size()).collect();
+
+        let (left_high_key, right_high_key, separator_index) = calculate_split_ratio(
+            &cell_sizes,
+            page_guard.raw().len(),
+            page_guard.has_high_key(),
+        );
+
+        let right_high_key = right_high_key.map(|right| cells[right].clone());
+        let left_high_key = left_high_key.map(|left| cells[left].clone());
+
+        let separator_cell = cells[separator_index].clone();
+
+        let mut right_cells = cells.split_off(separator_index);
+
+        if !is_leaf {
+            right_cells.pop_front();
+        }
+
+        if page_guard.has_high_key() {
+            let _ = cells.pop_front();
+        }
+
+        let left_cells = cells;
+
+        let old_right_sibling = page_guard.try_right_sibling();
+
+        {
+            let mut current_index = 0;
+
+            if let Some(left_high_key) = left_high_key {
+                page_guard.insert_cell(current_index, left_high_key);
+                current_index += 1;
+            }
+
+            for cell in left_cells {
+                log::debug!("Inserting cell into left page: {:?}", cell);
+                page_guard.insert_cell(current_index, cell);
+                current_index += 1;
+            }
+
+            page_guard.set_right_sibling(new_right_sibling);
+
+            self.pager.add_dirty(&page);
+        }
+
+        {
+            let new_right_sibling = self
+                .pager
+                .read_page(&*self.tx.borrow(), new_right_sibling)?;
+            let new_right_sibling_guard = new_right_sibling.lock_exclusive();
+
+            let mut current_index = 0;
+
+            if let Some(right_high_key) = right_high_key {
+                new_right_sibling_guard.insert_cell(current_index, right_high_key);
+                current_index += 1;
+            }
+
+            for cell in right_cells {
+                new_right_sibling_guard.insert_cell(current_index, cell);
+                current_index += 1;
+            }
+
+            new_right_sibling_guard.set_right_sibling(old_right_sibling.unwrap_or(0));
+
+            self.pager.add_dirty(&new_right_sibling);
+        }
+
+        let separator_cell = self.convert_to_internal_cell(separator_cell, self.current_page);
+
+        self.insert_into_parent(separator_cell, new_right_sibling)
+    }
+
+    fn insert_into_parent(
+        &mut self,
+        separator: BTreeCell,
+        new_page: PageNumber,
+    ) -> storage::Result<()> {
+        if self.path_stack.is_empty() {
+            return Ok(());
+        }
+
+        log::debug!("parent path stack: {:?}", self.path_stack);
+
+        let (parent_page_number, path_slot) = self.path_stack.pop().unwrap();
+        let parent_page = self
+            .pager
+            .read_page(&*self.tx.borrow(), parent_page_number)?;
+        let parent_guard = parent_page.lock_exclusive();
+
+        parent_guard.set_child(path_slot, new_page);
+
+        parent_guard.insert_cell(path_slot, separator);
+        self.pager.add_dirty(&parent_page);
+
+        if parent_guard.is_overflow() {
+            let old_current = self.current_page;
+            self.current_page = parent_page_number;
+            drop(parent_guard);
+
+            self.split_page()?;
+
+            self.current_page = old_current;
+        }
+
+        Ok(())
     }
 
     // fn balance(&mut self, current_page_guard: ExclusivePageGuard) -> storage::Result<()> {
