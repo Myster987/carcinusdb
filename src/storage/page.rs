@@ -657,6 +657,25 @@ impl Page {
         }
     }
 
+    pub fn set_child(&self, index: SlotNumber, new_child: PageNumber) {
+        assert!(
+            matches!(
+                self.page_type(),
+                PageType::IndexInternal | PageType::TableInternal
+            ),
+            "Invalid page type."
+        );
+        if index == self.count() {
+            self.set_right_child(new_child);
+        } else {
+            match self.get_cell(index).unwrap() {
+                BTreeCellRef::IndexInternal(mut cell) => cell.set_left_child(new_child),
+                BTreeCellRef::TableInternal(mut cell) => cell.set_left_child(new_child),
+                _ => unreachable!(),
+            }
+        }
+    }
+
     #[inline]
     pub fn has_high_key(&self) -> bool {
         self.try_right_sibling().is_some()
@@ -1505,10 +1524,10 @@ impl CellOps for IndexLeafCell {
 pub struct TableInternalCell {
     /// Pointer to whole cell content. (used for copying cell).
     raw: Vec<u8>,
-    /// Unique ID of row.
-    pub row_id: i64,
     /// Left child of BTree Page.
     pub left_child: PageNumber,
+    /// Unique ID of row.
+    pub row_id: i64,
 }
 
 impl TableInternalCell {
@@ -1518,13 +1537,13 @@ impl TableInternalCell {
         let raw = Vec::new();
         let mut cursor = BytesCursor::new(raw);
 
-        cursor.put_varint(bytes::zigzag_encode(row_id));
         cursor.put_u32_le(left_child);
+        cursor.put_varint(bytes::zigzag_encode(row_id));
 
         Self {
             raw: cursor.into_inner(),
-            row_id,
             left_child,
+            row_id,
         }
     }
 }
@@ -1557,7 +1576,7 @@ impl CellOps for TableInternalCell {
 
     #[inline]
     fn payload(&self) -> &[u8] {
-        &self.raw[..self.payload_size() as usize]
+        &self.raw[size_of::<PageNumber>()..]
     }
 
     #[inline(always)]
@@ -1573,7 +1592,7 @@ impl CellOps for TableInternalCell {
     #[inline]
     fn payload_ref(&self) -> PayloadRef {
         PayloadRef {
-            offset: 0,
+            offset: size_of::<PageNumber>(),
             len: self.payload_size() as usize,
         }
     }
@@ -1826,6 +1845,16 @@ pub struct IndexInternalCellRef<'a> {
     first_overflow: Option<PageNumber>,
 }
 
+impl<'a> IndexInternalCellRef<'a> {
+    fn set_left_child(&mut self, value: PageNumber) {
+        // SAFETY: we reuse self.raw slice which must be valid and just cast it into mut.
+        let raw_mut =
+            unsafe { std::slice::from_raw_parts_mut(self.raw.as_ptr().cast_mut(), self.raw.len()) };
+        raw_mut[..size_of::<PageNumber>()].copy_from_slice(&value.to_le_bytes());
+        self.left_child = value;
+    }
+}
+
 impl<'a> CellOps for IndexInternalCellRef<'a> {
     #[inline]
     fn local_size(&self) -> usize {
@@ -1933,8 +1962,18 @@ impl<'a> CellOps for IndexLeafCellRef<'a> {
 #[derive(Debug)]
 pub struct TableInternalCellRef<'a> {
     raw: &'a [u8],
-    pub row_id: i64,
     pub left_child: PageNumber,
+    pub row_id: i64,
+}
+
+impl<'a> TableInternalCellRef<'a> {
+    fn set_left_child(&mut self, value: PageNumber) {
+        // SAFETY: we reuse self.raw slice which must be valid and just cast it into mut.
+        let raw_mut =
+            unsafe { std::slice::from_raw_parts_mut(self.raw.as_ptr().cast_mut(), self.raw.len()) };
+        raw_mut[..size_of::<PageNumber>()].copy_from_slice(&value.to_le_bytes());
+        self.left_child = value;
+    }
 }
 
 impl<'a> CellOps for TableInternalCellRef<'a> {
@@ -1965,7 +2004,7 @@ impl<'a> CellOps for TableInternalCellRef<'a> {
 
     #[inline]
     fn payload(&self) -> &[u8] {
-        &self.raw[..self.payload_size() as usize]
+        &self.raw[size_of::<PageNumber>()..]
     }
 
     #[inline]
@@ -1981,7 +2020,7 @@ impl<'a> CellOps for TableInternalCellRef<'a> {
     #[inline]
     fn payload_ref(&self) -> PayloadRef {
         PayloadRef {
-            offset: 0,
+            offset: size_of::<PageNumber>(),
             len: self.payload_size() as usize,
         }
     }
@@ -2130,8 +2169,8 @@ fn read_btree_cell_ref<'a>(
             Ok(BTreeCellRef::IndexLeaf(cell))
         }
         PageType::TableInternal => {
-            let row_id = bytes::zigzag_decode(cursor.try_read_varint()?.0);
             let left_child = cursor.try_read_u32_le()?;
+            let row_id = bytes::zigzag_decode(cursor.try_read_varint()?.0);
 
             let cell_end = cursor.position();
 
@@ -2139,8 +2178,8 @@ fn read_btree_cell_ref<'a>(
 
             let cell = TableInternalCellRef {
                 raw,
-                row_id,
                 left_child,
+                row_id,
             };
 
             Ok(BTreeCellRef::TableInternal(cell))
