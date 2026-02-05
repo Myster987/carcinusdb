@@ -298,29 +298,97 @@ impl<'tx> DatabaseWriteTransaction<'tx> {
             .expect("Something is still using this transaction")
             .into_inner();
 
-        let dirty_page_numbers: Vec<_> = self.pager.dirty_pages.iter().map(|pn| *pn).collect();
-
-        let dirty_pages: Vec<_> = dirty_page_numbers
-            .iter()
-            .map(|pn| self.pager.read_page(&wal_tx, *pn).unwrap())
-            .collect();
-
-        let mut page_guards: Vec<_> = dirty_pages
-            .iter()
-            .map(|page| page.lock_exclusive())
-            .collect();
-
-        self.pager.wal.append_vectored(
-            &mut wal_tx,
-            &mut page_guards,
-            self.pager.db_header.get_database_size(),
-        )?;
-
-        dirty_page_numbers.iter().for_each(|pn| {
-            self.pager.dirty_pages.remove(&*pn);
-        });
+        self.pager.flush_dirty(&mut wal_tx)?;
 
         self.pager.wal.commit(wal_tx)?;
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::{
+        sql::{
+            record::RecordBuilder,
+            types::{Value, text::Text},
+        },
+        storage::btree::{BTreeKey, DatabaseCursor},
+    };
+
+    #[test]
+    fn test_insert() -> anyhow::Result<()> {
+        simple_logger::init()?;
+
+        let db = Database::open("./test-db.db")?;
+
+        let tx = db.begin_write()?;
+
+        {
+            // scope cursor to drop before tx commit.
+            let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
+
+            let start = 1;
+            let end = 500;
+
+            for i in start..end {
+                let mut record = RecordBuilder::new();
+
+                record.add(Value::Null);
+                record.add(Value::Int(i));
+                record.add(Value::Text(Text::new(format!("Maciek Kowalski {i}"))));
+
+                let record = record.serialize_to_record();
+
+                log::trace!("inserting key: {}", i);
+
+                cursor.insert(BTreeKey::new_table_key(i, Some(record)))?;
+            }
+        }
+
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_search() -> anyhow::Result<()> {
+        simple_logger::init()?;
+
+        let db = Database::open("./test-db.db")?;
+
+        let tx = db.begin_read()?;
+
+        let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
+
+        // for i in 1..500 {
+        //     assert!(
+        //         cursor.seek(&BTreeKey::new_table_key(i, None))?.is_found(),
+        //         "Entry {} lost",
+        //         i
+        //     );
+        // }
+
+        let test = cursor.seek(&BTreeKey::new_table_key(93, None))?;
+
+        cursor.print_current_page()?;
+
+        println!("result: {:?}", test);
+
+        let record = cursor.try_record()?;
+
+        println!("{:?}", record);
+        println!("text: {:?}", record.get_value(2));
+
+        // while let Ok(advnaced) = cursor.next()
+        //     && advnaced
+        // {
+        //     println!("{:?}", cursor.try_record()?);
+        // }
+
+        tx.commit()?;
 
         Ok(())
     }

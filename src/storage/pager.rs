@@ -434,6 +434,8 @@ impl Pager {
 
         self.write_header(&mut tx)?;
 
+        self.flush_dirty(&mut tx)?;
+
         self.wal.commit(tx)?;
 
         self.wal.force_checkpoint()?;
@@ -678,6 +680,29 @@ impl Pager {
         page.set_dirty();
     }
 
+    pub fn flush_dirty<Tx: WriteTx>(&self, tx: &mut Tx) -> storage::Result<()> {
+        let dirty_page_numbers: Vec<_> = self.dirty_pages.iter().map(|pn| *pn).collect();
+
+        let dirty_pages: Vec<_> = dirty_page_numbers
+            .iter()
+            .map(|pn| self.read_page(tx, *pn).unwrap())
+            .collect();
+
+        let mut page_guards: Vec<_> = dirty_pages
+            .iter()
+            .map(|page| page.lock_exclusive())
+            .collect();
+
+        self.wal
+            .append_vectored(tx, &mut page_guards, self.db_header.get_database_size())?;
+
+        dirty_page_numbers.iter().for_each(|pn| {
+            self.dirty_pages.remove(&*pn);
+        });
+
+        Ok(())
+    }
+
     // pub fn flush(&mut self) -> storage::Result<()> {
     //     Ok(self.io.flush()?)
     // }
@@ -707,67 +732,4 @@ pub fn complete_write_page(
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::{
-        database::{CARCINUSDB_MASTER_TABLE_ROOT, Database},
-        sql::{
-            record::RecordBuilder,
-            types::{Value, text::Text},
-        },
-        storage::btree::{BTreeKey, DatabaseCursor},
-    };
-
-    #[test]
-    fn test_pager() -> anyhow::Result<()> {
-        simple_logger::init_with_level(log::Level::Trace)?;
-
-        let db = Database::open("./test-db.db")?;
-
-        let tx = db.begin_write()?;
-
-        {
-            // scope cursor to drop before tx commit.
-            let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
-
-            let start = 1;
-            let end = 150;
-
-            for i in start..end {
-                let mut record = RecordBuilder::new();
-
-                record.add(Value::Null);
-                record.add(Value::Int(i));
-                record.add(Value::Text(Text::new(format!("Maciek Kowalski {i}"))));
-
-                let record = record.serialize_to_record();
-
-                cursor.insert(BTreeKey::new_table_key(i, Some(record)))?;
-            }
-        }
-
-        tx.commit()?;
-
-        {
-            let tx = db.begin_read()?;
-
-            let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
-
-            cursor.print_current_page()?;
-
-            let test = cursor.seek(&BTreeKey::new_table_key(15, None))?;
-
-            println!("result: {:?}", test);
-
-            let record = cursor.try_record()?;
-
-            println!("{:?}", record);
-            println!("text: {:?}", record.get_value(2));
-
-            tx.commit()?;
-        }
-
-        // println!("{:?}", )
-
-        Ok(())
-    }
-}
+mod tests {}
