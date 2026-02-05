@@ -304,7 +304,7 @@ impl WriteAheadLog {
             .open(wal_file_path)?;
 
         if !file_exists {
-            log::debug!("Initializing WAL.");
+            log::info!("Initializing WAL.");
             let buf = &mut [0; WAL_HEADER_SIZE];
             let default_header =
                 WalHeader::default(db_header.page_size, db_header.get_database_size());
@@ -377,7 +377,7 @@ impl WriteAheadLog {
     /// Reconstructs all the changes registered in WAL and if needed performs
     /// checkpoint.
     pub fn replay(&self) -> storage::Result<()> {
-        log::debug!("Replaying WAL.");
+        log::info!("Replaying WAL.");
 
         // block all other operations. needs exclusive access.
         let checkpoint_guard = self.checkpoint_lock.write();
@@ -397,6 +397,8 @@ impl WriteAheadLog {
             if !valid {
                 break;
             }
+
+            log::trace!("buff slice: {:?}", &buffer[..20]);
 
             transaction_frames.push((page_number, frame_number));
 
@@ -565,10 +567,14 @@ impl WriteAheadLog {
             let page_number = page.id();
             let page_content = page.raw();
             let checksum = checksum_crc32(page_content);
-            log::debug!("page {page_number} checksum {}", checksum);
+
+            log::trace!(
+                "WAL append page {} with checksum {}",
+                pages_number,
+                checksum
+            );
 
             let commit_db_size = if i + 1 == pages.len() { db_size } else { 0 };
-            log::debug!("commit_db_size: {}", commit_db_size);
 
             let frame_header = FrameHeader {
                 page_number,
