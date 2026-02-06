@@ -278,10 +278,10 @@ pub struct WriteAheadLog {
     readers: Arc<AtomicArray<READERS_NUM>>,
     /// Lock for single writer.
     writer: Mutex<()>,
-    /// All transactions read or write must acquire this lock before they can do anything.
-    /// When we want to run checkpoint we get write lock instead to block other transactions.
-    /// While this can couse latency spikes, it prevents WAL from growing indefinitely.
-    checkpoint_lock: RwLock<()>,
+    // /// All transactions read or write must acquire this lock before they can do anything.
+    // /// When we want to run checkpoint we get write lock instead to block other transactions.
+    // /// While this can couse latency spikes, it prevents WAL from growing indefinitely.
+    // checkpoint_lock: RwLock<()>,
 }
 
 impl WriteAheadLog {
@@ -364,7 +364,7 @@ impl WriteAheadLog {
             max_frame: AtomicU32::new(0),
             readers: Arc::new(AtomicArray::new()),
             writer: Mutex::new(()),
-            checkpoint_lock: RwLock::new(()),
+            // checkpoint_lock: RwLock::new(()),
         };
 
         if replay_wal {
@@ -379,8 +379,10 @@ impl WriteAheadLog {
     pub fn replay(&self) -> storage::Result<()> {
         log::info!("Replaying WAL.");
 
+        let writer_guard = self.writer.lock();
+
         // block all other operations. needs exclusive access.
-        let checkpoint_guard = self.checkpoint_lock.write();
+        // let checkpoint_guard = self.checkpoint_lock.write();
 
         // increases after each valid checkpoint.
         let mut max_frame = self.header.get_last_checkpointed();
@@ -416,7 +418,7 @@ impl WriteAheadLog {
 
         self.set_max_frame(max_frame);
 
-        drop(checkpoint_guard);
+        drop(writer_guard);
 
         self.checkpoint()?;
 
@@ -449,7 +451,7 @@ impl WriteAheadLog {
 }
 
 impl WriteAheadLog {
-    pub fn begin_read_tx<'a>(&'a self) -> storage::Result<ReadTransaction<'a>> {
+    pub fn begin_read_tx<'a>(&'a self) -> storage::Result<ReadTransaction> {
         ReadTransaction::begin(self)
     }
 
@@ -470,7 +472,7 @@ impl WriteAheadLog {
         self.db_file
             .write_header(&self.db_header.into_raw_header().to_bytes())?;
 
-        drop(inner.checkpoint_guard);
+        // drop(inner.checkpoint_guard);
 
         self.checkpoint()?;
 
@@ -629,7 +631,7 @@ impl WriteAheadLog {
     }
 
     fn _checkpoint(&self) -> storage::Result<()> {
-        let exclusive_lock = self.checkpoint_lock.write();
+        let writer_lock = self.writer.lock();
 
         let max_frame = self.get_max_frame();
         let min_visible_frame = self.readers.min_visible_frame();
@@ -713,7 +715,7 @@ impl WriteAheadLog {
             }
         }
 
-        drop(exclusive_lock);
+        drop(writer_lock);
 
         Ok(())
     }

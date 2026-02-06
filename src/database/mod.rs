@@ -246,7 +246,7 @@ impl Database {
         Ok(Self { pager })
     }
 
-    pub fn begin_read<'a>(&'a self) -> DatabaseResult<DatabaseReadTransaction<'a>> {
+    pub fn begin_read<'a>(&'a self) -> DatabaseResult<DatabaseReadTransaction> {
         let wal_tx = self.pager.wal.begin_read_tx()?;
 
         Ok(DatabaseReadTransaction {
@@ -265,13 +265,13 @@ impl Database {
     }
 }
 
-pub struct DatabaseReadTransaction<'tx> {
-    wal_tx: Rc<RefCell<ReadTransaction<'tx>>>,
+pub struct DatabaseReadTransaction {
+    wal_tx: Rc<RefCell<ReadTransaction>>,
     pager: Arc<Pager>,
 }
 
-impl<'tx> DatabaseReadTransaction<'tx> {
-    pub fn cursor(&self, root: PageNumber) -> BTreeCursor<'_, ReadTransaction<'tx>> {
+impl DatabaseReadTransaction {
+    pub fn cursor(&self, root: PageNumber) -> BTreeCursor<'_, ReadTransaction> {
         BTreeCursor::new(self.wal_tx.clone(), &self.pager, root)
     }
 
@@ -363,17 +363,19 @@ mod tests {
 
         let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
 
-        // for i in 1..500 {
-        //     assert!(
-        //         cursor.seek(&BTreeKey::new_table_key(i, None))?.is_found(),
-        //         "Entry {} lost",
-        //         i
-        //     );
-        // }
+        for i in 1..500 {
+            assert!(
+                cursor.seek(&BTreeKey::new_table_key(i, None))?.is_found(),
+                "Entry {} lost",
+                i
+            );
+        }
+
+        log::info!("All keys present!");
 
         let test = cursor.seek(&BTreeKey::new_table_key(93, None))?;
 
-        cursor.print_current_page()?;
+        // cursor.print_current_page()?;
 
         println!("result: {:?}", test);
 

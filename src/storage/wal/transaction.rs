@@ -29,9 +29,9 @@ pub trait WriteTx: ReadTx {
 }
 
 /// Read transaction that holds all the necessary guards and local variables.
-pub struct ReadTransaction<'a> {
-    /// Protects this transaction, so that checkpoint allows it to finish.
-    checkpoint_guard: RwLockReadGuard<'a, ()>,
+pub struct ReadTransaction {
+    // /// Protects this transaction, so that checkpoint allows it to finish.
+    // checkpoint_guard: RwLockReadGuard<'a, ()>,
     /// There can by only limited number of transactions running at the same
     /// time, so we have to acquire lock to even do something.
     read_guard: SlotGuard<READERS_NUM>,
@@ -42,11 +42,11 @@ pub struct ReadTransaction<'a> {
     max_frame: FrameNumber,
 }
 
-impl<'a> ReadTransaction<'a> {
+impl ReadTransaction {
     /// Starts new read transaction. Migth need to re-run, because writer
     /// changed some metadata.
-    pub fn begin(wal: &'a WriteAheadLog) -> storage::Result<Self> {
-        let checkpoint_guard = wal.checkpoint_lock.read();
+    pub fn begin(wal: &WriteAheadLog) -> storage::Result<Self> {
+        // let checkpoint_guard = wal.checkpoint_lock.read();
 
         let min_frame = wal.get_min_frame();
         let max_frame = wal.get_max_frame();
@@ -59,7 +59,7 @@ impl<'a> ReadTransaction<'a> {
         }
 
         Ok(Self {
-            checkpoint_guard,
+            // checkpoint_guard,
             read_guard,
             min_frame,
             max_frame,
@@ -67,7 +67,7 @@ impl<'a> ReadTransaction<'a> {
     }
 }
 
-impl ReadTx for ReadTransaction<'_> {
+impl ReadTx for ReadTransaction {
     #[inline]
     fn tx_min_frame(&self) -> FrameNumber {
         self.min_frame
@@ -86,7 +86,7 @@ pub struct WriteTransaction<'a> {
 
 /// Write transaction inner data.
 pub struct WriteTransactionInner<'a> {
-    pub checkpoint_guard: RwLockReadGuard<'a, ()>,
+    // pub checkpoint_guard: RwLockReadGuard<'a, ()>,
     pub write_guard: MutexGuard<'a, ()>,
     pub min_frame: FrameNumber,
     pub max_frame: FrameNumber,
@@ -94,7 +94,7 @@ pub struct WriteTransactionInner<'a> {
 
 impl<'a> WriteTransaction<'a> {
     pub fn begin(wal: &'a WriteAheadLog) -> storage::Result<Self> {
-        let checkpoint_guard = wal.checkpoint_lock.read();
+        // let checkpoint_guard = wal.checkpoint_lock.read();
         let write_guard = wal.writer.lock();
 
         let min_frame = wal.get_min_frame();
@@ -113,7 +113,7 @@ impl<'a> WriteTransaction<'a> {
 
         Ok(Self {
             inner: ManuallyDrop::new(WriteTransactionInner {
-                checkpoint_guard,
+                // checkpoint_guard,
                 write_guard,
                 min_frame,
                 max_frame,
