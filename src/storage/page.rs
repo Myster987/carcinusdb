@@ -362,7 +362,7 @@ impl Page {
     /// Free space between slot array and last cell.
     pub fn free_space(&self) -> u16 {
         self.last_used_offset()
-            - (self.offset as u16 + (self.header_size()) as u16 + self.len() * 2)
+            .saturating_sub(self.offset as u16 + (self.header_size()) as u16 + self.len() * 2)
     }
 
     pub fn first_data_offset(&self) -> SlotNumber {
@@ -2247,12 +2247,11 @@ pub fn read_local_payload(
         len: 0,
     };
     if is_overflowing {
-        let overflow_page = u32::from_le_bytes([
-            payload_region[local_payload_size - 1],
-            payload_region[local_payload_size - 2],
-            payload_region[local_payload_size - 3],
-            payload_region[local_payload_size - 4],
-        ]);
+        let overflow_page = u32::from_le_bytes(
+            payload_region[local_payload_size - 4..local_payload_size]
+                .try_into()
+                .unwrap(),
+        );
         payload_ref.len = local_payload_size - 4;
         (payload_ref, Some(overflow_page))
     } else {

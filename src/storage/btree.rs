@@ -1,5 +1,11 @@
 use std::{
-    borrow::Cow, cell::RefCell, cmp::Ordering, collections::VecDeque, ops::Deref, rc::Rc, sync::Arc,
+    borrow::Cow,
+    cell::RefCell,
+    cmp::{Ordering, min},
+    collections::VecDeque,
+    ops::Deref,
+    rc::Rc,
+    sync::Arc,
 };
 
 use crate::{
@@ -193,32 +199,35 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
         page: &Page,
         search_key: &BTreeKey,
     ) -> storage::Result<Result<SlotNumber, SlotNumber>> {
-        let first = page.first_data_offset();
-        let count = page.count();
+        let mut left = page.first_data_offset();
+        let mut rigth = page.len();
 
-        let mut left = 0;
-        let mut rigth = count;
+        for i in left..rigth {
+            let entry = self.extracty_key(page, i)?;
+            if entry.row_id() < 0 {
+                log::error!("bad entry: {:?}", entry);
+            }
+        }
 
         while left < rigth {
             let mid = left + (rigth - left) / 2;
-            let slot = first + mid;
 
-            let key = self.extracty_key(page, slot)?;
+            let key = self.extracty_key(page, mid)?;
 
             match search_key.cmp(&key) {
                 Ordering::Less => rigth = mid,
                 Ordering::Equal => {
                     if page.is_leaf() {
-                        return Ok(Ok(slot));
+                        return Ok(Ok(mid));
                     } else {
-                        return Ok(Err(slot));
+                        return Ok(Err(mid));
                     }
                 }
                 Ordering::Greater => left = mid + 1,
             }
         }
 
-        Ok(Err(first + left))
+        Ok(Err(left))
     }
 
     /// Check if search operation needs to visit rigth sibling. This can happen
@@ -248,6 +257,7 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
         }
 
         let cell = page.get_cell(index)?;
+
         let reassembled_payload = self.reassemble_payload(page, index)?;
 
         match cell {
@@ -259,8 +269,16 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
                 let record = Record::new(reassembled_payload);
                 Ok(BTreeKey::new_index_key(record))
             }
-            BTreeCellRef::TableInternal(cell) => Ok(BTreeKey::new_table_key(cell.row_id, None)),
+            BTreeCellRef::TableInternal(cell) => {
+                if cell.row_id < 0 {
+                    log::error!("bad cell: {:?}", cell);
+                }
+                Ok(BTreeKey::new_table_key(cell.row_id, None))
+            }
             BTreeCellRef::TableLeaf(cell) => {
+                if cell.row_id < 0 {
+                    log::error!("bad cell: {:?}", cell);
+                }
                 let record = Record::new(reassembled_payload);
                 Ok(BTreeKey::new_table_key(cell.row_id, Some(record)))
             }
@@ -755,6 +773,17 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         Ok(())
     }
 
+    /// Splits pages that are not root. If you want to see how to split root, see
+    /// `split_root`. This function handles both leaf and internal pages. In general
+    /// current page is locked and new sibling is allocated. Then cells are evenly
+    /// distributed across this pages and index at which they got splited is pushed
+    /// up in the tree:
+    ///
+    /// # Tree Leafs
+    ///
+    /// When splitting leaf page we take all cells of old page and calculate
+    /// distribution between to pages using `calculate_split_ratio`. Index at which
+    /// we will split this page will become left page
     fn split_non_root(&mut self) -> storage::Result<()> {
         log::debug!("Splitting non root {}", self.current_page);
 
@@ -851,6 +880,10 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         self.insert_into_parent(separator_cell, new_right_sibling)
     }
 
+    /// Propagates insert changes up in the B-tree by spliting internal nodes.
+    /// Takes `separator` (new high key of splited page) and `new page` (created
+    /// durring split) and by using `path_stack` we backtrack changes into page
+    /// parents. This function is recursive, so it will call itself as needed.
     fn insert_into_parent(
         &mut self,
         separator: BTreeCell,
@@ -1053,9 +1086,53 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
     // fn split_root(&mut self) -> storage::Result<()> {}
 
-    // fn load_siblings(&mut self, page_number: PageNumber, parent_page: PageNumber) -> Vec<(PageNumber, SlotNumber)> {
+    /// Loads siblings of given `page_number` and `parent_page`. Returns vector
+    /// of siblings (sibling page number, index of slot in parent page). This
+    /// function attempts to read `Self::BALANCE_SIBLINGS_PER_SIDE` + 1 (for the
+    /// page itself), so if by default it's set to 3 it could return 7 siblings
+    /// in total. This might vary, because parent doesn't have enough children
+    /// etc. in this case this will simply load all children.
+    pub fn load_siblings(
+        &mut self,
+        page_number: PageNumber,
+        parent_page: PageNumber,
+    ) -> storage::Result<Vec<(PageNumber, SlotNumber)>> {
+        let mut load_per_side = Self::BALANCE_SIBLINGS_PER_SIDE as SlotNumber;
 
-    // }
+        let parent_page = self.pager.read_page(&*self.tx.borrow(), parent_page)?;
+        let parent_guard = parent_page.lock_shared();
+
+        let position_in_parent = (parent_guard.first_data_offset()..parent_guard.len())
+            .map(|pos| parent_guard.child(pos))
+            .position(|p| p == page_number)
+            .unwrap() as SlotNumber;
+
+        if position_in_parent == parent_guard.first_data_offset()
+            || position_in_parent == parent_guard.len()
+        {
+            load_per_side *= 2;
+        }
+
+        let start = position_in_parent.saturating_sub(position_in_parent);
+        let start = if start == 0 {
+            parent_guard.first_data_offset()
+        } else {
+            start
+        };
+
+        let left_siblings = start..position_in_parent;
+        let right_siblings = (position_in_parent + 1)
+            ..min(
+                position_in_parent + load_per_side + 1,
+                parent_guard.len() + 1,
+            );
+
+        Ok(left_siblings
+            .map(|index| (parent_guard.child(index), index))
+            .chain(std::iter::once((page_number, position_in_parent)))
+            .chain(right_siblings.map(|index| (parent_guard.child(index), index)))
+            .collect())
+    }
 }
 
 type CellSplit = (Option<usize>, Vec<usize>);

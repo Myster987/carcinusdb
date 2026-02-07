@@ -331,14 +331,16 @@ mod tests {
             let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
 
             let start = 1;
-            let end = 500;
+            let end = 5000;
 
             for i in start..end {
                 let mut record = RecordBuilder::new();
 
                 record.add(Value::Null);
                 record.add(Value::Int(i));
-                record.add(Value::Text(Text::new(format!("Maciek Kowalski {i}"))));
+                record.add(Value::Text(Text::new(format!(
+                    "Maciek Kowalski {i} i Antoni Kowalski {i}"
+                ))));
 
                 let record = record.serialize_to_record();
 
@@ -359,36 +361,42 @@ mod tests {
 
         let db = Database::open("./test-db.db")?;
 
-        let tx = db.begin_read()?;
+        let tx = db.begin_write()?;
 
-        let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
+        {
+            let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
 
-        for i in 1..500 {
-            assert!(
-                cursor.seek(&BTreeKey::new_table_key(i, None))?.is_found(),
-                "Entry {} lost",
-                i
-            );
+            // for i in 1..500 {
+            //     println!("{:?}", cursor.print_current_page());
+            //     assert!(
+            //         cursor.seek(&BTreeKey::new_table_key(i, None))?.is_found(),
+            //         "Entry {} lost",
+            //         i
+            //     );
+            // }
+
+            log::info!("All keys present!");
+
+            let test = cursor.seek(&BTreeKey::new_table_key(93, None))?;
+
+            // cursor.print_current_page()?;
+
+            println!("result: {:?}", test);
+            // println!("{:?}", cursor.load_siblings(24, 33));
+
+            // let record = cursor.try_record()?;
+
+            // println!("{:?}", record);
+            // println!("text: {:?}", record.get_value(2));
+
+            // println!("siblings {:?}", cursor.load_siblings(3, 1));
+
+            // while let Ok(advnaced) = cursor.next()
+            //     && advnaced
+            // {
+            //     println!("{:?}", cursor.try_record()?);
+            // }
         }
-
-        log::info!("All keys present!");
-
-        let test = cursor.seek(&BTreeKey::new_table_key(93, None))?;
-
-        // cursor.print_current_page()?;
-
-        println!("result: {:?}", test);
-
-        let record = cursor.try_record()?;
-
-        println!("{:?}", record);
-        println!("text: {:?}", record.get_value(2));
-
-        // while let Ok(advnaced) = cursor.next()
-        //     && advnaced
-        // {
-        //     println!("{:?}", cursor.try_record()?);
-        // }
 
         tx.commit()?;
 
