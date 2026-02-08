@@ -15,7 +15,7 @@ use crate::{
 };
 
 pub const DATABASE_HEADER_PAGE_NUMBER: PageNumber = 1;
-pub const DATABASE_HEADER_SIZE: usize = size_of::<DatabaseHeader>();
+pub const DATABASE_HEADER_SIZE: usize = 34;
 
 pub const DEFAULT_PAGE_SIZE: u32 = 4096;
 
@@ -273,13 +273,13 @@ impl Page {
 
     /// Set defaults
     pub fn initialize(&self, page_type: PageType) {
-        self.write_u8(0, page_type as u8);
+        self.set_page_type(page_type);
         self.set_first_freeblock(0);
         self.set_len(0);
         self.set_last_used_offset(self.as_ptr().len() as u16);
         self.set_free_fragments(0);
-        self.write_u32(Self::RIGHT_SIBLING_OFFSET, 0);
-        self.write_u32(Self::RIGHT_CHILD_OFFSET, 0);
+        self.set_right_sibling(0);
+        self.set_right_child(0);
     }
 
     /// Returns reference to whole page buffer.
@@ -362,7 +362,7 @@ impl Page {
     /// Free space between slot array and last cell.
     pub fn free_space(&self) -> u16 {
         self.last_used_offset()
-            .saturating_sub(self.offset as u16 + (self.header_size()) as u16 + self.len() * 2)
+            .saturating_sub((self.header_size()) as u16 + self.len() * SLOT_SIZE as SlotNumber)
     }
 
     pub fn first_data_offset(&self) -> SlotNumber {
@@ -408,6 +408,7 @@ impl Page {
     /// This makes sure that we don't write one cell on top of another or we
     /// corrupt the data otherwise.
     fn defragment(&self) {
+        log::info!("defragment page");
         let mut slots = self.slot_array();
 
         let mut min_heap = BinaryHeap::from_iter(
@@ -418,7 +419,7 @@ impl Page {
                 .map(|(i, &val)| (val, i)),
         );
 
-        let mut current_offset = self.buffer.size();
+        let mut current_offset = self.as_ptr().len();
 
         while let Some((offset, i)) = min_heap.pop() {
             let cell_size = self.get_cell_size(offset);
@@ -490,7 +491,12 @@ impl Page {
     /// Attempts to insert cell at given index. If cell doesn't fit, it is returned
     /// as a error value. Otherwise slot number of this cell is returned.
     fn try_insert_cell(&self, index: SlotNumber, cell: BTreeCell) -> Result<SlotNumber, BTreeCell> {
-        assert!(index <= self.count(), "Index out of range");
+        assert!(
+            index <= self.count(),
+            "Index out of range. Len: {}, index: {}",
+            self.len(),
+            index
+        );
 
         let cell_size = cell.local_size();
         let storage_cell_size = cell.storage_size();
@@ -512,7 +518,9 @@ impl Page {
         );
 
         // look for free space between pages before allocating new one.
-        if let Some(offset) = freeblocks.take_freeblock(local_payload_size as u16) {
+        if let Some(offset) = freeblocks.take_freeblock(local_payload_size as u16)
+            && self.free_space() >= SLOT_SIZE as u16
+        {
             write_btree_cell(self.as_ptr(), offset, &cell).expect("writting cell failed");
 
             slot_array.insert(index, offset);
@@ -1115,9 +1123,9 @@ impl<'a> FreeblockList<'a> {
                     return Some(current);
                 } else {
                     // split freeblock
-                    let new_current = current + current_size - cell_size;
+                    let new_current = current + diff;
 
-                    self.write_u16(current as usize + 2, current_size - cell_size);
+                    self.write_u16(current as usize + 2, diff);
 
                     return Some(new_current);
                 }

@@ -901,9 +901,11 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             .read_page(&*self.tx.borrow(), parent_page_number)?;
         let parent_guard = parent_page.lock_exclusive();
 
+        // before inserting seprator from children we need to set parent cell
+        // to point to new page, because it contains keys that are less than it.
         parent_guard.set_child(path_slot, new_page);
-
         parent_guard.insert_cell(path_slot, separator);
+
         self.pager.add_dirty(&parent_page);
 
         if parent_guard.is_overflow() {

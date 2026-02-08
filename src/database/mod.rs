@@ -367,7 +367,6 @@ mod tests {
             let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
 
             // for i in 1..500 {
-            //     println!("{:?}", cursor.print_current_page());
             //     assert!(
             //         cursor.seek(&BTreeKey::new_table_key(i, None))?.is_found(),
             //         "Entry {} lost",
@@ -375,19 +374,18 @@ mod tests {
             //     );
             // }
 
-            log::info!("All keys present!");
+            // log::info!("All keys present!");
 
-            let test = cursor.seek(&BTreeKey::new_table_key(93, None))?;
-
+            let test = cursor.seek(&BTreeKey::new_table_key(4000, None))?;
             // cursor.print_current_page()?;
 
             println!("result: {:?}", test);
             // println!("{:?}", cursor.load_siblings(24, 33));
 
-            // let record = cursor.try_record()?;
+            let record = cursor.try_record()?;
 
-            // println!("{:?}", record);
-            // println!("text: {:?}", record.get_value(2));
+            println!("{:?}", record);
+            println!("text: {:?}", record.get_value(2));
 
             // println!("siblings {:?}", cursor.load_siblings(3, 1));
 
