@@ -683,6 +683,8 @@ impl Pager {
     pub fn flush_dirty<Tx: WriteTx>(&self, tx: &mut Tx) -> storage::Result<()> {
         let dirty_page_numbers: Vec<_> = self.dirty_pages.iter().map(|pn| *pn).collect();
 
+        log::debug!("Flushing dirty pages: {:?}", dirty_page_numbers);
+
         let dirty_pages: Vec<_> = dirty_page_numbers
             .iter()
             .map(|pn| self.read_page(tx, *pn).unwrap())

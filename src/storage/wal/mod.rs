@@ -400,8 +400,6 @@ impl WriteAheadLog {
                 break;
             }
 
-            log::trace!("buff slice: {:?}", &buffer[..20]);
-
             transaction_frames.push((page_number, frame_number));
 
             if is_commit {
@@ -569,12 +567,6 @@ impl WriteAheadLog {
             let page_number = page.id();
             let page_content = page.raw();
             let checksum = checksum_crc32(page_content);
-
-            log::trace!(
-                "WAL append page {} with checksum {}",
-                pages_number,
-                checksum
-            );
 
             let commit_db_size = if i + 1 == pages.len() { db_size } else { 0 };
 

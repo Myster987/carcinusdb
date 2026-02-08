@@ -331,7 +331,7 @@ mod tests {
             let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
 
             let start = 1;
-            let end = 5000;
+            let end = 20000;
 
             for i in start..end {
                 let mut record = RecordBuilder::new();
@@ -376,10 +376,10 @@ mod tests {
 
             // log::info!("All keys present!");
 
+            cursor.print_current_page()?;
             let test = cursor.seek(&BTreeKey::new_table_key(4000, None))?;
-            // cursor.print_current_page()?;
 
-            println!("result: {:?}", test);
+            println!("search result: {:?}", test);
             // println!("{:?}", cursor.load_siblings(24, 33));
 
             let record = cursor.try_record()?;
