@@ -1374,6 +1374,11 @@ impl IndexInternalCell {
         }
     }
 
+    pub fn set_left_child(&mut self, value: PageNumber) {
+        self.raw[..size_of::<PageNumber>()].copy_from_slice(&value.to_le_bytes());
+        self.left_child = value;
+    }
+
     pub fn payload(&self) -> &[u8] {
         self.payload_ref.as_slice(&self.raw)
     }
@@ -1551,6 +1556,11 @@ impl TableInternalCell {
             left_child,
             row_id,
         }
+    }
+
+    pub fn set_left_child(&mut self, value: PageNumber) {
+        self.raw[..size_of::<PageNumber>()].copy_from_slice(&value.to_le_bytes());
+        self.left_child = value;
     }
 }
 

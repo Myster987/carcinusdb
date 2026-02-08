@@ -662,7 +662,14 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         match cell {
             BTreeCell::IndexLeaf(leaf) => BTreeCell::IndexInternal(leaf.into_internal(left_child)),
             BTreeCell::TableLeaf(leaf) => BTreeCell::TableInternal(leaf.into_internal(left_child)),
-            other => other,
+            BTreeCell::IndexInternal(mut cell) => {
+                cell.set_left_child(left_child);
+                BTreeCell::IndexInternal(cell)
+            }
+            BTreeCell::TableInternal(mut cell) => {
+                cell.set_left_child(left_child);
+                BTreeCell::TableInternal(cell)
+            }
         }
     }
 
@@ -757,6 +764,10 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             }
 
             right_child_guard.set_right_sibling(0);
+
+            if !is_leaf {
+                right_child_guard.set_right_child(root_guard.try_right_child().unwrap_or(0));
+            }
 
             self.pager.add_dirty(&right_child);
         }
