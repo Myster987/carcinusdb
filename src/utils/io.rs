@@ -4,6 +4,7 @@ use std::{
     io::{self, IoSlice, Seek, Write},
     os::fd::AsRawFd,
     path::Path,
+    sync::LazyLock,
 };
 
 use libc::c_void;
@@ -11,6 +12,9 @@ use libc::c_void;
 use crate::utils::buffer::Buffer;
 
 pub type BlockNumber = u32;
+
+pub const MAX_VECTORED_IO_BUFFERS: LazyLock<usize> =
+    LazyLock::new(|| unsafe { libc::sysconf(libc::_SC_IOV_MAX) } as usize);
 
 pub trait FileOps {
     /// Creates file in filesystem at the given path.
@@ -151,40 +155,42 @@ impl IO for File {
         }
         let mut total_written = 0;
 
-        let mut iovecs = buf;
+        let iovecs = buf.chunks_mut(*MAX_VECTORED_IO_BUFFERS);
 
-        while !iovecs.is_empty() {
-            let written = unsafe {
-                libc::pwritev(
-                    self.as_raw_fd(),
-                    iovecs.as_ptr().cast(),
-                    iovecs.len() as libc::c_int,
-                    offset as libc::off_t,
-                )
-            };
+        for mut iovec in iovecs {
+            while !iovec.is_empty() {
+                let written = unsafe {
+                    libc::pwritev(
+                        self.as_raw_fd(),
+                        iovec.as_ptr().cast(),
+                        iovec.len() as libc::c_int,
+                        offset as libc::off_t,
+                    )
+                };
 
-            if written < 0 {
-                let err = io::Error::last_os_error();
-                if err.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                } else {
-                    return Err(err);
+                if written < 0 {
+                    let err = io::Error::last_os_error();
+                    if err.kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    } else {
+                        return Err(err);
+                    }
                 }
-            }
 
-            let mut written = written as usize;
-            total_written += written;
-            offset += written;
+                let mut written = written as usize;
+                total_written += written;
+                offset += written;
 
-            // skip written iovecs
-            while !iovecs.is_empty() && written >= iovecs[0].len() {
-                written -= iovecs[0].len();
-                iovecs = &mut iovecs[1..];
-            }
+                // skip written iovecs
+                while !iovec.is_empty() && written >= iovec[0].len() {
+                    written -= iovec[0].len();
+                    iovec = &mut iovec[1..];
+                }
 
-            // advance iovec if part of it was written
-            if !iovecs.is_empty() && written > 0 {
-                iovecs[0].advance(written);
+                // advance iovec if part of it was written
+                if !iovec.is_empty() && written > 0 {
+                    iovec[0].advance(written);
+                }
             }
         }
 
