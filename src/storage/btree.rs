@@ -202,13 +202,6 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
         let mut left = page.first_data_offset();
         let mut rigth = page.len();
 
-        for i in left..rigth {
-            let entry = self.extracty_key(page, i)?;
-            if entry.row_id() < 0 {
-                log::error!("bad entry: {:?}", entry);
-            }
-        }
-
         while left < rigth {
             let mid = left + (rigth - left) / 2;
 
@@ -220,7 +213,7 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
                     if page.is_leaf() {
                         return Ok(Ok(mid));
                     } else {
-                        return Ok(Err(mid));
+                        return Ok(Err(mid + 1));
                     }
                 }
                 Ordering::Greater => left = mid + 1,
@@ -269,16 +262,8 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
                 let record = Record::new(reassembled_payload);
                 Ok(BTreeKey::new_index_key(record))
             }
-            BTreeCellRef::TableInternal(cell) => {
-                if cell.row_id < 0 {
-                    log::error!("bad cell: {:?}", cell);
-                }
-                Ok(BTreeKey::new_table_key(cell.row_id, None))
-            }
+            BTreeCellRef::TableInternal(cell) => Ok(BTreeKey::new_table_key(cell.row_id, None)),
             BTreeCellRef::TableLeaf(cell) => {
-                if cell.row_id < 0 {
-                    log::error!("bad cell: {:?}", cell);
-                }
                 let record = Record::new(reassembled_payload);
                 Ok(BTreeKey::new_table_key(cell.row_id, Some(record)))
             }
@@ -516,165 +501,8 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         Ok(())
     }
 
-    fn build_high_key(&mut self, page: &Page, entry: &BTreeKey<'_>) -> storage::Result<BTreeCell> {
-        let page_type = page.page_type();
-
-        if matches!(page_type, PageType::TableInternal | PageType::TableLeaf) {
-            let cell = match page_type {
-                PageType::TableInternal => {
-                    BTreeCell::TableInternal(TableInternalCell::new(entry.row_id(), 0))
-                }
-                PageType::TableLeaf => {
-                    BTreeCell::TableLeaf(TableLeafCell::new(entry.row_id(), 0, &[], None))
-                }
-                _ => unreachable!(),
-            };
-
-            return Ok(cell);
-        }
-
-        let record = entry
-            .get_record()
-            .expect("Entry should contain record in order to be inserted");
-
-        let payload = record.raw();
-        let payload_size = payload.len();
-
-        let (is_overflowing, local_payload_size) = cell_overflows(
-            payload_size,
-            page.min_cell_size(),
-            page.max_cell_size(),
-            page.usable_space(),
-        );
-
-        let first_overflow = if is_overflowing {
-            self.build_overflow_chain(page, payload, local_payload_size)?
-        } else {
-            None
-        };
-
-        let local_payload = &payload[..local_payload_size];
-
-        let cell = match page_type {
-            PageType::IndexInternal => BTreeCell::IndexInternal(IndexInternalCell::new(
-                0,
-                payload_size as VarInt,
-                local_payload,
-                first_overflow,
-            )),
-            PageType::IndexLeaf => BTreeCell::IndexLeaf(IndexLeafCell::new(
-                payload_size as VarInt,
-                local_payload,
-                first_overflow,
-            )),
-            _ => unreachable!(),
-        };
-
-        Ok(cell)
-    }
-
-    fn build_cell(&mut self, page: &Page, entry: BTreeKey<'_>) -> storage::Result<BTreeCell> {
-        let record = entry
-            .get_record()
-            .expect("Entry should contain record in order to be inserted");
-
-        let payload = record.raw();
-        let payload_size = payload.len();
-
-        let (is_overflowing, local_payload_size) = cell_overflows(
-            payload_size,
-            page.min_cell_size(),
-            page.max_cell_size(),
-            page.usable_space(),
-        );
-
-        let first_overflow = if is_overflowing {
-            self.build_overflow_chain(page, payload, local_payload_size)?
-        } else {
-            None
-        };
-
-        let local_payload = &payload[..local_payload_size];
-
-        let cell = match entry {
-            BTreeKey::IndexKey(_) => BTreeCell::IndexLeaf(IndexLeafCell::new(
-                payload_size as VarInt,
-                local_payload,
-                first_overflow,
-            )),
-            BTreeKey::TableKey(_) => BTreeCell::TableLeaf(TableLeafCell::new(
-                entry.row_id(),
-                payload_size as VarInt,
-                payload,
-                first_overflow,
-            )),
-        };
-
-        Ok(cell)
-    }
-
-    fn build_overflow_chain(
-        &mut self,
-        page: &Page,
-        payload: &[u8],
-        local_payload_size: usize,
-    ) -> storage::Result<Option<PageNumber>> {
-        let payload_size = payload.len();
-
-        // build linked list of overflow pages by going backwards, from end to start.
-        let overflow_payload = &payload[local_payload_size..];
-
-        let mut overflows = payload_size - local_payload_size;
-
-        let max_overflow_size_per_page = page.can_fit_in_overflow();
-
-        let mut prev_overflow_page = 0;
-
-        while overflows > 0 {
-            let overflow_page_number = self.pager.alloc_empty_page(&mut *self.tx.borrow_mut())?;
-            let overflow_page = self
-                .pager
-                .read_page(&*self.tx.borrow(), overflow_page_number)?;
-            let overflow_page_guard = overflow_page.lock_exclusive();
-
-            overflow_page_guard.set_next_overflow(prev_overflow_page);
-
-            let mut current_content = overflows % max_overflow_size_per_page;
-
-            if current_content == 0 {
-                current_content = max_overflow_size_per_page;
-            }
-
-            overflow_page_guard.set_overflow_payload_size(current_content as u16);
-
-            let payload = &overflow_payload[overflows - current_content..overflows];
-
-            overflow_page_guard.set_overflow_payload(payload);
-            overflows -= current_content;
-
-            prev_overflow_page = overflow_page_number;
-        }
-
-        Ok(Some(prev_overflow_page))
-    }
-
-    fn convert_to_internal_cell(&self, cell: BTreeCell, left_child: PageNumber) -> BTreeCell {
-        match cell {
-            BTreeCell::IndexLeaf(leaf) => BTreeCell::IndexInternal(leaf.into_internal(left_child)),
-            BTreeCell::TableLeaf(leaf) => BTreeCell::TableInternal(leaf.into_internal(left_child)),
-            BTreeCell::IndexInternal(mut cell) => {
-                cell.set_left_child(left_child);
-                BTreeCell::IndexInternal(cell)
-            }
-            BTreeCell::TableInternal(mut cell) => {
-                cell.set_left_child(left_child);
-                BTreeCell::TableInternal(cell)
-            }
-        }
-    }
-
     fn split_page(&mut self) -> storage::Result<()> {
-        log::debug!("Begin split page");
+        log::trace!("Begin split page");
 
         let is_root = self.current_page == self.root;
 
@@ -686,7 +514,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     }
 
     fn split_root(&mut self) -> storage::Result<()> {
-        log::debug!("Spliting root");
+        log::trace!("Spliting root");
 
         let root_page = self.pager.read_page(self.tx.borrow().deref(), self.root)?;
         let root_page_type = root_page.lock_shared().page_type();
@@ -702,28 +530,38 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         let root_guard = root_page.lock_exclusive();
         let is_leaf = root_guard.is_leaf();
 
-        log::debug!("Children allocated: left - {left_child} right - {right_child}");
+        log::trace!("Children allocated: left - {left_child} right - {right_child}");
 
         let mut cells: VecDeque<_> = root_guard.drain(..).collect();
+
+        // let old_high_key = if root_guard.has_high_key() {
+        //     cells.pop_front()
+        // } else {
+        //     None
+        // };
 
         let cell_sizes: Vec<_> = cells.iter().map(|c| c.local_size()).collect();
 
         let (left_high_key, right_high_key, separator_index) = calculate_split_ratio(
             &cell_sizes,
-            root_guard.raw().len(),
+            self.pager.db_header.page_size as usize,
             root_guard.has_high_key(),
         );
 
         let right_high_key = right_high_key.map(|right| cells[right].clone());
         let left_high_key = left_high_key.map(|left| cells[left].clone());
 
-        let separator_cell = cells[separator_index].clone();
-
         let mut right_cells = cells.split_off(separator_index);
 
-        if !is_leaf {
-            right_cells.pop_front();
-        }
+        let separator_cell = if is_leaf {
+            right_cells[0].clone()
+        } else {
+            right_cells.pop_front().unwrap()
+        };
+
+        // if !is_leaf {
+        //     right_cells.pop_front();
+        // }
 
         let left_cells = cells;
 
@@ -733,6 +571,8 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             let left_child = self.pager.read_page(self.tx.borrow().deref(), left_child)?;
             let left_child_guard = left_child.lock_exclusive();
 
+            // left_child_guard.insert_cell(0, separator_cell.clone());
+
             left_child_guard.insert_cell(0, left_high_key.unwrap());
 
             for (idx, cell) in left_cells.into_iter().enumerate() {
@@ -741,6 +581,16 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             }
 
             left_child_guard.set_right_sibling(right_child);
+
+            if !is_leaf {
+                let value = match &separator_cell {
+                    BTreeCell::IndexInternal(cell) => cell.left_child,
+                    BTreeCell::TableInternal(cell) => cell.left_child,
+                    _ => unreachable!(),
+                };
+
+                left_child_guard.set_right_child(value);
+            }
 
             self.pager.add_dirty(&left_child);
         }
@@ -753,9 +603,14 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
             let mut current_index = 0;
 
+            // if let Some(old_high_key) = old_high_key {
+            //     right_child_guard.insert_cell(current_index, old_high_key);
+            //     current_index += 1;
+            // }
+
             if let Some(right_high_key) = right_high_key {
                 right_child_guard.insert_cell(current_index, right_high_key);
-                current_index += 1;
+                current_index + 1;
             }
 
             for cell in right_cells {
@@ -796,7 +651,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     /// distribution between to pages using `calculate_split_ratio`. Index at which
     /// we will split this page will become left page
     fn split_non_root(&mut self) -> storage::Result<()> {
-        log::debug!("Splitting non root {}", self.current_page);
+        log::trace!("Splitting non root {}", self.current_page);
 
         let page = self
             .pager
@@ -810,7 +665,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             .pager
             .alloc_page(&mut *self.tx.borrow_mut(), page_type)?;
 
-        log::debug!(
+        log::trace!(
             "Split between page: {} and {}",
             page.id(),
             new_right_sibling
@@ -818,32 +673,35 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
         let mut cells = page_guard.drain(..).collect::<VecDeque<_>>();
 
+        // let old_high_key = if page_guard.has_high_key() {
+        //     cells.pop_front()
+        // } else {
+        //     None
+        // };
+
         let cell_sizes: Vec<_> = cells.iter().map(|c| c.local_size()).collect();
 
         let (left_high_key, right_high_key, separator_index) = calculate_split_ratio(
             &cell_sizes,
-            page_guard.raw().len(),
+            self.pager.db_header.page_size as usize,
             page_guard.has_high_key(),
         );
 
         let right_high_key = right_high_key.map(|right| cells[right].clone());
         let left_high_key = left_high_key.map(|left| cells[left].clone());
 
-        let separator_cell = cells[separator_index].clone();
-
         let mut right_cells = cells.split_off(separator_index);
 
-        if !is_leaf {
-            right_cells.pop_front();
-        }
-
-        if page_guard.has_high_key() {
-            let _ = cells.pop_front();
-        }
+        let separator_cell = if is_leaf {
+            right_cells[0].clone()
+        } else {
+            right_cells.pop_front().unwrap()
+        };
 
         let left_cells = cells;
 
         let old_right_sibling = page_guard.try_right_sibling();
+        let old_right_child = page_guard.try_right_child();
 
         {
             let mut current_index = 0;
@@ -853,12 +711,25 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 current_index += 1;
             }
 
+            // page_guard.insert_cell(current_index, separator_cell.clone());
+            // current_index += 1;
+
             for cell in left_cells {
                 page_guard.insert_cell(current_index, cell);
                 current_index += 1;
             }
 
             page_guard.set_right_sibling(new_right_sibling);
+
+            if !is_leaf {
+                let value = match &separator_cell {
+                    BTreeCell::IndexInternal(cell) => cell.left_child,
+                    BTreeCell::TableInternal(cell) => cell.left_child,
+                    _ => unreachable!(),
+                };
+
+                page_guard.set_right_child(value);
+            }
 
             self.pager.add_dirty(&page);
         }
@@ -876,12 +747,21 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 current_index += 1;
             }
 
+            // if let Some(old_high_key) = old_high_key {
+            //     new_right_sibling_guard.insert_cell(current_index, old_high_key);
+            //     current_index += 1;
+            // }
+
             for cell in right_cells {
                 new_right_sibling_guard.insert_cell(current_index, cell);
                 current_index += 1;
             }
 
             new_right_sibling_guard.set_right_sibling(old_right_sibling.unwrap_or(0));
+
+            if !is_leaf {
+                new_right_sibling_guard.set_right_child(old_right_child.unwrap_or(0));
+            }
 
             self.pager.add_dirty(&new_right_sibling);
         }
@@ -904,7 +784,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             return Ok(());
         }
 
-        log::debug!("parent path stack: {:?}", self.path_stack);
+        log::trace!("parent path stack: {:?}", self.path_stack);
 
         let (parent_page_number, path_slot) = self.path_stack.pop().unwrap();
         let parent_page = self
@@ -1088,6 +968,163 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             .chain(std::iter::once((page_number, position_in_parent)))
             .chain(right_siblings.map(|index| (parent_guard.child(index), index)))
             .collect())
+    }
+
+    fn build_high_key(&mut self, page: &Page, entry: &BTreeKey<'_>) -> storage::Result<BTreeCell> {
+        let page_type = page.page_type();
+
+        if matches!(page_type, PageType::TableInternal | PageType::TableLeaf) {
+            let cell = match page_type {
+                PageType::TableInternal => {
+                    BTreeCell::TableInternal(TableInternalCell::new(entry.row_id(), 0))
+                }
+                PageType::TableLeaf => {
+                    BTreeCell::TableLeaf(TableLeafCell::new(entry.row_id(), 0, &[], None))
+                }
+                _ => unreachable!(),
+            };
+
+            return Ok(cell);
+        }
+
+        let record = entry
+            .get_record()
+            .expect("Entry should contain record in order to be inserted");
+
+        let payload = record.raw();
+        let payload_size = payload.len();
+
+        let (is_overflowing, local_payload_size) = cell_overflows(
+            payload_size,
+            page.min_cell_size(),
+            page.max_cell_size(),
+            page.usable_space(),
+        );
+
+        let first_overflow = if is_overflowing {
+            self.build_overflow_chain(page, payload, local_payload_size)?
+        } else {
+            None
+        };
+
+        let local_payload = &payload[..local_payload_size];
+
+        let cell = match page_type {
+            PageType::IndexInternal => BTreeCell::IndexInternal(IndexInternalCell::new(
+                0,
+                payload_size as VarInt,
+                local_payload,
+                first_overflow,
+            )),
+            PageType::IndexLeaf => BTreeCell::IndexLeaf(IndexLeafCell::new(
+                payload_size as VarInt,
+                local_payload,
+                first_overflow,
+            )),
+            _ => unreachable!(),
+        };
+
+        Ok(cell)
+    }
+
+    fn build_cell(&mut self, page: &Page, entry: BTreeKey<'_>) -> storage::Result<BTreeCell> {
+        let record = entry
+            .get_record()
+            .expect("Entry should contain record in order to be inserted");
+
+        let payload = record.raw();
+        let payload_size = payload.len();
+
+        let (is_overflowing, local_payload_size) = cell_overflows(
+            payload_size,
+            page.min_cell_size(),
+            page.max_cell_size(),
+            page.usable_space(),
+        );
+
+        let first_overflow = if is_overflowing {
+            self.build_overflow_chain(page, payload, local_payload_size)?
+        } else {
+            None
+        };
+
+        let local_payload = &payload[..local_payload_size];
+
+        let cell = match entry {
+            BTreeKey::IndexKey(_) => BTreeCell::IndexLeaf(IndexLeafCell::new(
+                payload_size as VarInt,
+                local_payload,
+                first_overflow,
+            )),
+            BTreeKey::TableKey(_) => BTreeCell::TableLeaf(TableLeafCell::new(
+                entry.row_id(),
+                payload_size as VarInt,
+                payload,
+                first_overflow,
+            )),
+        };
+
+        Ok(cell)
+    }
+
+    fn build_overflow_chain(
+        &mut self,
+        page: &Page,
+        payload: &[u8],
+        local_payload_size: usize,
+    ) -> storage::Result<Option<PageNumber>> {
+        let payload_size = payload.len();
+
+        // build linked list of overflow pages by going backwards, from end to start.
+        let overflow_payload = &payload[local_payload_size..];
+
+        let mut overflows = payload_size - local_payload_size;
+
+        let max_overflow_size_per_page = page.can_fit_in_overflow();
+
+        let mut prev_overflow_page = 0;
+
+        while overflows > 0 {
+            let overflow_page_number = self.pager.alloc_empty_page(&mut *self.tx.borrow_mut())?;
+            let overflow_page = self
+                .pager
+                .read_page(&*self.tx.borrow(), overflow_page_number)?;
+            let overflow_page_guard = overflow_page.lock_exclusive();
+
+            overflow_page_guard.set_next_overflow(prev_overflow_page);
+
+            let mut current_content = overflows % max_overflow_size_per_page;
+
+            if current_content == 0 {
+                current_content = max_overflow_size_per_page;
+            }
+
+            overflow_page_guard.set_overflow_payload_size(current_content as u16);
+
+            let payload = &overflow_payload[overflows - current_content..overflows];
+
+            overflow_page_guard.set_overflow_payload(payload);
+            overflows -= current_content;
+
+            prev_overflow_page = overflow_page_number;
+        }
+
+        Ok(Some(prev_overflow_page))
+    }
+
+    fn convert_to_internal_cell(&self, cell: BTreeCell, left_child: PageNumber) -> BTreeCell {
+        match cell {
+            BTreeCell::IndexLeaf(leaf) => BTreeCell::IndexInternal(leaf.into_internal(left_child)),
+            BTreeCell::TableLeaf(leaf) => BTreeCell::TableInternal(leaf.into_internal(left_child)),
+            BTreeCell::IndexInternal(mut cell) => {
+                cell.set_left_child(left_child);
+                BTreeCell::IndexInternal(cell)
+            }
+            BTreeCell::TableInternal(mut cell) => {
+                cell.set_left_child(left_child);
+                BTreeCell::TableInternal(cell)
+            }
+        }
     }
 }
 

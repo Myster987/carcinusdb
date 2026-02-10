@@ -412,7 +412,7 @@ impl Page {
     /// This makes sure that we don't write one cell on top of another or we
     /// corrupt the data otherwise.
     fn defragment(&self) {
-        log::info!("defragment page");
+        log::trace!("defragment page");
         let mut slots = self.slot_array();
 
         let mut min_heap = BinaryHeap::from_iter(
@@ -426,6 +426,9 @@ impl Page {
         let mut current_offset = self.as_ptr().len();
 
         while let Some((offset, i)) = min_heap.pop() {
+            log::trace!("Offset to cell: {} at index: {}", offset, i);
+            log::trace!("Cell: {:?}", self.get_cell(i as SlotNumber));
+
             let cell_size = self.get_cell_size(offset);
 
             let start = offset as usize;
@@ -529,6 +532,20 @@ impl Page {
         if let Some(offset) = freeblocks.take_freeblock(local_payload_size as u16)
             && self.free_space() >= SLOT_SIZE as u16
         {
+            // let page_size = self.as_ptr().len() as u16;
+            // if offset >= page_size {
+            //     panic!(
+            //         "freeblock returned invalid offset {} (page {})",
+            //         offset, page_size
+            //     );
+            // }
+            // if offset + cell_size as u16 > page_size {
+            //     panic!(
+            //         "freeblock offset + cell size out of page bounds: {} + {} > {}",
+            //         offset, cell_size, page_size
+            //     );
+            // }
+
             write_btree_cell(self.as_ptr(), offset, &cell).expect("writting cell failed");
 
             slot_array.insert(index, offset);
@@ -660,7 +677,7 @@ impl Page {
             ),
             "Invalid page type."
         );
-        if index == self.count() {
+        if index == self.len() {
             self.try_right_child().unwrap()
         } else {
             match self.get_cell(index).unwrap() {
@@ -680,6 +697,7 @@ impl Page {
             "Invalid page type."
         );
         if index == self.count() {
+            // if index == self.len() {
             self.set_right_child(new_child);
         } else {
             match self.get_cell(index).unwrap() {
