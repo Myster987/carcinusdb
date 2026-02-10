@@ -200,10 +200,10 @@ impl TryFrom<u8> for PageType {
 /// | length            | 2     | 3         | number of slots in slot array.
 /// | last_used_offset  | 2     | 5         | offset to last used space. Used to calculate if new data can fit in Page.
 /// | free_fragments    | 1     | 7         | number of free fragments. Tiny gaps between cells, to small to fit new data.
-/// | right_child       | 4     | 8         | present only in Internal Pages. Points to next B-Tree page > current.
-/// | right_sibling     | 4     | 8         | present only in Leaf Pages. Points to next B-tree page at the same level.
+/// | right_sibling     | 4     | 8         | points to right sibling of this page (at the same level in B-Tree).
+/// | right_child       | 4     | 12        | present only in Internal Pages. Points to next B-Tree page > current.
 ///
-/// Total size: 12 bytes long.
+/// Total size: 16 bytes (Internal Pages) or 12 bytes (Leaf Pages) bytes long.
 ///
 /// # Overflow:
 /// If `Page` contains `Cells` that overflow, it maintains hashmap of slots pointing to overflowing `Cells`.
@@ -235,8 +235,8 @@ impl Page {
     const LENGTH_OFFSET: usize = Self::FIRST_FREEBLOCK_OFFSET + size_of::<SlotNumber>();
     const LAST_USED_OFFSET: usize = Self::LENGTH_OFFSET + size_of::<SlotNumber>();
     const FREE_FRAGMENTS_OFFSET: usize = Self::LAST_USED_OFFSET + size_of::<SlotNumber>();
-    const RIGHT_CHILD_OFFSET: usize = Self::FREE_FRAGMENTS_OFFSET + size_of::<u8>();
-    const RIGHT_SIBLING_OFFSET: usize = Self::RIGHT_CHILD_OFFSET;
+    const RIGHT_SIBLING_OFFSET: usize = Self::FREE_FRAGMENTS_OFFSET + size_of::<u8>();
+    const RIGHT_CHILD_OFFSET: usize = Self::RIGHT_SIBLING_OFFSET + size_of::<PageNumber>();
 
     pub const HIGH_KEY_SLOT: SlotNumber = 0;
     const FIRST_DATA_KEY: SlotNumber = Self::HIGH_KEY_SLOT + 1;
@@ -247,7 +247,8 @@ impl Page {
     const PAYLOAD_OFFSET: usize = Self::PAYLOAD_SIZE_OFFSET + size_of::<SlotNumber>();
 
     // header sizes
-    pub const PAGE_HEADER_SIZE: usize = Self::RIGHT_CHILD_OFFSET + size_of::<PageNumber>();
+    pub const LEAF_PAGE_HEADER_SIZE: usize = 12;
+    pub const INTERNAL_PAGE_HEADER_SIZE: usize = 16;
 
     pub fn new(offset: usize, buffer: Buffer) -> Self {
         Self {
@@ -277,6 +278,7 @@ impl Page {
         self.set_len(0);
         self.set_last_used_offset(self.as_ptr().len() as u16);
         self.set_free_fragments(0);
+        self.set_right_sibling(0);
         self.set_right_child(0);
     }
 
@@ -326,7 +328,7 @@ impl Page {
         IoSlice::new(self.buffer.as_slice())
     }
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.count() == 0
     }
 
     pub fn is_leaf(&self) -> bool {
@@ -348,9 +350,12 @@ impl Page {
         self.total_free_space() > self.usable_space() as u16 / 2
     }
 
-    #[inline]
+    /// Depending on `PageType`, this function returns 12 or 16.
     pub fn header_size(&self) -> usize {
-        Self::PAGE_HEADER_SIZE
+        match self.page_type() {
+            PageType::IndexInternal | PageType::TableInternal => Self::INTERNAL_PAGE_HEADER_SIZE,
+            PageType::IndexLeaf | PageType::TableLeaf => Self::LEAF_PAGE_HEADER_SIZE,
+        }
     }
 
     /// Returns avalible space without header and offset.
@@ -362,6 +367,14 @@ impl Page {
     pub fn free_space(&self) -> u16 {
         self.last_used_offset()
             .saturating_sub((self.header_size()) as u16 + self.len() * SLOT_SIZE as SlotNumber)
+    }
+
+    pub fn first_data_offset(&self) -> SlotNumber {
+        if self.has_high_key() {
+            Self::FIRST_DATA_KEY
+        } else {
+            0
+        }
     }
 
     pub fn slot_array(&self) -> SlotArray {
@@ -487,7 +500,7 @@ impl Page {
     /// as a error value. Otherwise slot number of this cell is returned.
     fn try_insert_cell(&self, index: SlotNumber, cell: BTreeCell) -> Result<SlotNumber, BTreeCell> {
         assert!(
-            index <= self.len(),
+            index <= self.count(),
             "Index out of range. Len: {}, index: {}",
             self.len(),
             index
@@ -647,7 +660,7 @@ impl Page {
             ),
             "Invalid page type."
         );
-        if index == self.len() {
+        if index == self.count() {
             self.try_right_child().unwrap()
         } else {
             match self.get_cell(index).unwrap() {
@@ -666,7 +679,7 @@ impl Page {
             ),
             "Invalid page type."
         );
-        if index == self.len() {
+        if index == self.count() {
             self.set_right_child(new_child);
         } else {
             match self.get_cell(index).unwrap() {
@@ -675,6 +688,11 @@ impl Page {
                 _ => unreachable!(),
             }
         }
+    }
+
+    #[inline]
+    pub fn has_high_key(&self) -> bool {
+        self.try_right_sibling().is_some()
     }
 }
 
@@ -782,6 +800,11 @@ impl Page {
     pub fn set_len(&self, value: u16) {
         self.write_u16(Self::LENGTH_OFFSET, value);
     }
+
+    /// Returns number of slots in `Page`. Doesn't include high key cell.
+    pub fn count(&self) -> u16 {
+        self.len() - self.first_data_offset()
+    }
 }
 
 // Overflow Pages
@@ -860,7 +883,7 @@ impl Debug for Page {
             .field("slot_array", &self.slot_array())
             .field(
                 "cells",
-                &(0..self.len())
+                &(0..self.count())
                     .map(|i| {
                         let cell = self.get_cell(i).unwrap();
                         cell
