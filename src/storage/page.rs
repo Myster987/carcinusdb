@@ -310,12 +310,16 @@ impl Page {
         self.buffer.size() - size_of::<PageNumber>() - size_of::<u16>()
     }
 
-    fn total_free_space(&self) -> u16 {
+    pub fn total_free_space(&self) -> u16 {
         let total = self.free_space() + self.free_fragments() as u16;
 
         let freeblocks: u16 = self.freeblock_list().iter().sum();
 
         total + freeblocks
+    }
+
+    pub fn used_space(&self) -> u16 {
+        self.usable_space() as u16 - self.total_free_space()
     }
 
     pub fn as_io_slice(&self) -> IoSlice {
@@ -463,6 +467,10 @@ impl Page {
             .ok_or(storage::Error::CellIndexOutRange)?;
 
         self.get_cell_at_offset(offset_to_cell)
+    }
+
+    pub fn push(&self, cell: BTreeCell) {
+        self.insert_cell(self.len(), cell);
     }
 
     pub fn insert_cell(&self, index: SlotNumber, cell: BTreeCell) {
