@@ -320,7 +320,7 @@ mod tests {
 
     #[test]
     fn test_insert() -> anyhow::Result<()> {
-        simple_logger::init()?;
+        simple_logger::init_with_level(log::Level::Debug)?;
 
         let db = Database::open("./test-db.db")?;
 
@@ -331,7 +331,7 @@ mod tests {
             let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
 
             let start = 1;
-            let end = 20000;
+            let end = 30_000;
 
             for i in start..end {
                 let mut record = RecordBuilder::new();
@@ -366,7 +366,12 @@ mod tests {
         {
             let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
 
-            for i in 1..20000 {
+            // cursor.diagnose_tree(12686)?;
+
+            // // Also diagnose a working key nearby
+            // cursor.diagnose_tree(12724)?;
+
+            for i in 1..30_000 {
                 assert!(
                     cursor.seek(&BTreeKey::new_table_key(i, None))?.is_found(),
                     "Entry {} lost",
@@ -376,14 +381,19 @@ mod tests {
 
             log::info!("All keys present!");
 
-            let test = cursor.seek(&BTreeKey::new_table_key(46, None))?;
+            let test = cursor.seek(&BTreeKey::new_table_key(12_686, None))?;
 
             println!("search result: {:?}", test);
 
             let record = cursor.try_record()?;
 
             println!("{:?}", record);
-            println!("text: {:?}", record.get_value(2));
+            // println!("text: {:?}", record.get_value(2));
+
+            for _ in 0..3 {
+                cursor.next()?;
+                println!("{:?}", cursor.try_record());
+            }
 
             // while let Ok(advnaced) = cursor.next()
             //     && advnaced

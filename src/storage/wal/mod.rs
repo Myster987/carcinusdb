@@ -514,7 +514,7 @@ impl WriteAheadLog {
             .get(&page_number, transaction.tx_max_frame())
             .ok_or(Error::PageNotFoundInWal(page_number))?;
 
-        log::debug!("Reading frame: {}", visible_frame_number);
+        log::trace!("Reading frame: {}", visible_frame_number);
 
         let mut buffer = buffer_pool.get();
 
