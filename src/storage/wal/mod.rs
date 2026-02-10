@@ -11,7 +11,7 @@ use std::{
 };
 
 use dashmap::DashMap;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 
 use crate::{
     database::MemDatabaseHeader,
@@ -37,7 +37,7 @@ pub mod transaction;
 const WAL_HEADER_SIZE: usize = size_of::<WalHeader>();
 const WAL_HEADER_SIZE_NO_CHECKSUM: usize = WAL_HEADER_SIZE - size_of::<u32>();
 const FRAME_HEADER_SIZE: usize = size_of::<FrameHeader>();
-pub const READERS_NUM: usize = 5;
+const READERS_NUM: usize = 5;
 
 const DEFAULT_CHECKPOINT_SIZE: FrameNumber = 1000;
 

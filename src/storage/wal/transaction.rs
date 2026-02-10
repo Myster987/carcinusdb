@@ -1,6 +1,6 @@
 use std::mem::ManuallyDrop;
 
-use parking_lot::{MutexGuard, RwLockReadGuard};
+use parking_lot::MutexGuard;
 
 use crate::{
     storage::{
@@ -46,8 +46,6 @@ impl ReadTransaction {
     /// Starts new read transaction. Migth need to re-run, because writer
     /// changed some metadata.
     pub fn begin(wal: &WriteAheadLog) -> storage::Result<Self> {
-        // let checkpoint_guard = wal.checkpoint_lock.read();
-
         let min_frame = wal.get_min_frame();
         let max_frame = wal.get_max_frame();
 
@@ -86,7 +84,6 @@ pub struct WriteTransaction<'a> {
 
 /// Write transaction inner data.
 pub struct WriteTransactionInner<'a> {
-    // pub checkpoint_guard: RwLockReadGuard<'a, ()>,
     pub write_guard: MutexGuard<'a, ()>,
     pub min_frame: FrameNumber,
     pub max_frame: FrameNumber,
