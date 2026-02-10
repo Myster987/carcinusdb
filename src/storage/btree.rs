@@ -867,172 +867,115 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         Ok(())
     }
 
-    // fn balance(&mut self, current_page_guard: ExclusivePageGuard) -> storage::Result<()> {
-    //     // let current_page = self
-    //     //     .pager
-    //     //     .read_page(&*self.tx.borrow(), self.current_page)?;
-    //     // let current_page_guard = current_page.lock_exclusive();
+    fn balance(&mut self) -> storage::Result<()> {
+        let current_page = self
+            .pager
+            .read_page(&*self.tx.borrow(), self.current_page)?;
+        let current_page_guard = current_page.lock_exclusive();
 
-    //     let is_root = self.current_page == self.root;
+        let is_root = self.current_page == self.root;
+        let is_overflow = current_page_guard.is_overflow();
+        let is_underflow =
+            current_page_guard.is_empty() || !is_root && current_page_guard.is_underflow();
 
-    //     let is_underflow =
-    //         current_page_guard.is_empty() || !is_root && current_page_guard.is_underflow();
+        // tree is balanced.
+        if !is_overflow && !is_underflow {
+            return Ok(());
+        }
 
-    //     // tree is balanced.
-    //     if !current_page_guard.is_overflow() && !is_underflow {
-    //         return Ok(());
-    //     }
+        drop(current_page_guard);
 
-    //     // // root is empty.
-    //     // if is_root && is_underflow {
-    //     //     // root is the only page, so we can't do anything.
-    //     //     if current_page_guard.is_leaf() {
-    //     //         return Ok(());
-    //     //     }
+        // root is empty.
+        if is_root && is_underflow {
+            let root = self.pager.read_page(&*self.tx.borrow(), self.root)?;
+            let root_guard = root.lock_exclusive();
 
-    //     //     let child_page = current_page_guard.try_rigth_child().unwrap();
-    //     //     let
-    //     // }
+            // root is the only page, so we can't do anything.
+            if root_guard.is_leaf() {
+                return Ok(());
+            }
 
-    //     if is_root && current_page_guard.is_overflow() {
-    //         let child_page_type = current_page_guard.page_type();
+            let Some(child_page) = root_guard.try_right_child() else {
+                return Ok(());
+            };
 
-    //         let left_child = self
-    //             .pager
-    //             .alloc_page(&mut *self.tx.borrow_mut(), child_page_type)?;
-    //         let right_child = self
-    //             .pager
-    //             .alloc_page(&mut *self.tx.borrow_mut(), child_page_type)?;
+            let child = self.pager.read_page(&*self.tx.borrow(), child_page)?;
+            let child_guard = child.lock_shared();
 
-    //         let mut cells: VecDeque<_> = current_page_guard.drain(..).collect();
+            let needs_space = child_guard.used_space();
 
-    //         let cell_sizes: Vec<_> = cells.iter().map(|c| c.local_size()).collect();
+            if root_guard.total_free_space() < needs_space {
+                return Ok(());
+            }
+            drop(child_guard);
 
-    //         let (left_high_key, right_high_key, split_index) = calculate_split_ratio(
-    //             &cell_sizes,
-    //             current_page_guard.raw().len(),
-    //             current_page_guard.has_high_key(),
-    //         );
+            let child_guard = child.lock_exclusive();
 
-    //         let right_high_key = right_high_key.map(|right| cells[right].clone());
-    //         let left_high_key = left_high_key.map(|left| cells[left].clone());
+            let grandchild = child_guard.try_right_child().unwrap_or(0);
+            let cells = child_guard.drain(..).collect::<Vec<_>>();
 
-    //         let split_cell = cells[split_index].clone();
+            drop(child_guard);
 
-    //         let right_cells = cells.split_off(split_index);
+            self.pager
+                .free_page(&mut *self.tx.borrow_mut(), child_page)?;
 
-    //         let _ = cells.pop_front();
-    //         let left_cells = cells;
+            cells.into_iter().for_each(|cell| root_guard.push(cell));
+            root_guard.set_right_child(grandchild);
 
-    //         {
-    //             let left_child = self.pager.read_page(&*self.tx.borrow(), left_child)?;
-    //             let left_child_guard = left_child.lock_exclusive();
+            return Ok(());
+        }
 
-    //             left_child_guard.insert_cell(0, left_high_key.unwrap());
+        if is_root && is_overflow {
+            return self.split_root();
+        }
 
-    //             let mut current_index = 1;
+        if is_overflow {
+            // let new_page = self
+            //     .pager
+            //     .alloc_page(&mut *self.tx.borrow_mut(), current_page_guard.page_type())?;
 
-    //             for cell in left_cells {
-    //                 left_child_guard.insert_cell(current_index, cell);
-    //                 current_index += 1;
-    //             }
+            // let mut cells: VecDeque<_> = current_page_guard.drain(..).collect();
 
-    //             left_child_guard.set_right_sibling(right_child);
+            // let cell_sizes: Vec<_> = cells.iter().map(|c| c.local_size()).collect();
 
-    //             self.pager.add_dirty(&left_child);
-    //         }
+            // let (left_high_key, right_high_key, split_index) = calculate_split_ratio(
+            //     &cell_sizes,
+            //     current_page_guard.raw().len(),
+            //     current_page_guard.has_high_key(),
+            // );
 
-    //         {
-    //             let right_child = self.pager.read_page(&*self.tx.borrow(), right_child)?;
-    //             let right_child_guard = right_child.lock_exclusive();
+            // let right_high_key = right_high_key.map(|right| cells[right].clone());
+            // let left_high_key = left_high_key.map(|left| cells[left].clone());
 
-    //             let mut current_index = 0;
+            // let split_cell = cells[split_index].clone();
 
-    //             if let Some(right_high_key) = right_high_key {
-    //                 right_child_guard.insert_cell(current_index, right_high_key);
-    //                 current_index += 1;
-    //             }
+            // let right = cells.split_off(split_index);
 
-    //             for cell in right_cells {
-    //                 right_child_guard.insert_cell(current_index, cell);
-    //                 current_index += 1;
-    //             }
+            // // remove old high key
+            // let _ = cells.pop_front();
+            // {
+            //     let new_page = self.pager.read_page(&*self.tx.borrow(), new_page)?;
+            //     let new_page_guard = new_page.lock_exclusive();
 
-    //             right_child_guard.set_right_sibling(0);
+            //     new_page_guard.insert_cell(0, left_high_key.unwrap());
 
-    //             self.pager.add_dirty(&right_child);
-    //         }
+            //     let mut current_index = 1;
 
-    //         // convert into internal cell.
-    //         let split_cell = match split_cell {
-    //             cell @ BTreeCell::IndexInternal(_) => cell,
-    //             cell @ BTreeCell::TableInternal(_) => cell,
+            //     for cell in right {
+            //         new_page_guard.insert_cell(current_index, cell);
+            //         current_index += 1;
+            //     }
 
-    //             BTreeCell::IndexLeaf(cell) => {
-    //                 BTreeCell::IndexInternal(cell.into_internal(left_child))
-    //             }
-    //             BTreeCell::TableLeaf(cell) => {
-    //                 BTreeCell::TableInternal(cell.into_internal(left_child))
-    //             }
-    //         };
+            //     new_page_guard.set_right_sibling(self.current_page);
 
-    //         current_page_guard.insert_cell(0, split_cell);
-    //         current_page_guard.set_right_child(right_child);
+            //     self.pager.add_dirty(&new_page);
+            // }
 
-    //         // self.pager.add_dirty(&current_page);
+            todo!()
+        }
 
-    //         return Ok(());
-    //     }
-
-    //     if current_page_guard.is_overflow() {
-    //         let new_page = self
-    //             .pager
-    //             .alloc_page(&mut *self.tx.borrow_mut(), current_page_guard.page_type())?;
-
-    //         let mut cells: VecDeque<_> = current_page_guard.drain(..).collect();
-
-    //         let cell_sizes: Vec<_> = cells.iter().map(|c| c.local_size()).collect();
-
-    //         let (left_high_key, right_high_key, split_index) = calculate_split_ratio(
-    //             &cell_sizes,
-    //             current_page_guard.raw().len(),
-    //             current_page_guard.has_high_key(),
-    //         );
-
-    //         let right_high_key = right_high_key.map(|right| cells[right].clone());
-    //         let left_high_key = left_high_key.map(|left| cells[left].clone());
-
-    //         let split_cell = cells[split_index].clone();
-
-    //         let right = cells.split_off(split_index);
-
-    //         // remove old high key
-    //         let _ = cells.pop_front();
-    //         {
-    //             let new_page = self.pager.read_page(&*self.tx.borrow(), new_page)?;
-    //             let new_page_guard = new_page.lock_exclusive();
-
-    //             new_page_guard.insert_cell(0, left_high_key.unwrap());
-
-    //             let mut current_index = 1;
-
-    //             for cell in right {
-    //                 new_page_guard.insert_cell(current_index, cell);
-    //                 current_index += 1;
-    //             }
-
-    //             new_page_guard.set_right_sibling(self.current_page);
-
-    //             self.pager.add_dirty(&new_page);
-    //         }
-
-    //         todo!()
-    //     }
-
-    //     Ok(())
-    // }
-
-    // fn split_root(&mut self) -> storage::Result<()> {}
+        Ok(())
+    }
 
     /// Loads siblings of given `page_number` and `parent_page`. Returns vector
     /// of siblings (sibling page number, index of slot in parent page). This
@@ -1059,9 +1002,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             load_per_side *= 2;
         }
 
-        let start = position_in_parent.saturating_sub(position_in_parent);
-
-        let left_siblings = start..position_in_parent;
+        let left_siblings = (position_in_parent.saturating_sub(load_per_side))..position_in_parent;
         let right_siblings = (position_in_parent + 1)
             ..min(
                 position_in_parent + load_per_side + 1,
