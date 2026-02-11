@@ -318,6 +318,9 @@ mod tests {
         storage::btree::{BTreeKey, DatabaseCursor},
     };
 
+    const KEYS_START: i64 = 1;
+    const KEYS_END: i64 = 200_000;
+
     #[test]
     fn test_insert() -> anyhow::Result<()> {
         simple_logger::init_with_level(log::Level::Debug)?;
@@ -330,8 +333,8 @@ mod tests {
             // scope cursor to drop before tx commit.
             let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
 
-            let start = 1;
-            let end = 30_000;
+            let start = KEYS_START;
+            let end = KEYS_END;
 
             for i in start..end {
                 let mut record = RecordBuilder::new();
@@ -361,7 +364,7 @@ mod tests {
 
         let db = Database::open("./test-db.db")?;
 
-        let tx = db.begin_write()?;
+        let tx = db.begin_read()?;
 
         {
             let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
@@ -371,29 +374,32 @@ mod tests {
             // // Also diagnose a working key nearby
             // cursor.diagnose_tree(12724)?;
 
-            for i in 1..30_000 {
+            for i in KEYS_START..KEYS_END {
                 assert!(
                     cursor.seek(&BTreeKey::new_table_key(i, None))?.is_found(),
                     "Entry {} lost",
                     i
                 );
+                if i % 1_000 == 0 {
+                    log::info!("Up to entry: {} B-tree is valid", i)
+                }
             }
 
             log::info!("All keys present!");
 
-            let test = cursor.seek(&BTreeKey::new_table_key(12_686, None))?;
+            // let test = cursor.seek(&BTreeKey::new_table_key(12_686, None))?;
 
-            println!("search result: {:?}", test);
+            // println!("search result: {:?}", test);
 
-            let record = cursor.try_record()?;
+            // let record = cursor.try_record()?;
 
-            println!("{:?}", record);
-            // println!("text: {:?}", record.get_value(2));
+            // println!("{:?}", record);
+            // // println!("text: {:?}", record.get_value(2));
 
-            for _ in 0..3 {
-                cursor.next()?;
-                println!("{:?}", cursor.try_record());
-            }
+            // for _ in 0..3 {
+            //     cursor.next()?;
+            //     println!("{:?}", cursor.try_record());
+            // }
 
             // while let Ok(advnaced) = cursor.next()
             //     && advnaced

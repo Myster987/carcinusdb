@@ -19,7 +19,7 @@ pub const DATABASE_HEADER_SIZE: usize = 34;
 
 pub const DEFAULT_PAGE_SIZE: u32 = 4096;
 
-const DEFAULT_CACHE_SIZE: u32 = 3000;
+const DEFAULT_CACHE_SIZE: u32 = 2000;
 
 pub const MIN_PAGE_SIZE: usize = 512;
 pub const MAX_PAGE_SIZE: usize = 64 << 10;
