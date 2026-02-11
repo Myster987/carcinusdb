@@ -462,7 +462,6 @@ impl WriteAheadLog {
         std::mem::forget(tx);
 
         self.wal_file.persist()?;
-        // self.set_last_checksum(inner.last_checksum);
         self.set_max_frame(inner.max_frame);
 
         // increment db change counter.
@@ -473,8 +472,6 @@ impl WriteAheadLog {
         self.wal_file.persist()?;
 
         drop(inner.write_guard);
-
-        // drop(inner.checkpoint_guard);
 
         self.checkpoint()?;
 
@@ -607,6 +604,41 @@ impl WriteAheadLog {
 
         Ok(())
     }
+
+    // pub fn append_uncommited<Tx: WriteTx>(
+    //     &self,
+    //     transaction: &mut Tx,
+    //     mut page: ExclusivePageGuard,
+    //     clean: bool,
+    // ) -> storage::Result<()> {
+    //     let frame_header_buf = &mut [0; FRAME_HEADER_SIZE];
+    //     let page_number = page.id();
+    //     let page_content = page.raw();
+    //     let checksum = checksum_crc32(page_content);
+
+    //     let frame_header = FrameHeader {
+    //         page_number,
+    //         db_size: 0,
+    //         checksum,
+    //     };
+    //     frame_header.to_bytes(frame_header_buf);
+
+    //     let frame_number = transaction.tx_max_frame() + 1;
+
+    //     let io_buffers = &mut [IoSlice::new(frame_header_buf), IoSlice::new(page_content)];
+
+    //     let write_result = self
+    //         .wal_file
+    //         .write_vectored(frame_number, io_buffers, WAL_HEADER_SIZE);
+
+    //     pager::complete_write_page(&write_result, &mut page, clean);
+
+    //     transaction.tx_set_max_frame(frame_number);
+
+    //     self.index.insert(page_number, frame_number);
+
+    //     Ok(())
+    // }
 
     fn should_checkpoint(&self) -> bool {
         let max_frame = self.get_max_frame();
