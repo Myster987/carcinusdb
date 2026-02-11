@@ -472,6 +472,18 @@ impl Pager {
             return Ok(cached_page);
         }
 
+        let mem_page = self.read_page_no_cache(tx, page_number)?;
+
+        self.page_cache.insert(page_number, mem_page.clone())?;
+
+        Ok(mem_page)
+    }
+
+    fn read_page_no_cache<Tx: ReadTx>(
+        &self,
+        tx: &Tx,
+        page_number: PageNumber,
+    ) -> storage::Result<MemPageRef> {
         let page_wrapper = Arc::new(MemPage::new(page_number));
 
         {
@@ -488,8 +500,6 @@ impl Pager {
             }
             guard.set_loaded();
         } // unlock
-
-        self.page_cache.insert(page_number, page_wrapper.clone())?;
 
         Ok(page_wrapper)
     }
@@ -683,7 +693,7 @@ impl Pager {
     pub fn flush_dirty<Tx: WriteTx>(&self, tx: &mut Tx) -> storage::Result<()> {
         let dirty_page_numbers: Vec<_> = self.dirty_pages.iter().map(|pn| *pn).collect();
 
-        log::debug!("Flushing dirty pages: {:?}", dirty_page_numbers);
+        log::trace!("Flushing dirty pages: {:?}", dirty_page_numbers);
 
         let dirty_pages: Vec<_> = dirty_page_numbers
             .iter()
@@ -701,6 +711,23 @@ impl Pager {
         dirty_page_numbers.iter().for_each(|pn| {
             self.dirty_pages.remove(&*pn);
         });
+
+        Ok(())
+    }
+
+    pub fn flush_cache<Tx: WriteTx>(&self, tx: &mut Tx) -> storage::Result<()> {
+        let dirty_page_numbers: Vec<_> = self.dirty_pages.iter().map(|pn| *pn).collect();
+
+        let mut dirty_pages = Vec::with_capacity(dirty_page_numbers.len());
+
+        for dirty_page in &dirty_page_numbers {
+            match self.page_cache.get(dirty_page) {
+                Some(page) => dirty_pages.push(page),
+                None => dirty_pages.push(self.read_page_no_cache(tx, *dirty_page)?),
+            }
+        }
+
+        todo!();
 
         Ok(())
     }
