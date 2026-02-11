@@ -470,6 +470,10 @@ impl WriteAheadLog {
         self.db_file
             .write_header(&self.db_header.into_raw_header().to_bytes())?;
 
+        self.wal_file.persist()?;
+
+        drop(inner.write_guard);
+
         // drop(inner.checkpoint_guard);
 
         self.checkpoint()?;
