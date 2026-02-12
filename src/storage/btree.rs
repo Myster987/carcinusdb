@@ -486,17 +486,22 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         let page = self
             .pager
             .read_page(&*self.tx.borrow(), self.current_page)?;
-        let guard = page.lock_exclusive();
 
-        let cell = self.build_cell(&guard, entry)?;
-        guard.insert_cell(slot_number, cell);
+        {
+            let guard = page.lock_exclusive();
 
-        self.pager.add_dirty(&page);
+            let cell = self.build_cell(&guard, entry)?;
 
-        if guard.is_overflow() {
-            drop(guard);
-            self.split_page()?;
+            guard.insert_cell(slot_number, cell);
+
+            if guard.is_overflow() {
+                drop(guard);
+                self.split_page()?;
+            }
         }
+
+        self.pager
+            .mark_dirty_auto_flush(&mut *self.tx.borrow_mut(), &page)?;
 
         Ok(())
     }
@@ -592,7 +597,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 left_child_guard.set_right_child(value);
             }
 
-            self.pager.add_dirty(&left_child);
+            self.pager.mark_dirty(&left_child);
         }
 
         {
@@ -624,7 +629,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 right_child_guard.set_right_child(root_guard.try_right_child().unwrap_or(0));
             }
 
-            self.pager.add_dirty(&right_child);
+            self.pager.mark_dirty(&right_child);
         }
 
         let separator_cell = self.convert_to_internal_cell(separator_cell, left_child);
@@ -634,7 +639,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
         root_guard.insert_cell(0, separator_cell);
 
-        self.pager.add_dirty(&root_page);
+        self.pager.mark_dirty(&root_page);
 
         Ok(())
     }
@@ -731,7 +736,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 page_guard.set_right_child(value);
             }
 
-            self.pager.add_dirty(&page);
+            self.pager.mark_dirty(&page);
         }
 
         {
@@ -763,7 +768,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 new_right_sibling_guard.set_right_child(old_right_child.unwrap_or(0));
             }
 
-            self.pager.add_dirty(&new_right_sibling);
+            self.pager.mark_dirty(&new_right_sibling);
         }
 
         let separator_cell = self.convert_to_internal_cell(separator_cell, self.current_page);
@@ -797,7 +802,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         parent_guard.set_child(path_slot, new_page);
         parent_guard.insert_cell(path_slot, separator);
 
-        self.pager.add_dirty(&parent_page);
+        self.pager.mark_dirty(&parent_page);
 
         if parent_guard.is_overflow() {
             let old_current = self.current_page;
