@@ -11,8 +11,8 @@ use crate::storage::btree::BTreeType;
 use crate::storage::buffer_pool::BufferPool;
 use crate::storage::cache::ShardedClockCache;
 use crate::storage::page::{DATABASE_HEADER_PAGE_NUMBER, DATABASE_HEADER_SIZE, PageType};
-use crate::storage::wal::WriteAheadLog;
 use crate::storage::wal::transaction::{ReadTx, WriteTx};
+use crate::storage::wal::{DEFAULT_CHECKPOINT_SIZE, WriteAheadLog};
 use crate::utils::io::BlockIO;
 
 use crate::storage::{self, PageNumber};
@@ -399,9 +399,17 @@ pub struct Pager {
     /// Reference to global LRU cache
     pub page_cache: Arc<ShardedClockCache>,
     pub dirty_pages: Arc<DashSet<PageNumber>>,
+    cache_flush_threshold: usize,
 }
 
 impl Pager {
+    /// After this percentage of dirty pages in cache, it will flush them
+    /// into WAL.
+    const DIRTY_PAGES_FLUSH_PERCENTAGE: usize = 50;
+    /// Max threshold at which it can trigger flush. For now it's set to
+    /// DEFAULT_CHECKPOINT_SIZE.
+    const DIRTY_PAGES_FLUSH_THRESHOLD: usize = DEFAULT_CHECKPOINT_SIZE as usize;
+
     pub fn new(
         db_header: Arc<MemDatabaseHeader>,
         io: Arc<BlockIO<File>>,
@@ -410,6 +418,12 @@ impl Pager {
         page_cache: Arc<ShardedClockCache>,
         is_initialized: bool,
     ) -> storage::Result<Self> {
+        let relative_flush_threshold =
+            db_header.default_page_cache_size as usize * Self::DIRTY_PAGES_FLUSH_PERCENTAGE / 100;
+
+        let cache_flush_threshold =
+            std::cmp::min(Self::DIRTY_PAGES_FLUSH_THRESHOLD, relative_flush_threshold);
+
         let pager = Self {
             db_header,
             io,
@@ -417,6 +431,7 @@ impl Pager {
             wal,
             page_cache,
             dirty_pages: Arc::new(DashSet::new()),
+            cache_flush_threshold,
         };
 
         if !is_initialized {
@@ -434,7 +449,7 @@ impl Pager {
 
         self.write_header(&mut tx)?;
 
-        self.flush_dirty(&mut tx)?;
+        self.flush_dirty(&mut tx, true)?;
 
         self.wal.commit(tx)?;
 
@@ -447,10 +462,9 @@ impl Pager {
         let raw_header = self.db_header.into_raw_header();
 
         let header_page = self.read_page(tx, DATABASE_HEADER_PAGE_NUMBER)?;
-        let guard = header_page.lock_exclusive();
-        guard.write_db_header(raw_header);
+        header_page.lock_exclusive().write_db_header(raw_header);
 
-        self.add_dirty(&header_page);
+        self.mark_dirty(&header_page);
 
         Ok(())
     }
@@ -582,7 +596,7 @@ impl Pager {
             new_page.initialize(page_type);
 
             let new_page = Arc::new(MemPage::from_page(page_number, new_page));
-            self.add_dirty(&new_page);
+            self.mark_dirty(&new_page);
             new_page.set_loaded();
 
             // we have to manually insert new page to cache.
@@ -603,7 +617,7 @@ impl Pager {
                 guard.set_loaded();
             }
 
-            self.add_dirty(&free_page);
+            self.mark_dirty(&free_page);
 
             free_page.id()
         };
@@ -630,7 +644,7 @@ impl Pager {
 
             let new_page = Arc::new(MemPage::from_page(page_number, new_page));
 
-            self.add_dirty(&new_page);
+            self.mark_dirty(&new_page);
             new_page.set_loaded();
 
             // we have to manually insert new page to cache.
@@ -650,7 +664,7 @@ impl Pager {
                 guard.set_loaded();
             }
 
-            self.add_dirty(&free_page);
+            self.mark_dirty(&free_page);
 
             free_page.id()
         };
@@ -679,18 +693,41 @@ impl Pager {
         self.db_header.set_first_freelist_page(page_number);
         self.db_header.add_freelist_pages(1);
 
-        self.add_dirty(&page);
+        self.mark_dirty(&page);
 
         self.write_header(tx)
     }
 
-    /// Marks page as dirty to later identify page to flush durring checkpoint.
-    pub fn add_dirty(&self, page: &MemPageRef) {
+    /// Marks page as dirty to later identify page to flush durring checkpoint
+    /// or when cache is full.
+    pub fn mark_dirty(&self, page: &MemPageRef) {
         self.dirty_pages.insert(page.id());
         page.set_dirty();
     }
 
-    pub fn flush_dirty<Tx: WriteTx>(&self, tx: &mut Tx) -> storage::Result<()> {
+    /// Marks given page as dirty and can trigger cache flush, after it reaches
+    /// `cache_flush_threshold`.
+    pub fn mark_dirty_auto_flush<Tx: WriteTx>(
+        &self,
+        tx: &mut Tx,
+        page: &MemPageRef,
+    ) -> storage::Result<()> {
+        self.dirty_pages.insert(page.id());
+        page.set_dirty();
+
+        if self.dirty_pages.len() > self.cache_flush_threshold {
+            self.flush_dirty(tx, false)?;
+        }
+
+        Ok(())
+    }
+
+    /// Flushes all pages marked as dirty to WAL.
+    pub fn flush_dirty<Tx: WriteTx>(
+        &self,
+        tx: &mut Tx,
+        should_commit: bool,
+    ) -> storage::Result<()> {
         let dirty_page_numbers: Vec<_> = self.dirty_pages.iter().map(|pn| *pn).collect();
 
         log::trace!("Flushing dirty pages: {:?}", dirty_page_numbers);
@@ -705,29 +742,17 @@ impl Pager {
             .map(|page| page.lock_exclusive())
             .collect();
 
-        self.wal
-            .append_vectored(tx, &mut page_guards, self.db_header.get_database_size())?;
+        let db_size = if should_commit {
+            self.db_header.get_database_size()
+        } else {
+            0
+        };
+
+        self.wal.append_vectored(tx, &mut page_guards, db_size)?;
 
         dirty_page_numbers.iter().for_each(|pn| {
             self.dirty_pages.remove(&*pn);
         });
-
-        Ok(())
-    }
-
-    pub fn flush_cache<Tx: WriteTx>(&self, tx: &mut Tx) -> storage::Result<()> {
-        let dirty_page_numbers: Vec<_> = self.dirty_pages.iter().map(|pn| *pn).collect();
-
-        let mut dirty_pages = Vec::with_capacity(dirty_page_numbers.len());
-
-        for dirty_page in &dirty_page_numbers {
-            match self.page_cache.get(dirty_page) {
-                Some(page) => dirty_pages.push(page),
-                None => dirty_pages.push(self.read_page_no_cache(tx, *dirty_page)?),
-            }
-        }
-
-        todo!();
 
         Ok(())
     }
