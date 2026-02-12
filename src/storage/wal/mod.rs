@@ -39,7 +39,7 @@ const WAL_HEADER_SIZE_NO_CHECKSUM: usize = WAL_HEADER_SIZE - size_of::<u32>();
 const FRAME_HEADER_SIZE: usize = size_of::<FrameHeader>();
 const READERS_NUM: usize = 5;
 
-const DEFAULT_CHECKPOINT_SIZE: FrameNumber = 1000;
+pub const DEFAULT_CHECKPOINT_SIZE: FrameNumber = 1000;
 
 type Checksum = u32;
 
@@ -468,8 +468,6 @@ impl WriteAheadLog {
         self.db_header.increment_change_counter();
         self.db_file
             .write_header(&self.db_header.into_raw_header().to_bytes())?;
-
-        self.wal_file.persist()?;
 
         drop(inner.write_guard);
 
