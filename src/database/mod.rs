@@ -298,7 +298,7 @@ impl<'tx> DatabaseWriteTransaction<'tx> {
             .expect("Something is still using this transaction")
             .into_inner();
 
-        self.pager.flush_dirty(&mut wal_tx)?;
+        self.pager.flush_dirty(&mut wal_tx, true)?;
 
         self.pager.wal.commit(wal_tx)?;
 
@@ -369,11 +369,6 @@ mod tests {
         {
             let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
 
-            // cursor.diagnose_tree(12686)?;
-
-            // // Also diagnose a working key nearby
-            // cursor.diagnose_tree(12724)?;
-
             for i in KEYS_START..KEYS_END {
                 assert!(
                     cursor.seek(&BTreeKey::new_table_key(i, None))?.is_found(),
@@ -386,26 +381,39 @@ mod tests {
             }
 
             log::info!("All keys present!");
+        }
 
-            // let test = cursor.seek(&BTreeKey::new_table_key(12_686, None))?;
+        tx.commit()?;
 
-            // println!("search result: {:?}", test);
+        Ok(())
+    }
 
-            // let record = cursor.try_record()?;
+    #[test]
+    fn test_simple() -> anyhow::Result<()> {
+        simple_logger::init_with_level(log::Level::Trace)?;
 
-            // println!("{:?}", record);
-            // // println!("text: {:?}", record.get_value(2));
+        let db = Database::open("./test-db.db")?;
 
-            // for _ in 0..3 {
-            //     cursor.next()?;
-            //     println!("{:?}", cursor.try_record());
-            // }
+        let tx = db.begin_write()?;
 
-            // while let Ok(advnaced) = cursor.next()
-            //     && advnaced
-            // {
-            //     println!("{:?}", cursor.try_record()?);
-            // }
+        {
+            // scope cursor to drop before tx commit.
+            let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
+
+            let start = KEYS_START;
+            let end = KEYS_END;
+
+            for i in start..end {
+                let mut record = RecordBuilder::new();
+
+                record.add(Value::Text(Text::new("Bobik Malusienki".into())));
+
+                let record = record.serialize_to_record();
+
+                log::trace!("inserting key: {}", i);
+
+                cursor.insert(BTreeKey::new_table_key(i, Some(record)))?;
+            }
         }
 
         tx.commit()?;

@@ -423,6 +423,8 @@ impl Page {
                 .map(|(i, &val)| (val, i)),
         );
 
+        log::trace!("slot array: {:?}", slots.slot_array());
+
         let mut current_offset = self.as_ptr().len();
 
         while let Some((offset, i)) = min_heap.pop() {
@@ -443,6 +445,7 @@ impl Page {
 
         self.set_last_used_offset(current_offset as u16);
         self.set_first_freeblock(0);
+        self.set_free_fragments(0);
     }
 
     fn get_cell_size(&self, offset: u16) -> u16 {
@@ -503,7 +506,7 @@ impl Page {
     /// as a error value. Otherwise slot number of this cell is returned.
     fn try_insert_cell(&self, index: SlotNumber, cell: BTreeCell) -> Result<SlotNumber, BTreeCell> {
         assert!(
-            index <= self.count(),
+            index <= self.len(),
             "Index out of range. Len: {}, index: {}",
             self.len(),
             index
