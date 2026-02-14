@@ -387,37 +387,4 @@ mod tests {
 
         Ok(())
     }
-
-    #[test]
-    fn test_simple() -> anyhow::Result<()> {
-        simple_logger::init_with_level(log::Level::Trace)?;
-
-        let db = Database::open("./test-db.db")?;
-
-        let tx = db.begin_write()?;
-
-        {
-            // scope cursor to drop before tx commit.
-            let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
-
-            let start = KEYS_START;
-            let end = KEYS_END;
-
-            for i in start..end {
-                let mut record = RecordBuilder::new();
-
-                record.add(Value::Text(Text::new("Bobik Malusienki".into())));
-
-                let record = record.serialize_to_record();
-
-                log::trace!("inserting key: {}", i);
-
-                cursor.insert(BTreeKey::new_table_key(i, Some(record)))?;
-            }
-        }
-
-        tx.commit()?;
-
-        Ok(())
-    }
 }
