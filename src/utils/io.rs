@@ -155,12 +155,12 @@ impl IO for File {
         }
         let mut total_written = 0;
 
-        log::debug!("Vectors to write: {}", buf.len());
+        log::trace!("Vectors to write: {}", buf.len());
 
         let iovecs = buf.chunks_mut(*MAX_VECTORED_IO_BUFFERS);
 
         for mut iovec in iovecs {
-            log::debug!("Batch size: {}", iovec.len());
+            log::trace!("Batch size: {}", iovec.len());
             while !iovec.is_empty() {
                 let written = unsafe {
                     libc::pwritev(
@@ -195,7 +195,7 @@ impl IO for File {
                     iovec[0].advance(written);
                 }
             }
-            log::trace!("batch write completed");
+            log::trace!("Batch write completed");
         }
 
         Ok(total_written)

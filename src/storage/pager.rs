@@ -442,7 +442,7 @@ impl Pager {
     }
 
     pub fn init(&self) -> storage::Result<()> {
-        log::debug!("Initializing database.");
+        log::info!("Initializing database.");
         let mut tx = self.wal.begin_write_tx()?;
 
         let _ = self.btree_create(&mut tx, BTreeType::Table)?;
