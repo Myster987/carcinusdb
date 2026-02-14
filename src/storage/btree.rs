@@ -16,7 +16,7 @@ use crate::{
             BTreeCell, BTreeCellRef, CellOps, IndexInternalCell, IndexLeafCell, Page, PageType,
             TableInternalCell, TableLeafCell, cell_overflows,
         },
-        pager::Pager,
+        pager::{ExclusivePageGuard, MemPageRef, Pager},
         wal::transaction::{ReadTx, WriteTx},
     },
     utils::bytes::VarInt,
@@ -470,6 +470,26 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     const BALANCE_SIBLINGS_PER_SIDE: usize = 3;
 
     pub fn insert(&mut self, entry: BTreeKey<'_>) -> storage::Result<()> {
+        let current_page = self
+            .pager
+            .read_page(&*self.tx.borrow(), self.current_page)?;
+
+        {
+            // small optimization. if we do sequential insert we can check if
+            // this page is the correct one, so we can insert right away.
+            let current_page_guard = current_page.lock_shared();
+
+            if current_page_guard.is_leaf() && self.key_in_range(&*current_page_guard, &entry)? {
+                match self.binary_search(&*current_page_guard, &entry)? {
+                    Ok(_) => return Err(storage::Error::DuplicateKey),
+                    Err(slot) => {
+                        drop(current_page_guard);
+                        return self.try_insert_into_leaf(slot, entry);
+                    }
+                }
+            }
+        }
+
         let search_result = self.seek(&entry)?;
 
         match search_result {
@@ -539,12 +559,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
         let mut cells: VecDeque<_> = root_guard.drain(..).collect();
 
-        // let old_high_key = if root_guard.has_high_key() {
-        //     cells.pop_front()
-        // } else {
-        //     None
-        // };
-
         let cell_sizes: Vec<_> = cells.iter().map(|c| c.local_size()).collect();
 
         let (left_high_key, right_high_key, separator_index) = calculate_split_ratio(
@@ -563,10 +577,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         } else {
             right_cells.pop_front().unwrap()
         };
-
-        // if !is_leaf {
-        //     right_cells.pop_front();
-        // }
 
         let left_cells = cells;
 
@@ -608,14 +618,9 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
             let mut current_index = 0;
 
-            // if let Some(old_high_key) = old_high_key {
-            //     right_child_guard.insert_cell(current_index, old_high_key);
-            //     current_index += 1;
-            // }
-
             if let Some(right_high_key) = right_high_key {
                 right_child_guard.insert_cell(current_index, right_high_key);
-                current_index + 1;
+                current_index += 1;
             }
 
             for cell in right_cells {
@@ -678,12 +683,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
         let mut cells = page_guard.drain(..).collect::<VecDeque<_>>();
 
-        // let old_high_key = if page_guard.has_high_key() {
-        //     cells.pop_front()
-        // } else {
-        //     None
-        // };
-
         let cell_sizes: Vec<_> = cells.iter().map(|c| c.local_size()).collect();
 
         let (left_high_key, right_high_key, separator_index) = calculate_split_ratio(
@@ -715,9 +714,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 page_guard.insert_cell(current_index, left_high_key);
                 current_index += 1;
             }
-
-            // page_guard.insert_cell(current_index, separator_cell.clone());
-            // current_index += 1;
 
             for cell in left_cells {
                 page_guard.insert_cell(current_index, cell);
@@ -751,11 +747,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 new_right_sibling_guard.insert_cell(current_index, right_high_key);
                 current_index += 1;
             }
-
-            // if let Some(old_high_key) = old_high_key {
-            //     new_right_sibling_guard.insert_cell(current_index, old_high_key);
-            //     current_index += 1;
-            // }
 
             for cell in right_cells {
                 new_right_sibling_guard.insert_cell(current_index, cell);
@@ -879,6 +870,28 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             return self.split_root();
         }
 
+        let (parent_page, slot) = self.path_stack.pop().unwrap();
+        let mut siblings = self.load_siblings(self.current_page, parent_page)?;
+
+        debug_assert_eq!(
+            std::collections::HashSet::<PageNumber>::from_iter(
+                siblings.iter().map(|(pgn, _)| *pgn)
+            )
+            .len(),
+            siblings.len(),
+            "siblings array contains duplicated pages: {siblings:?}"
+        );
+
+        let mut cells = VecDeque::new();
+        let divider_idx = siblings[0].1;
+
+        for (i, sibling) in siblings.iter().enumerate() {
+            let (page_number, idx) = sibling;
+            let page = self.pager.read_page(&*self.tx.borrow(), *page_number)?;
+            cells.extend(page.lock_exclusive().drain(..));
+            if i < siblings.len() - 1 {}
+        }
+
         if is_overflow {
             // let new_page = self
             //     .pager
@@ -924,6 +937,71 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             todo!()
         }
 
+        Ok(())
+    }
+
+    fn redistribute_cells(
+        &mut self,
+        mut all_cells: VecDeque<BTreeCell>,
+        mut sibling_guards: Vec<(MemPageRef, ExclusivePageGuard, PageNumber)>,
+        siblings: &[(PageNumber, SlotNumber)],
+        parent_page: PageNumber,
+        has_high_key: bool,
+    ) -> storage::Result<()> {
+        let num_pages = sibling_guards.len();
+        let num_cells = all_cells.len();
+
+        let cells_per_page = num_cells / num_pages;
+        let mut extra_cells = num_cells % num_pages;
+
+        let parent = self.pager.read_page(&*self.tx.borrow(), parent_page)?;
+        let parent_guard = parent.lock_exclusive();
+
+        for (idx, (page_ref, guard, page_num)) in sibling_guards.iter().enumerate() {
+            let mut cells_for_this_page = cells_per_page;
+            if extra_cells > 0 {
+                cells_for_this_page += 1;
+                extra_cells -= 1;
+            }
+
+            let mut current_slot = 0;
+
+            if has_high_key {
+                let high_key = if idx == num_pages - 1 {
+                    guard
+                        .try_right_sibling()
+                        .and_then(|_| all_cells.get(cells_for_this_page - 1).cloned())
+                } else {
+                    all_cells.get(cells_for_this_page - 1).cloned()
+                };
+
+                if let Some(hk) = high_key {
+                    guard.insert_cell(current_slot, hk);
+                    current_slot += 1;
+                }
+            }
+
+            for _ in 0..cells_for_this_page {
+                if let Some(cell) = all_cells.pop_front() {
+                    guard.insert_cell(current_slot, cell);
+                    current_slot += 1;
+                }
+            }
+
+            if idx < num_pages - 1 {
+                let separator = guard.get_cell(current_slot - 1)?.to_owned();
+                let parent_slot = siblings[idx].1;
+
+                let internal_separator = self.convert_to_internal_cell(separator, *page_num);
+                parent_guard
+                    .try_replace(parent_slot, internal_separator)
+                    .map_err(|_| storage::Error::Corruped)?;
+            }
+
+            self.pager.mark_dirty(page_ref);
+        }
+
+        self.pager.mark_dirty(&parent);
         Ok(())
     }
 
