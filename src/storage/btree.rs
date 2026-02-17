@@ -166,6 +166,9 @@ pub trait DatabaseCursor {
     fn position(&self) -> (PageNumber, SlotNumber);
 }
 
+/// Cursor that allows traversing, inserting and deleteing (not yet) entries
+/// in B-link tree. It can be used in multiple readers and single writer
+/// scenario.
 pub struct BTreeCursor<'tx, Tx> {
     tx: Rc<RefCell<Tx>>,
     pager: &'tx Arc<Pager>,
@@ -178,6 +181,7 @@ pub struct BTreeCursor<'tx, Tx> {
 }
 
 impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
+    /// Creates new cursor starting at root of B-tree.
     pub fn new(tx: Rc<RefCell<Tx>>, pager: &'tx Arc<Pager>, root: PageNumber) -> Self {
         Self {
             tx,
@@ -476,6 +480,9 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
 impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     const BALANCE_SIBLINGS_PER_SIDE: usize = 3;
 
+    // Inserts new entry into B-tree. If entries exists, it returns error.
+    // For now it does dumb spliting of pages without rebalancing and key
+    // redistribution, but it's work in progress.
     pub fn insert(&mut self, entry: BTreeKey<'_>) -> storage::Result<()> {
         let current_page = self
             .pager
@@ -505,6 +512,9 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         }
     }
 
+    /// Attempts to insert entry into leaf page at given slot number. This
+    /// function may cause page split and automatic flush of dirty pages,
+    /// after write operation is completed.
     fn try_insert_into_leaf(
         &mut self,
         slot_number: SlotNumber,
@@ -545,6 +555,9 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         }
     }
 
+    /// Splits root by preserving it's position in db. For example: if root is
+    /// at page 1, after split it will stay the page number. This enables easy
+    /// creation of tables and indexes, because we can simply point them at root.
     fn split_root(&mut self) -> storage::Result<()> {
         log::trace!("Spliting root");
 
@@ -981,6 +994,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 )?;
             }
 
+            // sort pages to optimize for sequential io.
             BinaryHeap::from_iter(siblings.iter().map(|s| Reverse(s.page)))
                 .iter()
                 .enumerate()

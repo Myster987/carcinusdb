@@ -14,14 +14,20 @@ use crate::{
     },
 };
 
+/// Page number of db header location.
 pub const DATABASE_HEADER_PAGE_NUMBER: PageNumber = 1;
+/// Database header size in bytes.
 pub const DATABASE_HEADER_SIZE: usize = 34;
 
+/// Default page size: 4KiB.
 pub const DEFAULT_PAGE_SIZE: u32 = 4096;
 
+/// Default cache size in **pages**.
 const DEFAULT_CACHE_SIZE: u32 = 2000;
 
+/// Smalles allowed page size.
 pub const MIN_PAGE_SIZE: usize = 512;
+/// Biggest allowed page size.
 pub const MAX_PAGE_SIZE: usize = 64 << 10;
 
 /// Returns usable space (`Page` size - reserved bytes at the end of `Page`).
@@ -29,6 +35,8 @@ pub fn usable_space(page_size: usize, reserved: usize) -> usize {
     page_size - reserved
 }
 
+/// Calculates min cell size, that only applies to cells that are bigger than
+/// `max_cell_size`.
 pub fn min_cell_size(usable_space: usize) -> usize {
     ((usable_space - 12) * 32 / 255) - 23
 }
@@ -56,6 +64,7 @@ pub struct DatabaseHeader {
     pub freelist_pages: u32,
     /// Number of `pages` to cache.
     pub default_page_cache_size: u32,
+    /// Counter used to verify if db is in sync with WAL or not.
     pub version_valid_for: u32,
 }
 
@@ -98,6 +107,7 @@ impl DatabaseHeader {
         buffer
     }
 
+    /// Writes db header to **beginning** of a `buffer`.
     pub fn write_to_buffer(&self, buffer: &mut [u8]) {
         buffer[0..4].copy_from_slice(&self.version.to_le_bytes());
         buffer[4..8].copy_from_slice(&self.page_size.to_le_bytes());
@@ -129,6 +139,7 @@ impl Default for DatabaseHeader {
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
+/// All possible page types in db.
 pub enum PageType {
     IndexInternal = 5,
     TableInternal = 10,
