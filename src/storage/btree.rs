@@ -217,7 +217,7 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
                     if page.is_leaf() {
                         return Ok(Ok(mid));
                     } else {
-                        return Ok(Err(mid + 1));
+                        return Ok(Err(mid));
                     }
                 }
                 Ordering::Greater => left = mid + 1,
@@ -231,7 +231,7 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
     /// when page was splited and key we are looking for is there.
     pub fn key_in_range(&self, page: &Page, key: &BTreeKey) -> storage::Result<bool> {
         if let Some(high_key) = self.extract_high_key(page)? {
-            Ok(*key < high_key)
+            Ok(*key <= high_key)
         } else {
             Ok(true)
         }
@@ -590,23 +590,21 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         let right_high_key = right_high_key.map(|right| cells[right].clone());
         let left_high_key = left_high_key.map(|left| cells[left].clone());
 
-        let mut right_cells = cells.split_off(separator_index);
+        let right_cells = cells.split_off(separator_index);
+        let mut left_cells = cells;
 
+        // last cell in page after split.
         let separator_cell = if is_leaf {
-            right_cells[0].clone()
+            left_cells[left_cells.len() - 1].clone()
         } else {
-            right_cells.pop_front().unwrap()
+            left_cells.pop_back().unwrap()
         };
-
-        let left_cells = cells;
 
         {
             log::trace!("Moving cells to left child {}", left_child);
 
             let left_child = self.pager.read_page(self.tx.borrow().deref(), left_child)?;
             let left_child_guard = left_child.lock_exclusive();
-
-            // left_child_guard.insert_cell(0, separator_cell.clone());
 
             left_child_guard.insert_cell(0, left_high_key.unwrap());
 
@@ -716,15 +714,14 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         let right_high_key = right_high_key.map(|right| cells[right].clone());
         let left_high_key = left_high_key.map(|left| cells[left].clone());
 
-        let mut right_cells = cells.split_off(separator_index);
+        let right_cells = cells.split_off(separator_index);
+        let mut left_cells = cells;
 
         let separator_cell = if is_leaf {
-            right_cells[0].clone()
+            left_cells[left_cells.len() - 1].clone()
         } else {
-            right_cells.pop_front().unwrap()
+            left_cells.pop_back().unwrap()
         };
-
-        let left_cells = cells;
 
         let old_right_sibling = page_guard.try_right_sibling();
         let old_right_child = page_guard.try_right_child();
@@ -906,7 +903,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             "siblings array contains duplicated pages: {siblings:?}"
         );
 
-        let mut cells = VecDeque::new();
+        let mut cells = Vec::new();
         let divider_index = siblings[0].index_in_parent;
 
         if is_leaf {
@@ -1007,6 +1004,34 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 .lock_exclusive()
                 .set_right_sibling(old_right_sibling.unwrap_or(0));
 
+            let parent_page = self
+                .pager
+                .read_page(self.tx.borrow().deref(), parent_page)?;
+            let parent_guard = parent_page.lock_exclusive();
+
+            for (i, sibling) in siblings.iter().enumerate() {
+                let page = self
+                    .pager
+                    .read_page(self.tx.borrow().deref(), sibling.page)?;
+                let page_guard = page.lock_exclusive();
+
+                let cells_to_insert: Vec<_> = cells.drain(..final_distribution[i]).collect();
+                let mut first_data_offset = 0;
+
+                if i < siblings.len() - 1 || old_right_sibling.is_some() {
+                    // only last page doesn't need high key, so we have to
+                    // reserve space for it.
+                    let high_key = cells_to_insert.last().unwrap().clone();
+                    page_guard.insert_cell(0, high_key);
+                    first_data_offset = 1;
+                }
+
+                for (i, cell) in cells_to_insert.into_iter().enumerate() {
+                    let slot = i + first_data_offset;
+                    page_guard.insert_cell(slot as SlotNumber, cell);
+                }
+            }
+
             todo!()
         } else {
             for (i, sibling) in siblings.iter().enumerate() {
@@ -1027,7 +1052,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                         .lock_exclusive()
                         .remove(divider_index);
 
-                    cells.push_back(divider);
+                    cells.push(divider);
                 }
             }
 
@@ -1298,7 +1323,7 @@ fn calculate_split_ratio(
         running += size;
     }
 
-    let left_high_key = Some(split_index);
+    let left_high_key = Some(split_index - 1);
 
     (left_high_key, right_high_key, split_index)
 }
