@@ -387,4 +387,29 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_linear_scan() -> anyhow::Result<()> {
+        simple_logger::init()?;
+
+        let db = Database::open("./test-db.db")?;
+
+        let tx = db.begin_read()?;
+
+        {
+            let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
+
+            let mut count = 0;
+
+            while cursor.next()? {
+                count += 1;
+            }
+
+            log::info!("Scaned entries: {}", count);
+        }
+
+        tx.commit()?;
+
+        Ok(())
+    }
 }
