@@ -121,6 +121,70 @@ impl DatabaseHeader {
     }
 }
 
+impl DatabaseHeader {
+    #[inline]
+    pub fn get_change_counter(&self) -> u32 {
+        self.change_counter
+    }
+
+    #[inline]
+    pub fn get_database_size(&self) -> PageNumber {
+        self.database_size
+    }
+
+    #[inline]
+    pub fn get_first_freelist_page(&self) -> PageNumber {
+        self.first_freelist_page
+    }
+
+    #[inline]
+    pub fn get_freelist_pages(&self) -> u32 {
+        self.freelist_pages
+    }
+
+    #[inline]
+    pub fn get_valid_version_for(&self) -> u32 {
+        self.version_valid_for
+    }
+
+    #[inline]
+    pub fn increment_change_counter(&mut self) {
+        self.change_counter = self.change_counter.wrapping_add(1);
+    }
+
+    #[inline]
+    pub fn fetch_add_database_size(&mut self, add: PageNumber) -> PageNumber {
+        let prev = self.database_size;
+        self.database_size += add;
+        prev
+    }
+
+    #[inline]
+    pub fn set_first_freelist_page(&mut self, page_number: PageNumber) {
+        self.first_freelist_page = page_number;
+    }
+
+    #[inline]
+    pub fn sub_freelist_pages(&mut self, sub: u32) {
+        self.freelist_pages = self.freelist_pages.saturating_sub(sub);
+    }
+
+    #[inline]
+    pub fn add_freelist_pages(&mut self, add: u32) {
+        self.freelist_pages += add;
+    }
+
+    #[inline]
+    pub fn set_version_valid_for(&mut self, value: u32) {
+        self.version_valid_for = value;
+    }
+
+    #[inline]
+    pub fn is_consistent(&self) -> bool {
+        self.get_change_counter() == self.get_valid_version_for()
+    }
+}
+
 impl Default for DatabaseHeader {
     fn default() -> Self {
         Self {
@@ -656,12 +720,26 @@ impl Page {
             Bound::Included(i) => i + 1,
         };
 
+        log::trace!(
+            "Drain page with len {} from {} to {}",
+            self.len(),
+            start,
+            end
+        );
+        log::trace!("Overflow map: {:?}", self.overflow_map());
+        log::trace!("Slot array: {:?}", self.slot_array());
+
         let mut drain_index = start;
         let mut slot_index = start;
 
         std::iter::from_fn(move || {
-            if drain_index <= end {
+            if drain_index < end {
                 let cell = self.overflow_map().remove(&drain_index).unwrap_or_else(|| {
+                    log::trace!(
+                        "Drain cell at slot: {} drain index: {}",
+                        slot_index,
+                        drain_index
+                    );
                     let cell = self.get_cell(slot_index).unwrap().to_owned();
                     slot_index += 1;
                     cell
