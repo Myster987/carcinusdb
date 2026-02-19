@@ -484,25 +484,25 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     // For now it does dumb spliting of pages without rebalancing and key
     // redistribution, but it's work in progress.
     pub fn insert(&mut self, entry: BTreeKey<'_>) -> storage::Result<()> {
-        let current_page = self
-            .pager
-            .read_page(self.tx.borrow().deref(), self.current_page)?;
+        // let current_page = self
+        //     .pager
+        //     .read_page(self.tx.borrow().deref(), self.current_page)?;
 
-        {
-            // small optimization. if we do sequential insert we can check if
-            // this page is the correct one, so we can insert right away.
-            let current_page_guard = current_page.lock_shared();
+        // {
+        //     // small optimization. if we do sequential insert we can check if
+        //     // this page is the correct one, so we can insert right away.
+        //     let current_page_guard = current_page.lock_shared();
 
-            if current_page_guard.is_leaf() && self.key_in_range(&*current_page_guard, &entry)? {
-                match self.binary_search(&*current_page_guard, &entry)? {
-                    Ok(_) => return Err(storage::Error::DuplicateKey),
-                    Err(slot) => {
-                        drop(current_page_guard);
-                        return self.try_insert_into_leaf(slot, entry);
-                    }
-                }
-            }
-        }
+        //     if current_page_guard.is_leaf() && self.key_in_range(&*current_page_guard, &entry)? {
+        //         match self.binary_search(&*current_page_guard, &entry)? {
+        //             Ok(_) => return Err(storage::Error::DuplicateKey),
+        //             Err(slot) => {
+        //                 drop(current_page_guard);
+        //                 return self.try_insert_into_leaf(slot, entry);
+        //             }
+        //         }
+        //     }
+        // }
 
         let search_result = self.seek(&entry)?;
 
@@ -533,7 +533,8 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
             if guard.is_overflow() {
                 drop(guard);
-                self.split_page()?;
+                // self.split_page()?;
+                self.balance()?;
             }
         }
 
@@ -828,276 +829,382 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     }
 
     fn balance(&mut self) -> storage::Result<()> {
-        let current_page = self
-            .pager
-            .read_page(self.tx.borrow().deref(), self.current_page)?;
-        let current_page_guard = current_page.lock_exclusive();
-
-        let is_root = self.current_page == self.root;
-        let is_overflow = current_page_guard.is_overflow();
-        let is_underflow =
-            current_page_guard.is_empty() || !is_root && current_page_guard.is_underflow();
-        let page_type = current_page_guard.page_type();
-        let is_leaf = current_page_guard.is_leaf();
-
-        // tree is balanced.
-        if !is_overflow && !is_underflow {
-            return Ok(());
-        }
-
-        drop(current_page_guard);
-
-        // root is empty.
-        if is_root && is_underflow {
-            let root = self.pager.read_page(self.tx.borrow().deref(), self.root)?;
-            let root_guard = root.lock_exclusive();
-
-            // root is the only page, so we can't do anything.
-            if root_guard.is_leaf() {
-                return Ok(());
-            }
-
-            let Some(child_page) = root_guard.try_right_child() else {
-                return Ok(());
-            };
-
-            let child = self.pager.read_page(self.tx.borrow().deref(), child_page)?;
-            let child_guard = child.lock_shared();
-
-            let needs_space = child_guard.used_space();
-
-            if root_guard.total_free_space() < needs_space {
-                return Ok(());
-            }
-            drop(child_guard);
-
-            let child_guard = child.lock_exclusive();
-
-            let grandchild = child_guard.try_right_child().unwrap_or(0);
-            let cells = child_guard.drain(..).collect::<Vec<_>>();
-
-            drop(child_guard);
-
-            self.pager
-                .free_page(self.tx.borrow_mut().deref_mut(), child_page)?;
-
-            cells.into_iter().for_each(|cell| root_guard.push(cell));
-            root_guard.set_right_child(grandchild);
-
-            return Ok(());
-        }
-
-        if is_root && is_overflow {
-            return self.split_root();
-        }
-
-        let (parent_page, _) = self.path_stack.pop().unwrap();
-        let mut siblings = self.load_siblings(self.current_page, parent_page)?;
-
-        debug_assert_eq!(
-            std::collections::HashSet::<PageNumber>::from_iter(
-                siblings.iter().map(|sibling| sibling.page)
-            )
-            .len(),
-            siblings.len(),
-            "siblings array contains duplicated pages: {siblings:?}"
+        log::trace!("Begin balance at page: {}", self.current_page);
+        log::trace!(
+            "Parents of page {}: {:?}",
+            self.current_page,
+            self.path_stack
         );
 
-        let mut cells = Vec::new();
-        let divider_index = siblings[0].index_in_parent;
-
-        if is_leaf {
-            let mut usable_page_space = 0;
-
-            for (i, sibling) in siblings.iter().enumerate() {
-                let page = self
-                    .pager
-                    .read_page(self.tx.borrow().deref(), sibling.page)?;
-                let page_guard = page.lock_exclusive();
-                let mut page_cells = page_guard.drain(..);
-
-                usable_page_space = page_guard.usable_space();
-
-                if page_guard.has_high_key() {
-                    let _ = page_cells.next();
-                }
-                cells.extend(page_cells);
-                if i < siblings.len() - 1 {
-                    // for leaf pages simply delete internal cell from parent.
-                    // we have original version in leaf, so it's not needed.
-                    let _ = self
-                        .pager
-                        .read_page(self.tx.borrow().deref(), parent_page)?
-                        .lock_exclusive()
-                        .remove(divider_index);
-                }
-            }
-
-            let mut allocated_space = vec![0];
-            let mut distribution = vec![vec![]];
-
-            // move everything to be as left as possible.
-            for cell in &cells {
-                let cell_size = cell.storage_size();
-                let i = distribution.len() - 1;
-                let currently_allocated = &mut allocated_space[i];
-
-                if *currently_allocated + cell_size <= usable_page_space {
-                    *currently_allocated += cell_size;
-                    distribution[i].push(cell_size);
-                } else {
-                    distribution.push(vec![cell_size]);
-                    allocated_space.push(cell_size);
-                }
-            }
-
-            let ideal_distribution = allocated_space.iter().sum::<usize>() / allocated_space.len();
-
-            let mut final_distribution = vec![0];
-            let mut current_size = 0;
-
-            for block in distribution {
-                for cell_size in block {
-                    let i = final_distribution.len() - 1;
-
-                    if current_size + cell_size < ideal_distribution {
-                        final_distribution[i] += 1;
-                        current_size += cell_size;
-                    } else {
-                        final_distribution.push(1);
-                        current_size = cell_size;
-                    }
-                }
-            }
-
-            let old_right_sibling = self
+        loop {
+            let current_page = self
                 .pager
-                .read_page(self.tx.borrow().deref(), siblings.last().unwrap().page)?
-                .lock_exclusive()
-                .try_right_sibling();
+                .read_page(self.tx.borrow().deref(), self.current_page)?;
+            let current_page_guard = current_page.lock_exclusive();
 
-            while siblings.len() < final_distribution.len() {
-                let new_page = self
-                    .pager
-                    .alloc_page(self.tx.borrow_mut().deref_mut(), page_type)?;
-                let parent_index = siblings.last().unwrap().index_in_parent + 1;
-                siblings.push(Sibling::new(new_page, parent_index));
+            let is_root = self.current_page == self.root;
+            let is_overflow = current_page_guard.is_overflow();
+            let is_underflow =
+                current_page_guard.is_empty() || !is_root && current_page_guard.is_underflow();
+            let page_type = current_page_guard.page_type();
+            let is_leaf = current_page_guard.is_leaf();
+
+            // tree is balanced.
+            if !is_overflow && !is_underflow {
+                return Ok(());
             }
 
-            while final_distribution.len() > siblings.len() {
-                self.pager.free_page(
-                    self.tx.borrow_mut().deref_mut(),
-                    siblings.pop().unwrap().page,
-                )?;
+            drop(current_page_guard);
+
+            // root is empty.
+            if is_root && is_underflow {
+                let root = self.pager.read_page(self.tx.borrow().deref(), self.root)?;
+                let root_guard = root.lock_exclusive();
+
+                // root is the only page, so we can't do anything.
+                if root_guard.is_leaf() {
+                    return Ok(());
+                }
+
+                let Some(child_page) = root_guard.try_right_child() else {
+                    return Ok(());
+                };
+
+                let child = self.pager.read_page(self.tx.borrow().deref(), child_page)?;
+                let child_guard = child.lock_shared();
+
+                let needs_space = child_guard.used_space();
+
+                if root_guard.total_free_space() < needs_space {
+                    return Ok(());
+                }
+                drop(child_guard);
+
+                let child_guard = child.lock_exclusive();
+
+                let grandchild = child_guard.try_right_child().unwrap_or(0);
+                let cells = child_guard.drain(..).collect::<Vec<_>>();
+
+                drop(child_guard);
+
+                self.pager
+                    .free_page(self.tx.borrow_mut().deref_mut(), child_page)?;
+
+                cells.into_iter().for_each(|cell| root_guard.push(cell));
+                root_guard.set_right_child(grandchild);
+
+                self.pager.mark_dirty(&root);
+
+                return Ok(());
             }
 
-            // sort pages to optimize for sequential io.
-            BinaryHeap::from_iter(siblings.iter().map(|s| Reverse(s.page)))
-                .iter()
-                .enumerate()
-                .for_each(|(i, Reverse(page))| siblings[i].page = *page);
+            if is_root && is_overflow {
+                return self.split_root();
+            }
 
-            let last_sibling = siblings.last().unwrap().page;
-
-            self.pager
-                .read_page(self.tx.borrow().deref(), last_sibling)?
-                .lock_exclusive()
-                .set_right_sibling(old_right_sibling.unwrap_or(0));
-
-            let parent_page = self
+            let (parent_page, _) = self.path_stack.pop().unwrap();
+            let parent_mem_page = self
                 .pager
                 .read_page(self.tx.borrow().deref(), parent_page)?;
-            let parent_guard = parent_page.lock_exclusive();
+            let parent_guard = parent_mem_page.lock_exclusive();
 
-            for (i, sibling) in siblings.iter().enumerate() {
-                let page = self
-                    .pager
-                    .read_page(self.tx.borrow().deref(), sibling.page)?;
-                let page_guard = page.lock_exclusive();
+            log::trace!("Parent page to load: {}", parent_page);
+            let mut siblings = self.load_siblings(self.current_page, &*parent_guard)?;
 
-                let cells_to_insert: Vec<_> = cells.drain(..final_distribution[i]).collect();
-                let mut first_data_offset = 0;
+            debug_assert_eq!(
+                std::collections::HashSet::<PageNumber>::from_iter(
+                    siblings.iter().map(|sibling| sibling.page)
+                )
+                .len(),
+                siblings.len(),
+                "siblings array contains duplicated pages: {siblings:?}"
+            );
 
-                if i < siblings.len() - 1 || old_right_sibling.is_some() {
-                    // only last page doesn't need high key, so we have to
-                    // reserve space for it.
-                    let high_key = cells_to_insert.last().unwrap().clone();
-                    page_guard.insert_cell(0, high_key);
-                    first_data_offset = 1;
-                }
+            let mut cells = Vec::new();
+            let divider_index = siblings[0].index_in_parent;
 
-                for (i, cell) in cells_to_insert.into_iter().enumerate() {
-                    let slot = i + first_data_offset;
-                    page_guard.insert_cell(slot as SlotNumber, cell);
-                }
-            }
+            if is_leaf {
+                let mut usable_page_space = 0;
 
-            todo!()
-        } else {
-            for (i, sibling) in siblings.iter().enumerate() {
-                let page = self
-                    .pager
-                    .read_page(self.tx.borrow().deref(), sibling.page)?;
-                let page_guard = page.lock_exclusive();
-                let mut page_cells = page_guard.drain(..);
-
-                if page_guard.has_high_key() {
-                    let _ = page_cells.next();
-                }
-                cells.extend(page_cells);
-                if i < siblings.len() - 1 {
-                    let divider = self
+                for (i, sibling) in siblings.iter().enumerate() {
+                    let page = self
                         .pager
-                        .read_page(self.tx.borrow().deref(), parent_page)?
-                        .lock_exclusive()
-                        .remove(divider_index);
+                        .read_page(self.tx.borrow().deref(), sibling.page)?;
+                    let page_guard = page.lock_exclusive();
+                    let mut page_cells = page_guard.drain(..);
 
-                    cells.push(divider);
+                    usable_page_space = page_guard.usable_space();
+
+                    if page_guard.has_high_key() {
+                        let _ = page_cells.next();
+                    }
+                    cells.extend(page_cells);
+                    if i < siblings.len() - 1 {
+                        // for leaf pages simply delete internal cell from parent.
+                        // we have original version in leaf, so it's not needed.
+                        let _ = parent_guard.remove(divider_index);
+                    }
+                }
+
+                let mut allocated_space = vec![0];
+                let mut distribution = vec![vec![]];
+
+                // move everything to be as left as possible.
+                for cell in &cells {
+                    let cell_size = cell.storage_size();
+                    let i = distribution.len() - 1;
+                    let currently_allocated = &mut allocated_space[i];
+
+                    if *currently_allocated + cell_size <= usable_page_space {
+                        *currently_allocated += cell_size;
+                        distribution[i].push(cell_size);
+                    } else {
+                        distribution.push(vec![cell_size]);
+                        allocated_space.push(cell_size);
+                    }
+                }
+
+                let ideal_distribution =
+                    allocated_space.iter().sum::<usize>() / allocated_space.len();
+
+                let mut final_distribution = vec![0];
+                let mut current_size = 0;
+
+                for block in distribution {
+                    for cell_size in block {
+                        let i = final_distribution.len() - 1;
+
+                        if current_size + cell_size < ideal_distribution {
+                            final_distribution[i] += 1;
+                            current_size += cell_size;
+                        } else {
+                            final_distribution.push(1);
+                            current_size = cell_size;
+                        }
+                    }
+                }
+
+                let old_right_sibling = {
+                    let last_sibling = self
+                        .pager
+                        .read_page(self.tx.borrow().deref(), siblings.last().unwrap().page)?;
+                    let last_sibling_guard = last_sibling.lock_exclusive();
+
+                    last_sibling_guard.try_right_sibling()
+                };
+
+                // TODO: fix deadlock!
+                while siblings.len() < final_distribution.len() {
+                    let new_page = self
+                        .pager
+                        .alloc_page(self.tx.borrow_mut().deref_mut(), page_type)?;
+                    let parent_index = siblings.last().unwrap().index_in_parent + 1;
+                    siblings.push(Sibling::new(new_page, parent_index));
+                }
+
+                while final_distribution.len() > siblings.len() {
+                    self.pager.free_page(
+                        self.tx.borrow_mut().deref_mut(),
+                        siblings.pop().unwrap().page,
+                    )?;
+                }
+
+                // // sort pages to optimize for sequential io.
+                // BinaryHeap::from_iter(siblings.iter().map(|s| Reverse(s.page)))
+                //     .iter()
+                //     .enumerate()
+                //     .for_each(|(i, Reverse(page))| siblings[i].page = *page);
+
+                let last_sibling = siblings.last().unwrap().page;
+
+                {
+                    self.pager
+                        .read_page(self.tx.borrow().deref(), last_sibling)?
+                        .lock_exclusive()
+                        .set_right_sibling(old_right_sibling.unwrap_or(0))
+                }
+
+                for (i, sibling) in siblings.iter().enumerate() {
+                    let page = self
+                        .pager
+                        .read_page(self.tx.borrow().deref(), sibling.page)?;
+                    let page_guard = page.lock_exclusive();
+
+                    let cells_to_insert: Vec<_> = cells.drain(..final_distribution[i]).collect();
+
+                    if i < siblings.len() - 1 || old_right_sibling.is_some() {
+                        // only last page doesn't need high key, so we have to
+                        // reserve space for it.
+                        let high_key = cells_to_insert.last().unwrap().clone();
+                        page_guard.push(high_key.clone());
+
+                        let divider_cell = self.convert_to_internal_cell(high_key, sibling.page);
+
+                        parent_guard.insert_cell(sibling.index_in_parent, divider_cell);
+                    }
+
+                    for cell in cells_to_insert {
+                        page_guard.push(cell);
+                    }
+
+                    self.pager.mark_dirty(&page);
+                }
+            } else {
+                let mut usable_page_space = 0;
+
+                for (i, sibling) in siblings.iter().enumerate() {
+                    let page = self
+                        .pager
+                        .read_page(self.tx.borrow().deref(), sibling.page)?;
+                    let page_guard = page.lock_exclusive();
+                    let mut page_cells = page_guard.drain(..);
+
+                    usable_page_space = page_guard.usable_space();
+
+                    if page_guard.has_high_key() {
+                        let _ = page_cells.next();
+                    }
+                    cells.extend(page_cells);
+                    if i < siblings.len() - 1 {
+                        let divider = parent_guard.remove(divider_index);
+
+                        cells.push(divider);
+                    }
+                }
+
+                let mut allocated_space = vec![0];
+                let mut distribution = vec![vec![]];
+
+                // move everything to be as left as possible.
+                for cell in &cells {
+                    let cell_size = cell.storage_size();
+                    let i = distribution.len() - 1;
+                    let currently_allocated = &mut allocated_space[i];
+
+                    if *currently_allocated + cell_size <= usable_page_space {
+                        *currently_allocated += cell_size;
+                        distribution[i].push(cell_size);
+                    } else {
+                        distribution.push(vec![cell_size]);
+                        allocated_space.push(cell_size);
+                    }
+                }
+
+                let ideal_distribution =
+                    allocated_space.iter().sum::<usize>() / allocated_space.len();
+
+                let mut final_distribution = vec![0];
+                let mut current_size = 0;
+
+                for block in distribution {
+                    for cell_size in block {
+                        let i = final_distribution.len() - 1;
+
+                        if current_size + cell_size < ideal_distribution {
+                            final_distribution[i] += 1;
+                            current_size += cell_size;
+                        } else {
+                            final_distribution.push(1);
+                            current_size = cell_size;
+                        }
+                    }
+                }
+
+                let old_right_sibling = {
+                    let last_sibling = self
+                        .pager
+                        .read_page(self.tx.borrow().deref(), siblings.last().unwrap().page)?;
+                    let last_sibling_guard = last_sibling.lock_exclusive();
+
+                    last_sibling_guard.try_right_sibling()
+                };
+
+                while siblings.len() < final_distribution.len() {
+                    let new_page = self
+                        .pager
+                        .alloc_page(self.tx.borrow_mut().deref_mut(), page_type)?;
+                    let parent_index = siblings.last().unwrap().index_in_parent + 1;
+                    siblings.push(Sibling::new(new_page, parent_index));
+                }
+
+                while final_distribution.len() > siblings.len() {
+                    self.pager.free_page(
+                        self.tx.borrow_mut().deref_mut(),
+                        siblings.pop().unwrap().page,
+                    )?;
+                }
+
+                // // sort pages to optimize for sequential io.
+                // BinaryHeap::from_iter(siblings.iter().map(|s| Reverse(s.page)))
+                //     .iter()
+                //     .enumerate()
+                //     .for_each(|(i, Reverse(page))| siblings[i].page = *page);
+
+                let last_sibling = siblings.last().unwrap().page;
+
+                {
+                    self.pager
+                        .read_page(self.tx.borrow().deref(), last_sibling)?
+                        .lock_exclusive()
+                        .set_right_sibling(old_right_sibling.unwrap_or(0))
+                }
+
+                for (i, sibling) in siblings.iter().enumerate() {
+                    let page = self
+                        .pager
+                        .read_page(self.tx.borrow().deref(), sibling.page)?;
+                    let page_guard = page.lock_exclusive();
+
+                    let mut cells_to_insert: Vec<_> =
+                        cells.drain(..final_distribution[i]).collect();
+
+                    if i < siblings.len() - 1 || old_right_sibling.is_some() {
+                        // only last page doesn't need high key, so we have to
+                        // reserve space for it.
+                        let high_key = cells_to_insert.pop().unwrap();
+                        page_guard.push(high_key.clone());
+
+                        let divider_cell = self.convert_to_internal_cell(high_key, sibling.page);
+
+                        parent_guard.insert_cell(sibling.index_in_parent, divider_cell);
+                    }
+
+                    for cell in cells_to_insert {
+                        page_guard.push(cell);
+                    }
+
+                    self.pager.mark_dirty(&page);
                 }
             }
 
-            todo!()
+            self.pager.mark_dirty(&parent_mem_page);
+            self.current_page = parent_page;
         }
-
-        if is_overflow {
-            todo!()
-        }
-
-        Ok(())
     }
 
-    /// Loads siblings of given `page_number` and `parent_page`. Returns vector
-    /// of siblings (sibling page number, index of slot in parent page). This
-    /// function attempts to read `Self::BALANCE_SIBLINGS_PER_SIDE` + 1 (for the
-    /// page itself), so if by default it's set to 3 it could return 7 siblings
-    /// in total. This might vary, because parent doesn't have enough children
-    /// etc. in this case this will simply load all children.
     fn load_siblings(
         &mut self,
         page_number: PageNumber,
-        parent_page: PageNumber,
+        parent_page: &Page,
     ) -> storage::Result<Vec<Sibling>> {
         let mut load_per_side = Self::BALANCE_SIBLINGS_PER_SIDE as SlotNumber;
 
-        let parent_page = self
-            .pager
-            .read_page(self.tx.borrow().deref(), parent_page)?;
-        let parent_guard = parent_page.lock_shared();
+        log::debug!("Load siblings of page: {}", page_number);
 
-        let position_in_parent = (parent_guard.first_data_offset()..parent_guard.len())
-            .map(|pos| parent_guard.child(pos))
+        let position_in_parent = (parent_page.first_data_offset()..=parent_page.len())
+            .map(|pos| parent_page.child(pos))
             .position(|p| p == page_number)
             .unwrap() as SlotNumber;
 
-        if position_in_parent == parent_guard.first_data_offset()
-            || position_in_parent == parent_guard.len()
+        if position_in_parent == parent_page.first_data_offset()
+            || position_in_parent == parent_page.len()
         {
             load_per_side *= 2;
         }
 
         let start = position_in_parent.saturating_sub(position_in_parent);
         let start = if start == 0 {
-            parent_guard.first_data_offset()
+            parent_page.first_data_offset()
         } else {
             start
         };
@@ -1106,16 +1213,16 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         let right_siblings = (position_in_parent + 1)
             ..min(
                 position_in_parent + load_per_side + 1,
-                parent_guard.len() + 1,
+                parent_page.len() + 1,
             );
 
         Ok(left_siblings
-            .map(|index| Sibling::new(parent_guard.child(index), index))
+            .map(|index| Sibling::new(parent_page.child(index), index))
             .chain(std::iter::once(Sibling::new(
                 page_number,
                 position_in_parent,
             )))
-            .chain(right_siblings.map(|index| Sibling::new(parent_guard.child(index), index)))
+            .chain(right_siblings.map(|index| Sibling::new(parent_page.child(index), index)))
             .collect())
     }
 
