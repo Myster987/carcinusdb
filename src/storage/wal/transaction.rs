@@ -4,7 +4,8 @@ use parking_lot::MutexGuard;
 
 use crate::{
     storage::{
-        self, FrameNumber,
+        self, FrameNumber, PageNumber,
+        page::DatabaseHeader,
         wal::{READERS_NUM, WriteAheadLog},
     },
     utils::concurrency::SlotGuard,
@@ -26,6 +27,8 @@ pub trait WriteTx: ReadTx {
     fn tx_set_max_frame(&mut self, new_max_frame: FrameNumber);
     // /// Sets new local last_checksum for transaction.
     // fn tx_set_last_checksum(&mut self, new_checksum: Checksum);
+    fn tx_local_db_header(&self) -> &DatabaseHeader;
+    fn tx_local_db_header_mut(&mut self) -> &mut DatabaseHeader;
 }
 
 /// Read transaction that holds all the necessary guards and local variables.
@@ -87,6 +90,7 @@ pub struct WriteTransactionInner<'a> {
     pub write_guard: MutexGuard<'a, ()>,
     pub min_frame: FrameNumber,
     pub max_frame: FrameNumber,
+    pub local_db_header: DatabaseHeader,
 }
 
 impl<'a> WriteTransaction<'a> {
@@ -96,6 +100,7 @@ impl<'a> WriteTransaction<'a> {
 
         let min_frame = wal.get_min_frame();
         let max_frame = wal.get_max_frame();
+        let local_db_header = wal.db_header.into_raw_header();
 
         // ignore for now because locks migth be enough
         // // check if this changed and if so, we need to retry.
@@ -114,6 +119,7 @@ impl<'a> WriteTransaction<'a> {
                 write_guard,
                 min_frame,
                 max_frame,
+                local_db_header,
             }),
         })
     }
@@ -135,5 +141,15 @@ impl WriteTx for WriteTransaction<'_> {
     #[inline]
     fn tx_set_max_frame(&mut self, new_max_frame: FrameNumber) {
         self.inner.max_frame = new_max_frame;
+    }
+
+    #[inline]
+    fn tx_local_db_header(&self) -> &DatabaseHeader {
+        &self.inner.local_db_header
+    }
+
+    #[inline]
+    fn tx_local_db_header_mut(&mut self) -> &mut DatabaseHeader {
+        &mut self.inner.local_db_header
     }
 }

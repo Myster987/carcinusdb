@@ -451,9 +451,9 @@ impl Pager {
 
         self.flush_dirty(&mut tx, true)?;
 
-        self.wal.commit(tx)?;
+        self.wal.commit(&mut tx)?;
 
-        self.wal.force_checkpoint()?;
+        self.wal.force_checkpoint(&mut tx)?;
 
         Ok(())
     }
@@ -555,7 +555,7 @@ impl Pager {
         let guard = page.lock_exclusive();
 
         self.wal
-            .append_frame(tx, guard, self.db_header.get_database_size())
+            .append_frame(tx, guard, tx.tx_local_db_header().get_database_size())
     }
 
     /// Allocates new B-tree in database.
@@ -582,10 +582,12 @@ impl Pager {
         tx: &mut Tx,
         page_type: PageType,
     ) -> storage::Result<PageNumber> {
-        let first_freelist_page = self.db_header.get_first_freelist_page();
+        let first_freelist_page = tx.tx_local_db_header().get_first_freelist_page();
+
+        // local_db_header.database_size.ad
 
         let free_page = if first_freelist_page == 0 {
-            let page_number = self.db_header.add_database_size(1);
+            let page_number = tx.tx_local_db_header_mut().fetch_add_database_size(1);
             let offset = if page_number == DATABASE_HEADER_PAGE_NUMBER {
                 DATABASE_HEADER_SIZE
             } else {
@@ -607,9 +609,9 @@ impl Pager {
             // loads to cache for use.
             let free_page = self.read_page(tx, first_freelist_page)?;
 
-            self.db_header
+            tx.tx_local_db_header_mut()
                 .set_first_freelist_page(free_page.lock_shared().freelist_next());
-            self.db_header.sub_freelist_pages(1);
+            tx.tx_local_db_header_mut().sub_freelist_pages(1);
 
             {
                 let guard = free_page.lock_exclusive();
@@ -630,10 +632,10 @@ impl Pager {
     /// Allocates empty page in database. Can be used to build linked list of
     /// overflow cells.
     pub fn alloc_empty_page<Tx: WriteTx>(&self, tx: &mut Tx) -> storage::Result<PageNumber> {
-        let first_freelist_page = self.db_header.get_first_freelist_page();
+        let first_freelist_page = tx.tx_local_db_header().get_first_freelist_page();
 
         let free_page = if first_freelist_page == 0 {
-            let page_number = self.db_header.add_database_size(1);
+            let page_number = tx.tx_local_db_header_mut().fetch_add_database_size(1);
             let offset = if page_number == DATABASE_HEADER_PAGE_NUMBER {
                 DATABASE_HEADER_SIZE
             } else {
@@ -655,9 +657,9 @@ impl Pager {
             // loads to cache for use.
             let free_page = self.read_page(tx, first_freelist_page)?;
 
-            self.db_header
+            tx.tx_local_db_header_mut()
                 .set_first_freelist_page(free_page.lock_shared().freelist_next());
-            self.db_header.sub_freelist_pages(1);
+            tx.tx_local_db_header_mut().sub_freelist_pages(1);
 
             {
                 let guard = free_page.lock_exclusive();
@@ -682,7 +684,7 @@ impl Pager {
     ) -> storage::Result<()> {
         let page = self.read_page(tx, page_number)?;
 
-        let prev_head = self.db_header.get_first_freelist_page();
+        let prev_head = tx.tx_local_db_header_mut().get_first_freelist_page();
 
         // set new head to point to prev freelist head.
         {
@@ -690,8 +692,9 @@ impl Pager {
             guard.freelist_set(prev_head);
         }
 
-        self.db_header.set_first_freelist_page(page_number);
-        self.db_header.add_freelist_pages(1);
+        tx.tx_local_db_header_mut()
+            .set_first_freelist_page(page_number);
+        tx.tx_local_db_header_mut().add_freelist_pages(1);
 
         self.mark_dirty(&page);
 

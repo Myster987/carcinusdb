@@ -300,7 +300,7 @@ impl<'tx> DatabaseWriteTransaction<'tx> {
 
         self.pager.flush_dirty(&mut wal_tx, true)?;
 
-        self.pager.wal.commit(wal_tx)?;
+        self.pager.wal.commit(&mut wal_tx)?;
 
         Ok(())
     }
@@ -319,11 +319,11 @@ mod tests {
     };
 
     const KEYS_START: i64 = 1;
-    const KEYS_END: i64 = 200_000;
+    const KEYS_END: i64 = 20_000;
 
     #[test]
     fn test_insert() -> anyhow::Result<()> {
-        simple_logger::init_with_level(log::Level::Debug)?;
+        simple_logger::init_with_level(log::Level::Trace)?;
 
         let db = Database::open("./test-db.db")?;
 

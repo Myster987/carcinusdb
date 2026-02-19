@@ -368,7 +368,8 @@ impl WriteAheadLog {
         };
 
         if replay_wal {
-            wal.replay()?;
+            let mut tx = wal.begin_write_tx()?;
+            wal.replay(&mut tx)?;
         }
 
         Ok(wal)
@@ -376,10 +377,10 @@ impl WriteAheadLog {
 
     /// Reconstructs all the changes registered in WAL and if needed performs
     /// checkpoint.
-    pub fn replay(&self) -> storage::Result<()> {
+    pub fn replay<Tx: WriteTx>(&self, tx: &mut Tx) -> storage::Result<()> {
         log::info!("Replaying WAL.");
 
-        let writer_guard = self.writer.lock();
+        // let writer_guard = self.writer.lock();
 
         // block all other operations. needs exclusive access.
         // let checkpoint_guard = self.checkpoint_lock.write();
@@ -416,9 +417,9 @@ impl WriteAheadLog {
 
         self.set_max_frame(max_frame);
 
-        drop(writer_guard);
+        // drop(writer_guard);
 
-        self.checkpoint()?;
+        self.checkpoint(tx)?;
 
         Ok(())
     }
@@ -457,21 +458,24 @@ impl WriteAheadLog {
         WriteTransaction::begin(self)
     }
 
-    pub fn commit(&self, mut tx: WriteTransaction) -> storage::Result<()> {
-        let inner = unsafe { ManuallyDrop::take(&mut tx.inner) };
-        std::mem::forget(tx);
+    pub fn commit<Tx: WriteTx>(&self, tx: &mut Tx) -> storage::Result<()> {
+        // let inner = unsafe { ManuallyDrop::take(&mut tx.inner) };
+        // std::mem::forget(tx);
 
         self.wal_file.persist()?;
-        self.set_max_frame(inner.max_frame);
+        self.set_max_frame(tx.tx_max_frame());
+
+        let local_tx_db_header = tx.tx_local_db_header_mut();
 
         // increment db change counter.
-        self.db_header.increment_change_counter();
-        self.db_file
-            .write_header(&self.db_header.into_raw_header().to_bytes())?;
+        local_tx_db_header.increment_change_counter();
+        self.db_file.write_header(&local_tx_db_header.to_bytes())?;
 
-        drop(inner.write_guard);
+        // TODO: swap header inplace
 
-        self.checkpoint()?;
+        // drop(inner.write_guard);
+
+        self.checkpoint(tx)?;
 
         Ok(())
     }
@@ -644,21 +648,19 @@ impl WriteAheadLog {
         max_frame > self.trigger_checkpoint + self.header.get_backfilled_number()
     }
 
-    pub fn checkpoint(&self) -> storage::Result<()> {
+    pub fn checkpoint<Tx: WriteTx>(&self, transaction: &mut Tx) -> storage::Result<()> {
         if !self.should_checkpoint() {
             return Ok(());
         }
 
-        self._checkpoint()
+        self._checkpoint(transaction)
     }
 
-    pub fn force_checkpoint(&self) -> storage::Result<()> {
-        self._checkpoint()
+    pub fn force_checkpoint<Tx: WriteTx>(&self, transaction: &mut Tx) -> storage::Result<()> {
+        self._checkpoint(transaction)
     }
 
-    fn _checkpoint(&self) -> storage::Result<()> {
-        let writer_lock = self.writer.lock();
-
+    fn _checkpoint<Tx: WriteTx>(&self, transaction: &mut Tx) -> storage::Result<()> {
         let max_frame = self.get_max_frame();
         let min_visible_frame = self.readers.min_visible_frame();
 
@@ -696,13 +698,15 @@ impl WriteAheadLog {
         let is_full_checkpoint = to_backfill == successfully_backfilled;
 
         if is_full_checkpoint {
+            let tx_db_header = transaction.tx_local_db_header_mut();
+
             // increment db change counter and mark it as consistent.
-            self.db_header.increment_change_counter();
-            self.db_header
-                .set_version_valid_for(self.db_header.get_change_counter());
-            self.db_file
-                .write_header(&self.db_header.into_raw_header().to_bytes())?;
+            tx_db_header.increment_change_counter();
+            tx_db_header.set_version_valid_for(tx_db_header.get_change_counter());
+            self.db_file.write_header(&tx_db_header.to_bytes())?;
             self.db_file.persist()?;
+
+            // TODO: swap tx db header into mem db header
 
             // change wal header params, because it will be truncated
             self.header.increment_checkpoint_seq_num();
@@ -720,10 +724,11 @@ impl WriteAheadLog {
             self.index.clear();
             self.wal_file.truncate(0)?;
         } else {
+            let tx_db_header = transaction.tx_local_db_header_mut();
+
             // increment db change counter.
-            self.db_header.increment_change_counter();
-            self.db_file
-                .write_header(&self.db_header.into_raw_header().to_bytes())?;
+            tx_db_header.increment_change_counter();
+            self.db_file.write_header(&tx_db_header.to_bytes())?;
             self.db_file.persist()?;
 
             self.header.increment_checkpoint_seq_num();
@@ -740,8 +745,6 @@ impl WriteAheadLog {
                 self.index.remove_up_to(page_number, *frame_number);
             }
         }
-
-        drop(writer_lock);
 
         Ok(())
     }
