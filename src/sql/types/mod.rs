@@ -200,6 +200,27 @@ impl<'a> ValueRef<'a> {
             Self::Text(_) => ValueType::Text,
         }
     }
+
+    pub fn to_bool(&self) -> bool {
+        match self {
+            Self::Bool(v) => *v,
+            _ => panic!("Called on wrong value type"),
+        }
+    }
+
+    pub fn to_int(&self) -> i64 {
+        match self {
+            Self::Int(v) => *v,
+            _ => panic!("Called on wrong value type"),
+        }
+    }
+
+    pub fn to_blob(&self) -> &[u8] {
+        match self {
+            Self::Blob(v) => *v,
+            _ => panic!("Called on wrong value type"),
+        }
+    }
 }
 
 impl<'a> Display for ValueRef<'a> {
