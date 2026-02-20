@@ -498,14 +498,9 @@ impl Page {
                 .map(|(i, &val)| (val, i)),
         );
 
-        log::trace!("slot array: {:?}", slots.slot_array());
-
         let mut current_offset = self.as_ptr().len();
 
         while let Some((offset, i)) = min_heap.pop() {
-            log::trace!("Offset to cell: {} at index: {}", offset, i);
-            log::trace!("Cell: {:?}", self.get_cell(i as SlotNumber));
-
             let cell_size = self.get_cell_size(offset);
 
             let start = offset as usize;
@@ -727,7 +722,6 @@ impl Page {
             end
         );
         log::trace!("Overflow map: {:?}", self.overflow_map());
-        log::trace!("Slot array: {:?}", self.slot_array());
 
         let mut drain_index = start;
         let mut slot_index = start;
@@ -735,11 +729,6 @@ impl Page {
         std::iter::from_fn(move || {
             if drain_index < end {
                 let cell = self.overflow_map().remove(&drain_index).unwrap_or_else(|| {
-                    log::trace!(
-                        "Drain cell at slot: {} drain index: {}",
-                        slot_index,
-                        drain_index
-                    );
                     let cell = self.get_cell(slot_index).unwrap().to_owned();
                     slot_index += 1;
                     cell
@@ -904,7 +893,7 @@ impl Page {
 
     /// Returns number of slots in `Page`. Includes high key cell.
     pub fn len(&self) -> u16 {
-        self.read_u16(Self::LENGTH_OFFSET)
+        self.read_u16(Self::LENGTH_OFFSET) + self.overflow_map().len() as u16
     }
 
     pub fn set_len(&self, value: u16) {
