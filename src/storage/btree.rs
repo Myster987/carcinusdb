@@ -324,17 +324,6 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
 
         Ok(Cow::Owned(result))
     }
-
-    #[cfg(debug_assertions)]
-    pub fn print_current_page(&self) -> storage::Result<()> {
-        let page = self
-            .pager
-            .read_page(self.tx.borrow().deref(), self.current_page)?;
-
-        println!("page: {:#?}", page.inner().content);
-
-        Ok(())
-    }
 }
 
 impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
@@ -351,6 +340,12 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
                 .read_page(self.tx.borrow().deref(), self.current_page)?;
             let guard = page.lock_shared();
 
+            log::debug!(
+                "seek in page {} at slot {}",
+                self.current_page,
+                self.current_slot
+            );
+
             // we need to move to rigth node
             if !self.key_in_range(&guard, key)? {
                 self.current_page = guard
@@ -360,6 +355,10 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
             }
 
             let search_result = self.binary_search(&guard, key)?;
+
+            log::debug!("bin search result: {:?}", search_result);
+
+            // log::debug!("page {}: {:?}", self.current_page, *guard);
 
             if let Ok(slot) = search_result {
                 // mark that we can search for data from here
@@ -397,6 +396,8 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
                 .pager
                 .read_page(self.tx.borrow().deref(), self.current_page)?;
             let guard = page.lock_shared();
+
+            log::trace!("Page {} len: {}", self.current_page, guard.len());
 
             if guard.is_leaf() {
                 self.current_slot = guard.first_data_offset();
@@ -439,6 +440,8 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
                 self.current_slot += 1;
                 return Ok(true);
             }
+
+            log::trace!("Right sibling: {:?}", page.try_right_sibling());
 
             if let Some(rigth_sibling) = page.try_right_sibling() {
                 let next_page = self
@@ -580,11 +583,13 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
         let mut cells: VecDeque<_> = root_guard.drain(..).collect();
 
+        log::debug!("Root after drain overflow: {}", root_guard.is_overflow());
+
         let cell_sizes: Vec<_> = cells.iter().map(|c| c.local_size()).collect();
 
         let (left_high_key, right_high_key, separator_index) = calculate_split_ratio(
             &cell_sizes,
-            self.pager.db_header.page_size as usize,
+            self.pager.db_header.load().page_size as usize,
             root_guard.has_high_key(),
         );
 
@@ -708,7 +713,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
         let (left_high_key, right_high_key, separator_index) = calculate_split_ratio(
             &cell_sizes,
-            self.pager.db_header.page_size as usize,
+            self.pager.db_header.load().page_size as usize,
             page_guard.has_high_key(),
         );
 
@@ -911,6 +916,8 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             log::trace!("Parent page to load: {}", parent_page);
             let mut siblings = self.load_siblings(self.current_page, &*parent_guard)?;
 
+            log::trace!("Loaded siblings: {:?}", siblings);
+
             debug_assert_eq!(
                 std::collections::HashSet::<PageNumber>::from_iter(
                     siblings.iter().map(|sibling| sibling.page)
@@ -947,7 +954,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 }
 
                 let mut allocated_space = vec![0];
-                let mut distribution = vec![vec![]];
+                let mut distribution = vec![0];
 
                 // move everything to be as left as possible.
                 for cell in &cells {
@@ -957,32 +964,37 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
                     if *currently_allocated + cell_size <= usable_page_space {
                         *currently_allocated += cell_size;
-                        distribution[i].push(cell_size);
+                        distribution[i] += 1;
                     } else {
-                        distribution.push(vec![cell_size]);
+                        distribution.push(1);
                         allocated_space.push(cell_size);
                     }
                 }
 
-                let ideal_distribution =
-                    allocated_space.iter().sum::<usize>() / allocated_space.len();
+                log::debug!("Allocated space: {:?}", allocated_space);
+                log::debug!("Dumb distribution: {:?}", distribution);
 
-                let mut final_distribution = vec![0];
-                let mut current_size = 0;
+                if distribution.len() >= 2 {
+                    let mut div_cell = cells.len() - distribution.last().unwrap() - 1;
 
-                for block in distribution {
-                    for cell_size in block {
-                        let i = final_distribution.len() - 1;
+                    for i in (1..=(allocated_space.len() - 1)).rev() {
+                        while allocated_space[i] < usable_page_space / 2 {
+                            distribution[i] += 1;
+                            allocated_space[i] += cells[div_cell].storage_size();
 
-                        if current_size + cell_size < ideal_distribution {
-                            final_distribution[i] += 1;
-                            current_size += cell_size;
-                        } else {
-                            final_distribution.push(1);
-                            current_size = cell_size;
+                            distribution[i - 1] -= 1;
+                            allocated_space[i - 1] -= cells[div_cell - 1].storage_size();
+                            div_cell -= 1;
                         }
                     }
+
+                    if allocated_space[0] < usable_page_space / 2 {
+                        distribution[0] += 1;
+                        distribution[1] -= 1;
+                    }
                 }
+
+                log::debug!("Final distribution: {:?}", distribution);
 
                 let old_right_sibling = {
                     let last_sibling = self
@@ -993,8 +1005,9 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     last_sibling_guard.try_right_sibling()
                 };
 
-                // TODO: fix deadlock!
-                while siblings.len() < final_distribution.len() {
+                log::debug!("Old right sibling: {:?}", old_right_sibling);
+
+                while siblings.len() < distribution.len() {
                     let new_page = self
                         .pager
                         .alloc_page(self.tx.borrow_mut().deref_mut(), page_type)?;
@@ -1002,14 +1015,16 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     siblings.push(Sibling::new(new_page, parent_index));
                 }
 
-                while final_distribution.len() > siblings.len() {
+                while distribution.len() > siblings.len() {
                     self.pager.free_page(
                         self.tx.borrow_mut().deref_mut(),
                         siblings.pop().unwrap().page,
                     )?;
                 }
 
-                // // sort pages to optimize for sequential io.
+                log::debug!("Fixed siblings: {:?}", siblings);
+
+                // sort pages to optimize for sequential io.
                 // BinaryHeap::from_iter(siblings.iter().map(|s| Reverse(s.page)))
                 //     .iter()
                 //     .enumerate()
@@ -1030,13 +1045,17 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                         .read_page(self.tx.borrow().deref(), sibling.page)?;
                     let page_guard = page.lock_exclusive();
 
-                    let cells_to_insert: Vec<_> = cells.drain(..final_distribution[i]).collect();
+                    let cells_to_insert: Vec<_> = cells.drain(..distribution[i]).collect();
+
+                    if i < siblings.len() - 1 {
+                        page_guard.set_right_sibling(siblings[i + 1].page);
+                    }
 
                     if i < siblings.len() - 1 || old_right_sibling.is_some() {
                         // only last page doesn't need high key, so we have to
                         // reserve space for it.
                         let high_key = cells_to_insert.last().unwrap().clone();
-                        page_guard.push(high_key.clone());
+                        page_guard.insert_cell(0, high_key.clone());
 
                         let divider_cell = self.convert_to_internal_cell(high_key, sibling.page);
 
@@ -1048,6 +1067,10 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     }
 
                     self.pager.mark_dirty(&page);
+                }
+
+                if old_right_sibling.is_none() {
+                    parent_guard.set_right_child(siblings.last().unwrap().page);
                 }
             } else {
                 let mut usable_page_space = 0;
@@ -1073,7 +1096,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 }
 
                 let mut allocated_space = vec![0];
-                let mut distribution = vec![vec![]];
+                let mut distribution = vec![0];
 
                 // move everything to be as left as possible.
                 for cell in &cells {
@@ -1083,30 +1106,30 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
                     if *currently_allocated + cell_size <= usable_page_space {
                         *currently_allocated += cell_size;
-                        distribution[i].push(cell_size);
+                        distribution[i] += 1;
                     } else {
-                        distribution.push(vec![cell_size]);
-                        allocated_space.push(cell_size);
+                        distribution.push(0);
+                        allocated_space.push(0);
                     }
                 }
 
-                let ideal_distribution =
-                    allocated_space.iter().sum::<usize>() / allocated_space.len();
+                if distribution.len() >= 2 {
+                    let mut div_cell = cells.len() - distribution.last().unwrap() - 1;
 
-                let mut final_distribution = vec![0];
-                let mut current_size = 0;
+                    for i in (1..=(allocated_space.len() - 1)).rev() {
+                        while allocated_space[i] < usable_page_space / 2 {
+                            distribution[i] += 1;
+                            allocated_space[i] += cells[div_cell].storage_size();
 
-                for block in distribution {
-                    for cell_size in block {
-                        let i = final_distribution.len() - 1;
-
-                        if current_size + cell_size < ideal_distribution {
-                            final_distribution[i] += 1;
-                            current_size += cell_size;
-                        } else {
-                            final_distribution.push(1);
-                            current_size = cell_size;
+                            distribution[i - 1] -= 1;
+                            allocated_space[i - 1] -= cells[div_cell - 1].storage_size();
+                            div_cell -= 1;
                         }
+                    }
+
+                    if allocated_space[0] < usable_page_space / 2 {
+                        distribution[0] += 1;
+                        distribution[1] -= 1;
                     }
                 }
 
@@ -1119,7 +1142,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     last_sibling_guard.try_right_sibling()
                 };
 
-                while siblings.len() < final_distribution.len() {
+                while siblings.len() < distribution.len() {
                     let new_page = self
                         .pager
                         .alloc_page(self.tx.borrow_mut().deref_mut(), page_type)?;
@@ -1127,18 +1150,12 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     siblings.push(Sibling::new(new_page, parent_index));
                 }
 
-                while final_distribution.len() > siblings.len() {
+                while distribution.len() > siblings.len() {
                     self.pager.free_page(
                         self.tx.borrow_mut().deref_mut(),
                         siblings.pop().unwrap().page,
                     )?;
                 }
-
-                // // sort pages to optimize for sequential io.
-                // BinaryHeap::from_iter(siblings.iter().map(|s| Reverse(s.page)))
-                //     .iter()
-                //     .enumerate()
-                //     .for_each(|(i, Reverse(page))| siblings[i].page = *page);
 
                 let last_sibling = siblings.last().unwrap().page;
 
@@ -1155,14 +1172,17 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                         .read_page(self.tx.borrow().deref(), sibling.page)?;
                     let page_guard = page.lock_exclusive();
 
-                    let mut cells_to_insert: Vec<_> =
-                        cells.drain(..final_distribution[i]).collect();
+                    let mut cells_to_insert: Vec<_> = cells.drain(..distribution[i]).collect();
+
+                    if i < siblings.len() - 1 {
+                        page_guard.set_right_sibling(siblings[i + 1].page);
+                    }
 
                     if i < siblings.len() - 1 || old_right_sibling.is_some() {
                         // only last page doesn't need high key, so we have to
                         // reserve space for it.
                         let high_key = cells_to_insert.pop().unwrap();
-                        page_guard.push(high_key.clone());
+                        page_guard.insert_cell(0, high_key.clone());
 
                         let divider_cell = self.convert_to_internal_cell(high_key, sibling.page);
 
@@ -1174,6 +1194,10 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     }
 
                     self.pager.mark_dirty(&page);
+                }
+
+                if old_right_sibling.is_none() {
+                    parent_guard.set_right_child(siblings.last().unwrap().page);
                 }
             }
 
@@ -1190,11 +1214,16 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         let mut load_per_side = Self::BALANCE_SIBLINGS_PER_SIDE as SlotNumber;
 
         log::debug!("Load siblings of page: {}", page_number);
+        log::debug!("Number of cells in parent {}", parent_page.count());
+
+        // let position_in_parent = (parent_page.first_data_offset()..=parent_page.len())
+        //     .map(|pos| parent_page.child(pos))
+        //     .position(|p| p == page_number)
+        //     .unwrap() as SlotNumber;
 
         let position_in_parent = (parent_page.first_data_offset()..=parent_page.len())
-            .map(|pos| parent_page.child(pos))
-            .position(|p| p == page_number)
-            .unwrap() as SlotNumber;
+            .find(|&pos| parent_page.child(pos) == page_number)
+            .unwrap();
 
         if position_in_parent == parent_page.first_data_offset()
             || position_in_parent == parent_page.len()
@@ -1202,12 +1231,9 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             load_per_side *= 2;
         }
 
-        let start = position_in_parent.saturating_sub(position_in_parent);
-        let start = if start == 0 {
-            parent_page.first_data_offset()
-        } else {
-            start
-        };
+        let start = position_in_parent
+            .saturating_sub(load_per_side)
+            .max(parent_page.first_data_offset());
 
         let left_siblings = start..position_in_parent;
         let right_siblings = (position_in_parent + 1)
