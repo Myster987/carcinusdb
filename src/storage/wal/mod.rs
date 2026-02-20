@@ -2,7 +2,6 @@ use std::{
     collections::VecDeque,
     fs::File,
     io::{IoSlice, Write},
-    mem::ManuallyDrop,
     path::PathBuf,
     sync::{
         Arc,
@@ -306,8 +305,10 @@ impl WriteAheadLog {
         if !file_exists {
             log::info!("Initializing WAL.");
             let buf = &mut [0; WAL_HEADER_SIZE];
-            let default_header =
-                WalHeader::default(db_header.page_size, db_header.get_database_size());
+            let default_header = WalHeader::default(
+                db_header.load().page_size,
+                db_header.load().get_database_size(),
+            );
             default_header.write_to_buffer(buf);
 
             file.pwrite(0, buf)?;
@@ -327,7 +328,7 @@ impl WriteAheadLog {
             header
         };
 
-        let frame_size = db_header.page_size as usize + FRAME_HEADER_SIZE;
+        let frame_size = db_header.load().page_size as usize + FRAME_HEADER_SIZE;
 
         let wal_file = Arc::new(BlockIO::new(file, frame_size, WAL_HEADER_SIZE));
 
@@ -370,6 +371,7 @@ impl WriteAheadLog {
         if replay_wal {
             let mut tx = wal.begin_write_tx()?;
             wal.replay(&mut tx)?;
+            // wal.commit(&mut tx)?;
         }
 
         Ok(wal)
@@ -472,6 +474,7 @@ impl WriteAheadLog {
         self.db_file.write_header(&local_tx_db_header.to_bytes())?;
 
         // TODO: swap header inplace
+        self.db_header.swap(*local_tx_db_header);
 
         // drop(inner.write_guard);
 
@@ -667,7 +670,7 @@ impl WriteAheadLog {
         let frames_to_checkpoint = self.index.latest_frames_sorted(max_frame);
 
         let to_backfill = frames_to_checkpoint.len() as u32;
-        let mut temp_buffer = vec![0; self.db_header.page_size as usize];
+        let mut temp_buffer = vec![0; self.db_header.load().page_size as usize];
         let mut successfully_backfilled = 0;
 
         // iterates over pages that should be moved to db file. If they are
@@ -707,6 +710,7 @@ impl WriteAheadLog {
             self.db_file.persist()?;
 
             // TODO: swap tx db header into mem db header
+            self.db_header.swap(*tx_db_header);
 
             // change wal header params, because it will be truncated
             self.header.increment_checkpoint_seq_num();

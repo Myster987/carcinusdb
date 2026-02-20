@@ -1,10 +1,8 @@
-use std::mem::ManuallyDrop;
-
 use parking_lot::MutexGuard;
 
 use crate::{
     storage::{
-        self, FrameNumber, PageNumber,
+        self, FrameNumber,
         page::DatabaseHeader,
         wal::{READERS_NUM, WriteAheadLog},
     },
@@ -82,11 +80,6 @@ impl ReadTx for ReadTransaction {
 
 /// Write transaction - must be ended with wal.commit().
 pub struct WriteTransaction<'a> {
-    pub inner: ManuallyDrop<WriteTransactionInner<'a>>,
-}
-
-/// Write transaction inner data.
-pub struct WriteTransactionInner<'a> {
     pub write_guard: MutexGuard<'a, ()>,
     pub min_frame: FrameNumber,
     pub max_frame: FrameNumber,
@@ -100,7 +93,7 @@ impl<'a> WriteTransaction<'a> {
 
         let min_frame = wal.get_min_frame();
         let max_frame = wal.get_max_frame();
-        let local_db_header = wal.db_header.into_raw_header();
+        let local_db_header = *wal.db_header.load_full();
 
         // ignore for now because locks migth be enough
         // // check if this changed and if so, we need to retry.
@@ -114,13 +107,11 @@ impl<'a> WriteTransaction<'a> {
         // }
 
         Ok(Self {
-            inner: ManuallyDrop::new(WriteTransactionInner {
-                // checkpoint_guard,
-                write_guard,
-                min_frame,
-                max_frame,
-                local_db_header,
-            }),
+            // checkpoint_guard,
+            write_guard,
+            min_frame,
+            max_frame,
+            local_db_header,
         })
     }
 }
@@ -128,28 +119,28 @@ impl<'a> WriteTransaction<'a> {
 impl ReadTx for WriteTransaction<'_> {
     #[inline]
     fn tx_min_frame(&self) -> FrameNumber {
-        self.inner.min_frame
+        self.min_frame
     }
 
     #[inline]
     fn tx_max_frame(&self) -> FrameNumber {
-        self.inner.max_frame
+        self.max_frame
     }
 }
 
 impl WriteTx for WriteTransaction<'_> {
     #[inline]
     fn tx_set_max_frame(&mut self, new_max_frame: FrameNumber) {
-        self.inner.max_frame = new_max_frame;
+        self.max_frame = new_max_frame;
     }
 
     #[inline]
     fn tx_local_db_header(&self) -> &DatabaseHeader {
-        &self.inner.local_db_header
+        &self.local_db_header
     }
 
     #[inline]
     fn tx_local_db_header_mut(&mut self) -> &mut DatabaseHeader {
-        &mut self.inner.local_db_header
+        &mut self.local_db_header
     }
 }

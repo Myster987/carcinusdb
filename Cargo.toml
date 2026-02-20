@@ -20,6 +20,7 @@ crossbeam = "0.8.4"
 dashmap = "6.1.0"
 parking_lot = "0.12.3"
 hashbrown = "0.16.1"
+arc-swap = "1.8.2"
 
 [dev-dependencies]
 criterion = "0.8.1"

@@ -418,8 +418,9 @@ impl Pager {
         page_cache: Arc<ShardedClockCache>,
         is_initialized: bool,
     ) -> storage::Result<Self> {
-        let relative_flush_threshold =
-            db_header.default_page_cache_size as usize * Self::DIRTY_PAGES_FLUSH_PERCENTAGE / 100;
+        let relative_flush_threshold = db_header.load().default_page_cache_size as usize
+            * Self::DIRTY_PAGES_FLUSH_PERCENTAGE
+            / 100;
 
         let cache_flush_threshold =
             std::cmp::min(Self::DIRTY_PAGES_FLUSH_THRESHOLD, relative_flush_threshold);
@@ -459,10 +460,10 @@ impl Pager {
     }
 
     pub fn write_header<Tx: WriteTx>(&self, tx: &mut Tx) -> storage::Result<()> {
-        let raw_header = self.db_header.into_raw_header();
+        let raw_header = self.db_header.load();
 
         let header_page = self.read_page(tx, DATABASE_HEADER_PAGE_NUMBER)?;
-        header_page.lock_exclusive().write_db_header(raw_header);
+        header_page.lock_exclusive().write_db_header(**raw_header);
 
         self.mark_dirty(&header_page);
 
@@ -624,7 +625,7 @@ impl Pager {
             free_page.id()
         };
 
-        self.write_header(tx)?;
+        // self.write_header(tx)?;
 
         Ok(free_page)
     }
@@ -671,7 +672,7 @@ impl Pager {
             free_page.id()
         };
 
-        self.write_header(tx)?;
+        // self.write_header(tx)?;
 
         Ok(free_page)
     }
@@ -698,7 +699,9 @@ impl Pager {
 
         self.mark_dirty(&page);
 
-        self.write_header(tx)
+        // self.write_header(tx)
+
+        Ok(())
     }
 
     /// Marks page as dirty to later identify page to flush durring checkpoint
@@ -746,7 +749,7 @@ impl Pager {
             .collect();
 
         let db_size = if should_commit {
-            self.db_header.get_database_size()
+            tx.tx_local_db_header().get_database_size()
         } else {
             0
         };
