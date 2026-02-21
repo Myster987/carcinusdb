@@ -331,7 +331,7 @@ mod tests {
     use crate::{
         sql::{
             record::RecordBuilder,
-            types::{AsValueRef, Value, text::Text},
+            types::{Value, text::Text},
         },
         storage::btree::{BTreeKey, DatabaseCursor},
     };
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn test_insert() -> anyhow::Result<()> {
-        simple_logger::init_with_level(log::Level::Trace)?;
+        simple_logger::init_with_level(log::Level::Error)?;
 
         let db = Database::open("./test-db.db")?;
 

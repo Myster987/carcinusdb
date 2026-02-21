@@ -1,8 +1,8 @@
 use std::{
     borrow::Cow,
     cell::RefCell,
-    cmp::{Ordering, Reverse, min},
-    collections::{BinaryHeap, VecDeque},
+    cmp::{Ordering, min},
+    collections::VecDeque,
     ops::{Deref, DerefMut},
     rc::Rc,
     sync::Arc,
@@ -962,7 +962,10 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     let i = distribution.len() - 1;
                     let currently_allocated = &mut allocated_space[i];
 
-                    if *currently_allocated + cell_size <= usable_page_space {
+                    let high_key_reserve = cell_size;
+                    let effective_limit = usable_page_space - high_key_reserve;
+
+                    if *currently_allocated + cell_size <= effective_limit {
                         *currently_allocated += cell_size;
                         distribution[i] += 1;
                     } else {
@@ -970,9 +973,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                         allocated_space.push(cell_size);
                     }
                 }
-
-                log::debug!("Allocated space: {:?}", allocated_space);
-                log::debug!("Dumb distribution: {:?}", distribution);
 
                 if distribution.len() >= 2 {
                     let mut div_cell = cells.len() - distribution.last().unwrap() - 1;
@@ -994,8 +994,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     }
                 }
 
-                log::debug!("Final distribution: {:?}", distribution);
-
                 let old_right_sibling = {
                     let last_sibling = self
                         .pager
@@ -1004,8 +1002,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
                     last_sibling_guard.try_right_sibling()
                 };
-
-                log::debug!("Old right sibling: {:?}", old_right_sibling);
 
                 while siblings.len() < distribution.len() {
                     let new_page = self
@@ -1021,8 +1017,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                         siblings.pop().unwrap().page,
                     )?;
                 }
-
-                log::debug!("Fixed siblings: {:?}", siblings);
 
                 // sort pages to optimize for sequential io.
                 // BinaryHeap::from_iter(siblings.iter().map(|s| Reverse(s.page)))
@@ -1104,7 +1098,11 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     let i = distribution.len() - 1;
                     let currently_allocated = &mut allocated_space[i];
 
-                    if *currently_allocated + cell_size <= usable_page_space {
+                    let high_key_reserve = cell_size;
+                    let effective_limit = usable_page_space - high_key_reserve;
+
+                    if *currently_allocated + cell_size <= effective_limit {
+                        // if *currently_allocated + cell_size <= usable_page_space {
                         *currently_allocated += cell_size;
                         distribution[i] += 1;
                     } else {
