@@ -337,11 +337,11 @@ mod tests {
     };
 
     const KEYS_START: i64 = 1;
-    const KEYS_END: i64 = 20_000;
+    const KEYS_END: i64 = 200_000;
 
     #[test]
     fn test_insert() -> anyhow::Result<()> {
-        simple_logger::init_with_level(log::Level::Error)?;
+        simple_logger::init_with_level(log::Level::Trace)?;
 
         let db = Database::open("./test-db.db")?;
 
@@ -396,6 +396,7 @@ mod tests {
                 if i % 1_000 == 0 {
                     log::info!("Up to entry: {} B-tree is valid", i)
                 }
+                log::info!("Entry with id {} is present", i);
             }
 
             log::info!("All keys present!");

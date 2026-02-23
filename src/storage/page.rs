@@ -721,7 +721,6 @@ impl Page {
             start,
             end
         );
-        log::trace!("Overflow map: {:?}", self.overflow_map());
 
         let mut drain_index = start;
         let mut slot_index = start;
