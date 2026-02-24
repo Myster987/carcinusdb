@@ -777,7 +777,6 @@ impl Page {
             "Invalid page type."
         );
         if index == self.len() {
-            // if index == self.len() {
             self.set_right_child(new_child);
         } else {
             match self.get_cell(index).unwrap() {

@@ -176,13 +176,19 @@ pub struct BTreeCursor<'tx, Tx> {
     current_page: PageNumber,
     current_slot: SlotNumber,
     path_stack: Vec<(PageNumber, SlotNumber)>,
+    balance_pages_per_side: SlotNumber,
     init: bool,
     done: bool,
 }
 
 impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
     /// Creates new cursor starting at root of B-tree.
-    pub fn new(tx: Rc<RefCell<Tx>>, pager: &'tx Arc<Pager>, root: PageNumber) -> Self {
+    pub fn new(
+        tx: Rc<RefCell<Tx>>,
+        pager: &'tx Arc<Pager>,
+        root: PageNumber,
+        balance_pages_per_side: SlotNumber,
+    ) -> Self {
         Self {
             tx,
             pager,
@@ -190,6 +196,7 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
             current_page: root,
             current_slot: 0,
             path_stack: Vec::new(),
+            balance_pages_per_side,
             init: false,
             done: false,
         }
@@ -274,11 +281,51 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
         }
     }
 
+    /// Takes cell ref and returns (reassembled, if needed) record build from
+    /// cell's payload.
+    fn owned_record_from_cell(&self, cell: &BTreeCell) -> storage::Result<Record<'static>> {
+        let local_payload = cell.payload();
+
+        if !cell.is_overflowing() {
+            return Ok(Record::from_owned(local_payload.to_vec()));
+        }
+
+        let first_overflow = cell.first_overflow().unwrap();
+        let total_size = cell.payload_size() as usize;
+
+        let mut result = Vec::with_capacity(total_size);
+
+        result.extend_from_slice(local_payload);
+
+        let mut current_overflow = first_overflow;
+
+        while result.len() < total_size {
+            let overflow_page = self
+                .pager
+                .read_page(self.tx.borrow().deref(), current_overflow)?;
+            let guard = overflow_page.lock_shared();
+
+            result.extend_from_slice(guard.overflow_payload());
+
+            if let Some(next) = guard.next_overflow() {
+                current_overflow = next;
+            } else {
+                break;
+            }
+        }
+
+        if result.len() != total_size {
+            return Err(storage::Error::Corruped);
+        }
+
+        Ok(Record::from_owned(result))
+    }
+
     /// Returns whole cell payload including overflow pages. Takes mutable reference
     /// to pager and cell that you want to reassemble. Returns [Cow], which is
     /// `Borrowed` when cell isn't overflowing and `Owned` when cell needed to be
     /// reconstructed. Returned slice can be directly used as record.
-    pub fn reassemble_payload<'a>(
+    fn reassemble_payload<'a>(
         &self,
         page: &'a Page,
         index: SlotNumber,
@@ -471,8 +518,6 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
 }
 
 impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
-    const BALANCE_SIBLINGS_PER_SIDE: usize = 3;
-
     // Inserts new entry into B-tree. If entries exists, it returns error.
     // For now it does dumb spliting of pages without rebalancing and key
     // redistribution, but it's work in progress.
@@ -514,6 +559,47 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             .mark_dirty_auto_flush(self.tx.borrow_mut().deref_mut(), &page)?;
 
         Ok(())
+    }
+
+    pub fn delete(&mut self, entry: &BTreeKey<'_>) -> storage::Result<Record<'static>> {
+        let search_result = self.seek(entry)?;
+
+        match search_result {
+            SearchResult::Found { page: _, slot } => {
+                let removed_cell = self.try_delete_from_leaf(slot)?;
+
+                let record = self.owned_record_from_cell(&removed_cell)?;
+
+                self.free_overflow(&removed_cell)?;
+
+                Ok(record)
+            }
+            SearchResult::NotFound { page: _, slot: _ } => Err(storage::Error::KeyNotFound),
+        }
+    }
+
+    fn try_delete_from_leaf(&mut self, slot_number: SlotNumber) -> storage::Result<BTreeCell> {
+        let page = self
+            .pager
+            .read_page(self.tx.borrow().deref(), self.current_page)?;
+
+        let removed_cell = {
+            let guard = page.lock_exclusive();
+
+            let removed_cell = guard.remove(slot_number);
+
+            if guard.is_underflow() {
+                drop(guard);
+                self.balance()?;
+            }
+
+            removed_cell
+        };
+
+        self.pager
+            .mark_dirty_auto_flush(self.tx.borrow_mut().deref_mut(), &page)?;
+
+        Ok(removed_cell)
     }
 
     /// Splits root by preserving it's position in db. For example: if root is
@@ -1007,7 +1093,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         page_number: PageNumber,
         parent_page: &Page,
     ) -> storage::Result<Vec<Sibling>> {
-        let mut load_per_side = Self::BALANCE_SIBLINGS_PER_SIDE as SlotNumber;
+        let mut load_per_side = self.balance_pages_per_side;
 
         let position_in_parent = (parent_page.first_data_offset()..=parent_page.len())
             .find(|&pos| parent_page.child(pos) == page_number)
@@ -1197,6 +1283,25 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 BTreeCell::TableInternal(cell)
             }
         }
+    }
+
+    fn free_overflow(&mut self, cell: &BTreeCell) -> storage::Result<()> {
+        let mut current_overflow = cell.first_overflow();
+
+        while let Some(overflow_page) = current_overflow {
+            let next_overflow = self
+                .pager
+                .read_page(self.tx.borrow().deref(), overflow_page)?
+                .lock_shared()
+                .next_overflow();
+
+            self.pager
+                .free_page(self.tx.borrow_mut().deref_mut(), overflow_page)?;
+
+            current_overflow = next_overflow;
+        }
+
+        Ok(())
     }
 }
 

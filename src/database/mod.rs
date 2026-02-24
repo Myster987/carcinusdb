@@ -290,7 +290,7 @@ pub struct DatabaseReadTransaction {
 
 impl DatabaseReadTransaction {
     pub fn cursor(&self, root: PageNumber) -> BTreeCursor<'_, ReadTransaction> {
-        BTreeCursor::new(self.wal_tx.clone(), &self.pager, root)
+        BTreeCursor::new(self.wal_tx.clone(), &self.pager, root, 0)
     }
 
     #[must_use]
@@ -305,8 +305,15 @@ pub struct DatabaseWriteTransaction<'tx> {
 }
 
 impl<'tx> DatabaseWriteTransaction<'tx> {
+    const DEFAULT_BALANCE_PER_SIDE: u16 = 3;
+
     pub fn cursor(&self, root: PageNumber) -> BTreeCursor<'_, WriteTransaction<'tx>> {
-        BTreeCursor::new(self.wal_tx.clone(), &self.pager, root)
+        BTreeCursor::new(
+            self.wal_tx.clone(),
+            &self.pager,
+            root,
+            Self::DEFAULT_BALANCE_PER_SIDE,
+        )
     }
 
     /// Flushes dirty pages into WAL and marks them as clean. Might run checkpoint.
@@ -338,12 +345,13 @@ mod tests {
 
     const KEYS_START: i64 = 1;
     const KEYS_END: i64 = 200_000;
+    const TEST_DB_NAME: &'static str = "./test-db.db";
 
     #[test]
     fn test_insert() -> anyhow::Result<()> {
         simple_logger::init_with_level(log::Level::Info)?;
 
-        let db = Database::open("./test-db.db")?;
+        let db = Database::open(TEST_DB_NAME)?;
 
         let tx = db.begin_write()?;
 
@@ -381,7 +389,7 @@ mod tests {
     fn test_search() -> anyhow::Result<()> {
         simple_logger::init()?;
 
-        let db = Database::open("./test-db.db")?;
+        let db = Database::open(TEST_DB_NAME)?;
 
         let tx = db.begin_read()?;
 
@@ -409,9 +417,9 @@ mod tests {
 
     #[test]
     fn test_linear_scan() -> anyhow::Result<()> {
-        simple_logger::init_with_level(log::Level::Info)?;
+        simple_logger::init_with_level(log::Level::Debug)?;
 
-        let db = Database::open("./test-db.db")?;
+        let db = Database::open(TEST_DB_NAME)?;
 
         let tx = db.begin_read()?;
 
@@ -421,15 +429,31 @@ mod tests {
             let mut count = 0;
 
             while cursor.next()? {
-                // if let Ok(record) = cursor.try_record() {
-                //     if record.get_value(1).to_int() == 84 {
-                //         log::info!("Found it!");
-                //     }
-                // }
                 count += 1;
             }
 
             log::info!("Scaned entries: {}", count);
+        }
+
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete() -> anyhow::Result<()> {
+        simple_logger::init()?;
+
+        let db = Database::open(TEST_DB_NAME)?;
+
+        let tx = db.begin_write()?;
+
+        {
+            let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
+
+            let deleted_record = cursor.delete(&BTreeKey::new_table_key(1, None))?;
+
+            println!("{:?}", deleted_record);
         }
 
         tx.commit()?;

@@ -46,6 +46,8 @@ pub enum Error {
     // b-tree
     #[error("attempted to insert key, that already exists.")]
     DuplicateKey,
+    #[error("key wasn't present in B-tree")]
+    KeyNotFound,
 
     // cache
     #[error(transparent)]
