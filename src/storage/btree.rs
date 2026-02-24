@@ -1,8 +1,8 @@
 use std::{
     borrow::Cow,
     cell::RefCell,
-    cmp::{Ordering, min},
-    collections::VecDeque,
+    cmp::{Ordering, Reverse, min},
+    collections::{BinaryHeap, VecDeque},
     ops::{Deref, DerefMut},
     rc::Rc,
     sync::Arc,
@@ -808,16 +808,17 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 }
 
                 while siblings.len() > distribution.len() {
-                    let freed = siblings.pop().unwrap();
-                    self.pager
-                        .free_page(self.tx.borrow_mut().deref_mut(), freed.page)?;
+                    self.pager.free_page(
+                        self.tx.borrow_mut().deref_mut(),
+                        siblings.pop().unwrap().page,
+                    )?;
                 }
 
                 // sort pages to optimize for sequential io.
-                // BinaryHeap::from_iter(siblings.iter().map(|s| Reverse(s.page)))
-                //     .iter()
-                //     .enumerate()
-                //     .for_each(|(i, Reverse(page))| siblings[i].page = *page);
+                BinaryHeap::from_iter(siblings.iter().map(|s| Reverse(s.page)))
+                    .iter()
+                    .enumerate()
+                    .for_each(|(i, Reverse(page))| siblings[i].page = *page);
 
                 for (i, sibling) in siblings.iter().enumerate() {
                     let page = self
@@ -949,20 +950,14 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                         .free_page(self.tx.borrow_mut().deref_mut(), freed.page)?;
                 }
 
+                // sort pages to optimize for sequential io.
+                BinaryHeap::from_iter(siblings.iter().map(|s| Reverse(s.page)))
+                    .iter()
+                    .enumerate()
+                    .for_each(|(i, Reverse(page))| siblings[i].page = *page);
+
                 let last_sibling = siblings.last().unwrap();
-
-                {
-                    self.pager
-                        .read_page(self.tx.borrow().deref(), last_sibling.page)?
-                        .lock_exclusive()
-                        .set_right_child(old_right_child.unwrap_or(0));
-                }
-
-                if divider_index == parent_guard.len() {
-                    parent_guard.set_right_child(last_sibling.page);
-                } else {
-                    parent_guard.set_child(divider_index, last_sibling.page);
-                }
+                parent_guard.set_child(divider_index, last_sibling.page);
 
                 for (i, sibling) in siblings.iter().enumerate() {
                     let page = self
@@ -976,6 +971,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                         page_guard.set_right_sibling(siblings[i + 1].page);
                     } else {
                         page_guard.set_right_sibling(old_right_sibling.unwrap_or(0));
+                        page_guard.set_right_child(old_right_child.unwrap_or(0));
                     }
 
                     if i < siblings.len() - 1 || old_right_sibling.is_some() {
