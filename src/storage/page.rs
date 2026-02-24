@@ -1347,6 +1347,17 @@ pub enum BTreeCell {
     TableLeaf(TableLeafCell),
 }
 
+impl BTreeCell {
+    pub fn left_child(&self) -> Option<PageNumber> {
+        match self {
+            Self::IndexInternal(cell) => Some(cell.left_child),
+            Self::IndexLeaf(_) => None,
+            Self::TableInternal(cell) => Some(cell.left_child),
+            Self::TableLeaf(_) => None,
+        }
+    }
+}
+
 impl CellOps for BTreeCell {
     fn local_size(&self) -> usize {
         match self {
