@@ -340,31 +340,15 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
                 .read_page(self.tx.borrow().deref(), self.current_page)?;
             let guard = page.lock_shared();
 
-            log::debug!(
-                "seek in page {} at slot {}",
-                self.current_page,
-                self.current_slot
-            );
-
             // we need to move to rigth node
             if !self.key_in_range(&guard, key)? {
-                let right_sibling = guard
+                self.current_page = guard
                     .try_right_sibling()
                     .expect("page was split and should contain sibling");
-
-                // if !guard.is_leaf() {
-                //     if let Some((_, slot)) = self.path_stack.last_mut() {
-                //         *slot += 1;
-                //     }
-                // }
-
-                self.current_page = right_sibling;
                 continue;
             }
 
             let search_result = self.binary_search(&guard, key)?;
-
-            log::debug!("binary search result: {:?}", search_result);
 
             if let Ok(slot) = search_result {
                 // mark that we can search for data from here
@@ -386,13 +370,6 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
 
             let child_slot = search_result.unwrap_err();
             let child_page = guard.child(child_slot);
-
-            assert!(
-                self.current_page != child_page,
-                "Cycle detected of page {} when going down to child: {}",
-                self.current_page,
-                child_page
-            );
 
             self.path_stack.push((self.current_page, child_slot));
             // go to child which may contain searched key
@@ -906,16 +883,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 .read_page(self.tx.borrow().deref(), parent_page)?;
             let parent_guard = parent_mem_page.lock_exclusive();
 
-            log::trace!(
-                "Parent page to load: {} with siblings of page: {}",
-                parent_page,
-                self.current_page
-            );
-            log::debug!("Parent sibling: {:?}", parent_guard.try_right_sibling());
-
             let mut siblings = self.load_siblings(self.current_page, &*parent_guard)?;
-
-            log::trace!("Loaded siblings: {:?}", siblings);
 
             debug_assert_eq!(
                 std::collections::HashSet::<PageNumber>::from_iter(
@@ -1022,15 +990,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 //     .enumerate()
                 //     .for_each(|(i, Reverse(page))| siblings[i].page = *page);
 
-                let last_sibling = siblings.last().unwrap().page;
-
-                {
-                    self.pager
-                        .read_page(self.tx.borrow().deref(), last_sibling)?
-                        .lock_exclusive()
-                        .set_right_sibling(old_right_sibling.unwrap_or(0))
-                }
-
                 for (i, sibling) in siblings.iter().enumerate() {
                     let page = self
                         .pager
@@ -1085,6 +1044,11 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     if i < siblings.len() - 1 {
                         let divider = parent_guard.remove(divider_index);
 
+                        let divider = self.convert_to_internal_cell(
+                            divider,
+                            page_guard.try_right_child().unwrap_or(0),
+                        );
+
                         cells.push(divider);
                     }
                 }
@@ -1102,12 +1066,11 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     let effective_limit = usable_page_space - high_key_reserve;
 
                     if *currently_allocated + cell_size <= effective_limit {
-                        // if *currently_allocated + cell_size <= usable_page_space {
                         *currently_allocated += cell_size;
                         distribution[i] += 1;
                     } else {
-                        distribution.push(0);
-                        allocated_space.push(0);
+                        distribution.push(1);
+                        allocated_space.push(cell_size);
                     }
                 }
 
@@ -1157,13 +1120,19 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                         .free_page(self.tx.borrow_mut().deref_mut(), freed.page)?;
                 }
 
-                let last_sibling = siblings.last().unwrap().page;
+                let last_sibling = siblings.last().unwrap();
 
                 {
                     self.pager
-                        .read_page(self.tx.borrow().deref(), last_sibling)?
+                        .read_page(self.tx.borrow().deref(), last_sibling.page)?
                         .lock_exclusive()
-                        .set_right_sibling(old_right_sibling.unwrap_or(0))
+                        .set_right_child(old_right_child.unwrap_or(0));
+                }
+
+                if divider_index == parent_guard.len() {
+                    parent_guard.set_right_child(last_sibling.page);
+                } else {
+                    parent_guard.set_child(divider_index, last_sibling.page);
                 }
 
                 for (i, sibling) in siblings.iter().enumerate() {
@@ -1181,22 +1150,14 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     }
 
                     if i < siblings.len() - 1 || old_right_sibling.is_some() {
-                        let fence_cell = cells_to_insert.pop().unwrap();
+                        let high_key = cells_to_insert.pop().unwrap();
 
-                        let fence_left_child = match &fence_cell {
-                            BTreeCell::TableInternal(c) => c.left_child,
-                            BTreeCell::IndexInternal(c) => c.left_child,
-                            _ => unreachable!("internal page should only have internal cells"),
-                        };
-                        page_guard.set_right_child(fence_left_child);
+                        page_guard.set_right_child(high_key.left_child().unwrap_or(0));
+                        page_guard.insert_cell(0, high_key.clone());
 
-                        let divider_cell = self.convert_to_internal_cell(fence_cell, sibling.page);
-
-                        page_guard.insert_cell(0, divider_cell.clone());
+                        let divider_cell = self.convert_to_internal_cell(high_key, sibling.page);
 
                         parent_guard.insert_cell(sibling.index_in_parent, divider_cell);
-                    } else {
-                        page_guard.set_right_child(old_right_child.unwrap_or(0));
                     }
 
                     for cell in cells_to_insert {

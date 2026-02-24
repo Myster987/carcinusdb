@@ -341,11 +341,14 @@ mod tests {
 
     #[test]
     fn test_insert() -> anyhow::Result<()> {
-        simple_logger::init_with_level(log::Level::Trace)?;
+        simple_logger::init_with_level(log::Level::Info)?;
 
         let db = Database::open("./test-db.db")?;
 
         let tx = db.begin_write()?;
+
+        // balancing: 12.2 MB
+        // dumb split: 22.9 MB
 
         {
             // scope cursor to drop before tx commit.
@@ -364,8 +367,6 @@ mod tests {
                 ))));
 
                 let record = record.serialize_to_record();
-
-                log::trace!("inserting key: {}", i);
 
                 cursor.insert(BTreeKey::new_table_key(i, Some(record)))?;
             }
@@ -393,10 +394,9 @@ mod tests {
                     "Entry {} lost",
                     i
                 );
-                if i % 1_000 == 0 {
+                if i % 10_000 == 0 {
                     log::info!("Up to entry: {} B-tree is valid", i)
                 }
-                log::info!("Entry with id {} is present", i);
             }
 
             log::info!("All keys present!");
