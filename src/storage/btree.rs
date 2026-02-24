@@ -506,7 +506,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
             if guard.is_overflow() {
                 drop(guard);
-                // self.split_page()?;
                 self.balance()?;
             }
         }
@@ -515,18 +514,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             .mark_dirty_auto_flush(self.tx.borrow_mut().deref_mut(), &page)?;
 
         Ok(())
-    }
-
-    fn split_page(&mut self) -> storage::Result<()> {
-        log::trace!("Begin split page");
-
-        let is_root = self.current_page == self.root;
-
-        if is_root {
-            self.split_root()
-        } else {
-            self.split_non_root()
-        }
     }
 
     /// Splits root by preserving it's position in db. For example: if root is
@@ -641,164 +628,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         root_guard.insert_cell(0, separator_cell);
 
         self.pager.mark_dirty(&root_page);
-
-        Ok(())
-    }
-
-    /// Splits pages that are not root. If you want to see how to split root, see
-    /// `split_root`. This function handles both leaf and internal pages. In general
-    /// current page is locked and new sibling is allocated. Then cells are evenly
-    /// distributed across this pages and index at which they got splited is pushed
-    /// up in the tree:
-    ///
-    /// # Tree Leafs
-    ///
-    /// When splitting leaf page we take all cells of old page and calculate
-    /// distribution between to pages using `calculate_split_ratio`. Index at which
-    /// we will split this page will become left page
-    fn split_non_root(&mut self) -> storage::Result<()> {
-        log::trace!("Splitting non root {}", self.current_page);
-
-        let page = self
-            .pager
-            .read_page(self.tx.borrow().deref(), self.current_page)?;
-        let page_guard = page.lock_exclusive();
-
-        let page_type = page_guard.page_type();
-        let is_leaf = page_guard.is_leaf();
-
-        let new_right_sibling = self
-            .pager
-            .alloc_page(self.tx.borrow_mut().deref_mut(), page_type)?;
-
-        log::trace!(
-            "Split between page: {} and {}",
-            page.id(),
-            new_right_sibling
-        );
-
-        let mut cells = page_guard.drain(..).collect::<VecDeque<_>>();
-
-        let cell_sizes: Vec<_> = cells.iter().map(|c| c.local_size()).collect();
-
-        let (left_high_key, right_high_key, separator_index) = calculate_split_ratio(
-            &cell_sizes,
-            self.pager.db_header.load().page_size as usize,
-            page_guard.has_high_key(),
-        );
-
-        let right_high_key = right_high_key.map(|right| cells[right].clone());
-        let left_high_key = left_high_key.map(|left| cells[left].clone());
-
-        let right_cells = cells.split_off(separator_index);
-        let mut left_cells = cells;
-
-        let separator_cell = if is_leaf {
-            left_cells[left_cells.len() - 1].clone()
-        } else {
-            left_cells.pop_back().unwrap()
-        };
-
-        let old_right_sibling = page_guard.try_right_sibling();
-        let old_right_child = page_guard.try_right_child();
-
-        {
-            let mut current_index = 0;
-
-            if let Some(left_high_key) = left_high_key {
-                page_guard.insert_cell(current_index, left_high_key);
-                current_index += 1;
-            }
-
-            for cell in left_cells {
-                page_guard.insert_cell(current_index, cell);
-                current_index += 1;
-            }
-
-            page_guard.set_right_sibling(new_right_sibling);
-
-            if !is_leaf {
-                let value = match &separator_cell {
-                    BTreeCell::IndexInternal(cell) => cell.left_child,
-                    BTreeCell::TableInternal(cell) => cell.left_child,
-                    _ => unreachable!(),
-                };
-
-                page_guard.set_right_child(value);
-            }
-
-            self.pager.mark_dirty(&page);
-        }
-
-        {
-            let new_right_sibling = self
-                .pager
-                .read_page(self.tx.borrow().deref(), new_right_sibling)?;
-            let new_right_sibling_guard = new_right_sibling.lock_exclusive();
-
-            let mut current_index = 0;
-
-            if let Some(right_high_key) = right_high_key {
-                new_right_sibling_guard.insert_cell(current_index, right_high_key);
-                current_index += 1;
-            }
-
-            for cell in right_cells {
-                new_right_sibling_guard.insert_cell(current_index, cell);
-                current_index += 1;
-            }
-
-            new_right_sibling_guard.set_right_sibling(old_right_sibling.unwrap_or(0));
-
-            if !is_leaf {
-                new_right_sibling_guard.set_right_child(old_right_child.unwrap_or(0));
-            }
-
-            self.pager.mark_dirty(&new_right_sibling);
-        }
-
-        let separator_cell = self.convert_to_internal_cell(separator_cell, self.current_page);
-
-        self.insert_into_parent(separator_cell, new_right_sibling)
-    }
-
-    /// Propagates insert changes up in the B-tree by spliting internal nodes.
-    /// Takes `separator` (new high key of splited page) and `new page` (created
-    /// durring split) and by using `path_stack` we backtrack changes into page
-    /// parents. This function is recursive, so it will call itself as needed.
-    fn insert_into_parent(
-        &mut self,
-        separator: BTreeCell,
-        new_page: PageNumber,
-    ) -> storage::Result<()> {
-        if self.path_stack.is_empty() {
-            return Ok(());
-        }
-
-        log::trace!("parent path stack: {:?}", self.path_stack);
-
-        let (parent_page_number, path_slot) = self.path_stack.pop().unwrap();
-        let parent_page = self
-            .pager
-            .read_page(self.tx.borrow().deref(), parent_page_number)?;
-        let parent_guard = parent_page.lock_exclusive();
-
-        // before inserting seprator from children we need to set parent cell
-        // to point to new page, because it contains keys that are less than it.
-        parent_guard.set_child(path_slot, new_page);
-        parent_guard.insert_cell(path_slot, separator);
-
-        self.pager.mark_dirty(&parent_page);
-
-        if parent_guard.is_overflow() {
-            let old_current = self.current_page;
-            self.current_page = parent_page_number;
-            drop(parent_guard);
-
-            self.split_page()?;
-
-            self.current_page = old_current;
-        }
 
         Ok(())
     }
