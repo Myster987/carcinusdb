@@ -340,7 +340,7 @@ mod tests {
             record::RecordBuilder,
             types::{Value, text::Text},
         },
-        storage::btree::{BTreeKey, DatabaseCursor},
+        storage::btree::{BTreeKey, DatabaseCursor, DeleteOptions, DeleteOptionsBuilder},
     };
 
     const KEYS_START: i64 = 1;
@@ -451,7 +451,10 @@ mod tests {
         {
             let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
 
-            let deleted_record = cursor.delete(&BTreeKey::new_table_key(1, None))?;
+            let deleted_record = cursor.delete(
+                &BTreeKey::new_table_key(2, None),
+                DeleteOptionsBuilder::new().returning().build(),
+            )?;
 
             println!("{:?}", deleted_record);
         }

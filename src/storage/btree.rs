@@ -517,6 +517,106 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
     }
 }
 
+#[derive(Debug)]
+pub struct InsertOptions {
+    flags: usize,
+}
+
+impl InsertOptions {
+    pub fn new(flags: usize) -> Self {
+        Self { flags }
+    }
+}
+
+impl InsertOptions {
+    const REPLACE: usize = 1;
+
+    pub fn is_replace(&self) -> bool {
+        self.flags & Self::REPLACE != 0
+    }
+
+    pub fn set_replace(&mut self) {
+        self.flags |= Self::REPLACE
+    }
+}
+
+impl Default for InsertOptions {
+    fn default() -> Self {
+        Self { flags: 0 }
+    }
+}
+
+#[derive(Debug)]
+pub struct InsertOptionsBuilder {
+    options: InsertOptions,
+}
+
+impl InsertOptionsBuilder {
+    pub fn new() -> Self {
+        Self {
+            options: InsertOptions::default(),
+        }
+    }
+
+    pub fn replace(mut self) -> Self {
+        self.options.set_replace();
+        self
+    }
+
+    pub fn build(self) -> InsertOptions {
+        self.options
+    }
+}
+
+pub struct DeleteOptions {
+    flags: usize,
+}
+
+impl DeleteOptions {
+    pub fn new(flags: usize) -> Self {
+        Self { flags }
+    }
+}
+
+impl DeleteOptions {
+    const RETURNING: usize = 1;
+
+    pub fn is_returning(&self) -> bool {
+        self.flags & Self::RETURNING != 0
+    }
+
+    pub fn set_returning(&mut self) {
+        self.flags |= Self::RETURNING;
+    }
+}
+
+impl Default for DeleteOptions {
+    fn default() -> Self {
+        Self { flags: 0 }
+    }
+}
+
+pub struct DeleteOptionsBuilder {
+    options: DeleteOptions,
+}
+
+impl DeleteOptionsBuilder {
+    pub fn new() -> Self {
+        Self {
+            options: DeleteOptions::default(),
+        }
+    }
+
+    pub fn returning(mut self) -> Self {
+        self.options.set_returning();
+        self
+    }
+
+    pub fn build(self) -> DeleteOptions {
+        self.options
+    }
+}
+
 impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     // Inserts new entry into B-tree. If entries exists, it returns error.
     // For now it does dumb spliting of pages without rebalancing and key
@@ -561,14 +661,22 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         Ok(())
     }
 
-    pub fn delete(&mut self, entry: &BTreeKey<'_>) -> storage::Result<Record<'static>> {
+    pub fn delete(
+        &mut self,
+        entry: &BTreeKey<'_>,
+        options: DeleteOptions,
+    ) -> storage::Result<Option<Record<'static>>> {
         let search_result = self.seek(entry)?;
 
         match search_result {
             SearchResult::Found { page: _, slot } => {
                 let removed_cell = self.try_delete_from_leaf(slot)?;
 
-                let record = self.owned_record_from_cell(&removed_cell)?;
+                let record = if options.is_returning() {
+                    Some(self.owned_record_from_cell(&removed_cell)?)
+                } else {
+                    None
+                };
 
                 self.free_overflow(&removed_cell)?;
 
