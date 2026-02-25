@@ -139,15 +139,23 @@ pub trait DatabaseCursor {
     /// Returns position of found entry or where it should be inserted.
     fn seek(&mut self, key: &BTreeKey) -> storage::Result<SearchResult>;
 
-    /// Postions cursor to leftmost page starting from current position.
+    /// Moves cursor to leftmost position within given sub-tree (if called at
+    /// root, it goes to min entry).
     fn seek_first(&mut self) -> storage::Result<bool>;
+
+    /// Moves cursor to rightmost position within given sub-tree (if called at
+    /// root, it goes to max entry).
+    fn seek_last(&mut self) -> storage::Result<bool>;
+
     /// Returns true if cursor advanced in postion or false, if we reached
     /// end of btree.
     fn next(&mut self) -> storage::Result<bool>;
 
-    // TODO: min and max
-    // /// Returns smallest entry in
-    // fn min(&mut self) -> storage::Result<Option<Record<'static>>>;
+    /// Returns smallest record in B-tree.
+    fn min(&mut self) -> storage::Result<Option<Record<'static>>>;
+
+    /// Returns largest record in B-tree.
+    fn max(&mut self) -> storage::Result<Option<Record<'static>>>;
 
     /// Returns record at current cursor position.
     fn try_record(&self) -> storage::Result<Record<'static>>;
@@ -361,14 +369,20 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
 
         Ok(Cow::Owned(result))
     }
+
+    /// Moves cursor to B-tree root, clears path_stack and marks as not done.
+    #[inline]
+    fn go_to_root(&mut self) {
+        self.current_page = self.root;
+        self.path_stack.clear();
+        self.done = false;
+    }
 }
 
 impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
     fn seek(&mut self, key: &BTreeKey) -> storage::Result<SearchResult> {
         // start at root
-        self.current_page = self.root;
-        self.path_stack.clear();
-        self.done = false;
+        self.go_to_root();
         self.init = true;
 
         loop {
@@ -415,16 +429,11 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
     }
 
     fn seek_first(&mut self) -> storage::Result<bool> {
-        self.current_page = self.root;
-        self.path_stack.clear();
-
         loop {
             let page = self
                 .pager
                 .read_page(self.tx.borrow().deref(), self.current_page)?;
             let guard = page.lock_shared();
-
-            log::trace!("Page {} len: {}", self.current_page, guard.len());
 
             if guard.is_leaf() {
                 self.current_slot = guard.first_data_offset();
@@ -435,6 +444,29 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
             }
 
             self.current_page = guard.child(guard.first_data_offset());
+        }
+
+        Ok(!self.done)
+    }
+
+    fn seek_last(&mut self) -> storage::Result<bool> {
+        loop {
+            let page = self
+                .pager
+                .read_page(self.tx.borrow().deref(), self.current_page)?;
+            let guard = page.lock_shared();
+
+            if guard.is_leaf() {
+                self.current_slot = guard.len().saturating_sub(1);
+                self.done = guard.is_empty();
+                self.init = true;
+
+                break;
+            }
+
+            self.current_page = guard
+                .try_right_child()
+                .expect("Only leaf doesn't have right child");
         }
 
         Ok(!self.done)
@@ -468,8 +500,6 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
                 return Ok(true);
             }
 
-            log::trace!("Right sibling: {:?}", page.try_right_sibling());
-
             if let Some(rigth_sibling) = page.try_right_sibling() {
                 let next_page = self
                     .pager
@@ -487,6 +517,18 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
 
         // end of iteration
         Ok(false)
+    }
+
+    fn min(&mut self) -> storage::Result<Option<Record<'static>>> {
+        self.go_to_root();
+        self.seek_first()?;
+        self.try_record().map(Some)
+    }
+
+    fn max(&mut self) -> storage::Result<Option<Record<'static>>> {
+        self.go_to_root();
+        self.seek_last()?;
+        self.try_record().map(Some)
     }
 
     fn try_record(&self) -> storage::Result<Record<'static>> {

@@ -434,6 +434,9 @@ mod tests {
                 count += 1;
             }
 
+            println!("min entry:\n{:?}", cursor.min());
+            println!("max entry:\n{:?}", cursor.max());
+
             log::info!("Scaned entries: {}", count);
         }
 
