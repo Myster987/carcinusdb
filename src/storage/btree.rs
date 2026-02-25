@@ -517,7 +517,10 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
     }
 }
 
-#[derive(Debug)]
+/// Options that can be applied durring insert:
+/// - REPLACE - if duplicate entry is present it will get replace with new one.
+/// - RETURNING - if set returns inserted record.
+#[derive(Debug, Clone, Copy)]
 pub struct InsertOptions {
     flags: usize,
 }
@@ -530,6 +533,7 @@ impl InsertOptions {
 
 impl InsertOptions {
     const REPLACE: usize = 1;
+    const RETURNING: usize = 1 << 1;
 
     pub fn is_replace(&self) -> bool {
         self.flags & Self::REPLACE != 0
@@ -537,6 +541,14 @@ impl InsertOptions {
 
     pub fn set_replace(&mut self) {
         self.flags |= Self::REPLACE
+    }
+
+    pub fn is_returning(&self) -> bool {
+        self.flags & Self::RETURNING != 0
+    }
+
+    pub fn set_returning(&mut self) {
+        self.flags |= Self::RETURNING
     }
 }
 
@@ -546,12 +558,14 @@ impl Default for InsertOptions {
     }
 }
 
+/// Helper for creating insert options.
 #[derive(Debug)]
 pub struct InsertOptionsBuilder {
     options: InsertOptions,
 }
 
 impl InsertOptionsBuilder {
+    /// Creates builder with default options set by default.
     pub fn new() -> Self {
         Self {
             options: InsertOptions::default(),
@@ -568,6 +582,9 @@ impl InsertOptionsBuilder {
     }
 }
 
+/// Options that can be applied durring delete:
+/// - RETURNING - if set returns deleted record.
+#[derive(Debug, Clone, Copy)]
 pub struct DeleteOptions {
     flags: usize,
 }
@@ -596,11 +613,14 @@ impl Default for DeleteOptions {
     }
 }
 
+/// Helper for creating delete options.
+#[derive(Debug)]
 pub struct DeleteOptionsBuilder {
     options: DeleteOptions,
 }
 
 impl DeleteOptionsBuilder {
+    /// Creates builder with default options set by default.
     pub fn new() -> Self {
         Self {
             options: DeleteOptions::default(),
@@ -621,12 +641,34 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     // Inserts new entry into B-tree. If entries exists, it returns error.
     // For now it does dumb spliting of pages without rebalancing and key
     // redistribution, but it's work in progress.
-    pub fn insert(&mut self, entry: BTreeKey<'_>) -> storage::Result<()> {
+    pub fn insert(
+        &mut self,
+        entry: BTreeKey<'_>,
+        options: InsertOptions,
+    ) -> storage::Result<Option<Record<'static>>> {
         let search_result = self.seek(&entry)?;
 
+        let record = if options.is_returning() {
+            entry.get_record().map(|r| r.to_owned())
+        } else {
+            None
+        };
+
         match search_result {
-            SearchResult::Found { page: _, slot: _ } => Err(storage::Error::DuplicateKey),
-            SearchResult::NotFound { page: _, slot } => self.try_insert_into_leaf(slot, entry),
+            SearchResult::Found { page: _, slot } => {
+                if options.is_replace() {
+                    self.try_insert_into_leaf(slot, entry, true)?;
+
+                    Ok(record)
+                } else {
+                    Err(storage::Error::DuplicateKey)
+                }
+            }
+            SearchResult::NotFound { page: _, slot } => {
+                self.try_insert_into_leaf(slot, entry, false)?;
+
+                Ok(record)
+            }
         }
     }
 
@@ -637,6 +679,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         &mut self,
         slot_number: SlotNumber,
         entry: BTreeKey<'_>,
+        replace: bool,
     ) -> storage::Result<()> {
         let page = self
             .pager
@@ -647,7 +690,11 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
             let cell = self.build_cell(&guard, entry)?;
 
-            guard.insert_cell(slot_number, cell);
+            if replace {
+                guard.replace_cell(slot_number, cell);
+            } else {
+                guard.insert_cell(slot_number, cell);
+            }
 
             if guard.is_overflow() {
                 drop(guard);

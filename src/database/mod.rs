@@ -340,7 +340,7 @@ mod tests {
             record::RecordBuilder,
             types::{Value, text::Text},
         },
-        storage::btree::{BTreeKey, DatabaseCursor, DeleteOptions, DeleteOptionsBuilder},
+        storage::btree::{BTreeKey, DatabaseCursor, DeleteOptionsBuilder, InsertOptionsBuilder},
     };
 
     const KEYS_START: i64 = 1;
@@ -365,6 +365,8 @@ mod tests {
             let start = KEYS_START;
             let end = KEYS_END;
 
+            let options = InsertOptionsBuilder::new().build();
+
             for i in start..end {
                 let mut record = RecordBuilder::new();
 
@@ -376,7 +378,7 @@ mod tests {
 
                 let record = record.serialize_to_record();
 
-                cursor.insert(BTreeKey::new_table_key(i, Some(record)))?;
+                cursor.insert(BTreeKey::new_table_key(i, Some(record)), options)?;
             }
         }
 
@@ -451,10 +453,9 @@ mod tests {
         {
             let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
 
-            let deleted_record = cursor.delete(
-                &BTreeKey::new_table_key(2, None),
-                DeleteOptionsBuilder::new().returning().build(),
-            )?;
+            let options = DeleteOptionsBuilder::new().returning().build();
+
+            let deleted_record = cursor.delete(&BTreeKey::new_table_key(4, None), options)?;
 
             println!("{:?}", deleted_record);
         }
