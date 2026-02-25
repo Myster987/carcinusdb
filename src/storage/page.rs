@@ -201,9 +201,9 @@ impl Default for DatabaseHeader {
     }
 }
 
+/// All possible page types in db.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
-/// All possible page types in db.
 pub enum PageType {
     IndexInternal = 5,
     TableInternal = 10,
@@ -402,6 +402,7 @@ impl Page {
     pub fn as_io_slice(&self) -> IoSlice {
         IoSlice::new(self.buffer.as_slice())
     }
+
     pub fn is_empty(&self) -> bool {
         self.count() == 0
     }
@@ -452,11 +453,11 @@ impl Page {
         }
     }
 
-    pub fn slot_array(&self) -> SlotArray {
+    fn slot_array(&self) -> SlotArray {
         SlotArray::new(self.as_ptr(), self.header_size())
     }
 
-    pub fn freeblock_list(&self) -> FreeblockList {
+    fn freeblock_list(&self) -> FreeblockList {
         FreeblockList::new(self.as_ptr())
     }
 
@@ -527,12 +528,9 @@ impl Page {
     /// # Fails
     ///
     ///  If there is no cell at this offset, this function will return error.
-    fn get_cell_at_offset(&self, offset: u16) -> storage::Result<BTreeCellRef> {
+    fn get_cell_at_offset<'a>(&'a self, offset: u16) -> storage::Result<BTreeCellRef<'a>> {
         let min_cell_size = min_cell_size(self.usable_space());
         let max_cell_size = max_cell_size(self.usable_space());
-
-        // buf lifetime is change to 'static to avoid later headache. But we need to be carefull with this reference.
-        // let page_buffer = unsafe { cast::cast_static(&self.as_ptr()) };
 
         read_btree_cell_ref(
             self.as_ptr(),
@@ -605,20 +603,6 @@ impl Page {
         if let Some(offset) = freeblocks.take_freeblock(local_payload_size as u16)
             && self.free_space() >= SLOT_SIZE as u16
         {
-            // let page_size = self.as_ptr().len() as u16;
-            // if offset >= page_size {
-            //     panic!(
-            //         "freeblock returned invalid offset {} (page {})",
-            //         offset, page_size
-            //     );
-            // }
-            // if offset + cell_size as u16 > page_size {
-            //     panic!(
-            //         "freeblock offset + cell size out of page bounds: {} + {} > {}",
-            //         offset, cell_size, page_size
-            //     );
-            // }
-
             write_btree_cell(self.as_ptr(), offset, &cell).expect("writting cell failed");
 
             slot_array.insert(index, offset);
@@ -1038,7 +1022,6 @@ impl<'a> SlotArray<'a> {
         self.sub_len(1);
     }
 
-    #[inline]
     fn slot_array(&self) -> &[u16] {
         let beginning = self.slot_array_offset;
         let end = beginning + self.len() as usize * SLOT_SIZE;
@@ -1047,7 +1030,6 @@ impl<'a> SlotArray<'a> {
         crate::utils::cast::cast_slice(slot_array_region)
     }
 
-    #[inline]
     fn slot_array_mut(&mut self) -> &mut [u16] {
         let beginning = self.slot_array_offset;
         let end = beginning + self.len() as usize * SLOT_SIZE;
@@ -1148,7 +1130,7 @@ impl Debug for SlotArray<'_> {
     }
 }
 
-pub struct FreeblockList<'a> {
+struct FreeblockList<'a> {
     /// Mutable reference to whole page content.
     mem: &'a mut [u8],
 }
@@ -1209,7 +1191,7 @@ impl<'a> FreeblockList<'a> {
     // Looks for freeblock that can fit given `cell_size`. If there is one, it
     // will return offset to it, otherwise it will return None. Also it manages
     // slpitting freeblocks, so there is no need to calculate fragmentation.
-    fn take_freeblock(&mut self, cell_size: u16) -> Option<u16> {
+    pub fn take_freeblock(&mut self, cell_size: u16) -> Option<u16> {
         let mut prev = 0;
         let mut current = self.first_freeblock();
 
@@ -1243,7 +1225,7 @@ impl<'a> FreeblockList<'a> {
     }
 
     /// Adds new freeblock to beginning of freeblocks linked-list.
-    fn push_freeblock(&mut self, offset: u16, size: u16) {
+    pub fn push_freeblock(&mut self, offset: u16, size: u16) {
         if size < 4 {
             self.add_free_fragment(size as u8);
         }
@@ -1285,21 +1267,6 @@ impl<'a> Iterator for FreeblockIterator<'a> {
         self.current = next;
 
         Some(current_size)
-    }
-}
-
-pub struct CellIterator<'a> {
-    page: &'a Page,
-    current: u16,
-}
-
-impl<'a> Iterator for CellIterator<'a> {
-    type Item = BTreeCellRef<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let cell = self.page.get_cell(self.current).ok();
-        self.current += 1;
-        cell
     }
 }
 
@@ -2419,9 +2386,6 @@ mod tests {
     fn test_min_max() -> anyhow::Result<()> {
         let page = Page::alloc(4096, None);
         page.as_ptr()[0] = 5;
-
-        // println!("Min cell size: {}", page.min_cell_size());
-        // println!("Max cell size: {}", page.max_cell_size());
 
         let mut slot_array = page.slot_array();
         let mut sample = Vec::new();
