@@ -626,12 +626,16 @@ impl Page {
         Ok(index)
     }
 
-    pub fn replace_cell(&self, index: SlotNumber, cell: BTreeCell) {
+    pub fn replace_cell(&self, index: SlotNumber, cell: BTreeCell) -> BTreeCell {
         assert!(cell.local_size() <= self.max_cell_size(), "can't fit cell");
 
-        if let Err(cell) = self.try_replace(index, cell) {
-            self.remove(index);
-            self.overflow_map().insert(index, cell);
+        match self.try_replace(index, cell) {
+            Ok(old_cell) => old_cell,
+            Err(new_cell) => {
+                let old_cell = self.remove(index);
+                self.overflow_map().insert(index, new_cell);
+                old_cell
+            }
         }
     }
 
