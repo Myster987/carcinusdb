@@ -145,19 +145,9 @@ pub trait DatabaseCursor {
     /// end of btree.
     fn next(&mut self) -> storage::Result<bool>;
 
-    // /// Attempts to extract key at current cursor position. By design cursor
-    // /// should hold guard to page that it's currently on. Without this protection
-    // /// key could be moved out durring balancing.
-    // fn key(&mut self) -> storage::Result<BTreeKey<'_>>;
-
-    // /// Extracts record from current position of cursor. This function also
-    // /// depends on cursor holding page guard in advance.
-    // fn value(&mut self) -> storage::Result<Option<Record<'_>>>;
-
-    // /// The same as `DatabaseCursor::key` but returns owned data.
-    // fn key_owned(&mut self) -> storage::Result<BTreeKey<'static>>;
-    // /// The same as `DatabaseCursor::value` but returns owned data.
-    // fn value_owned(&mut self) -> storage::Result<Option<Record<'static>>>;
+    // TODO: min and max
+    // /// Returns smallest entry in
+    // fn min(&mut self) -> storage::Result<Option<Record<'static>>>;
 
     /// Returns record at current cursor position.
     fn try_record(&self) -> storage::Result<Record<'static>>;
@@ -691,7 +681,8 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             let cell = self.build_cell(&guard, entry)?;
 
             if replace {
-                guard.replace_cell(slot_number, cell);
+                let old_cell = guard.replace_cell(slot_number, cell);
+                self.free_cell(&old_cell)?;
             } else {
                 guard.insert_cell(slot_number, cell);
             }
@@ -725,8 +716,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     None
                 };
 
-                self.free_overflow(&removed_cell)?;
-
                 Ok(record)
             }
             SearchResult::NotFound { page: _, slot: _ } => Err(storage::Error::KeyNotFound),
@@ -742,6 +731,8 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             let guard = page.lock_exclusive();
 
             let removed_cell = guard.remove(slot_number);
+
+            self.free_cell(&removed_cell)?;
 
             if guard.is_underflow() {
                 drop(guard);
@@ -1440,7 +1431,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         }
     }
 
-    fn free_overflow(&mut self, cell: &BTreeCell) -> storage::Result<()> {
+    fn free_cell(&mut self, cell: &BTreeCell) -> storage::Result<()> {
         let mut current_overflow = cell.first_overflow();
 
         while let Some(overflow_page) = current_overflow {
