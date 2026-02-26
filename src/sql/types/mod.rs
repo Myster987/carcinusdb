@@ -12,7 +12,8 @@ pub mod blob;
 pub mod serial;
 pub mod text;
 
-#[derive(Debug)]
+#[repr(u8)]
+#[derive(Debug, Clone, Copy)]
 pub enum ValueType {
     Null,
     Bool,
@@ -20,6 +21,20 @@ pub enum ValueType {
     Blob,
     Text,
     Error,
+}
+
+impl From<u8> for ValueType {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Self::Null,
+            1 => Self::Blob,
+            2 => Self::Int,
+            3 => Self::Blob,
+            4 => Self::Text,
+            5 => Self::Error,
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -204,21 +219,41 @@ impl<'a> ValueRef<'a> {
     pub fn to_bool(&self) -> bool {
         match self {
             Self::Bool(v) => *v,
-            _ => panic!("Called on wrong value type"),
+            _ => panic!("Called on wrong value type. Expected bool."),
         }
     }
 
     pub fn to_int(&self) -> i64 {
         match self {
             Self::Int(v) => *v,
-            _ => panic!("Called on wrong value type"),
+            _ => panic!("Called on wrong value type. Expected int."),
         }
     }
 
     pub fn to_blob(&self) -> &[u8] {
         match self {
             Self::Blob(v) => *v,
-            _ => panic!("Called on wrong value type"),
+            _ => panic!("Called on wrong value type. Expected blob."),
+        }
+    }
+
+    pub fn to_text(&self) -> &str {
+        match self {
+            Self::Text(TextRef {
+                value,
+                kind: TextKind::PlainText,
+            }) => *value,
+            _ => panic!("Called on wrong value type. Expected text."),
+        }
+    }
+
+    pub fn to_json(&self) -> &str {
+        match self {
+            Self::Text(TextRef {
+                value,
+                kind: TextKind::Json,
+            }) => *value,
+            _ => panic!("Called on wrong value type. Expected json."),
         }
     }
 }
