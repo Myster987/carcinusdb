@@ -68,8 +68,8 @@ impl From<Text> for String {
 
 #[derive(Debug, Clone, Copy)]
 pub struct TextRef<'a> {
-    value: &'a str,
-    kind: TextKind,
+    pub value: &'a str,
+    pub kind: TextKind,
 }
 
 impl<'a> TextRef<'a> {
