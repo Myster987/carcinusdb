@@ -10,6 +10,16 @@ use crate::{
 
 pub const ROW_ID_COLUMN: &str = "row_id";
 
+pub struct Catalog {
+    tables: HashMap<String, Schema>,
+}
+
+impl Catalog {
+    pub fn get_table(&self, name: &str) -> Option<&Schema> {
+        self.tables.get(name)
+    }
+}
+
 pub struct Schema {
     columns: Vec<Column>,
     index: HashMap<String, usize>,
@@ -52,16 +62,29 @@ impl Schema {
         self.columns.push(column);
     }
 
-    pub fn preped_row_id(&mut self) {
+    pub fn prepend_row_id(&mut self) {
         debug_assert!(
-            self.columns[0].name != ROW_ID_COLUMN,
+            self.columns.first().map(|c| c.name.as_str()) != Some(ROW_ID_COLUMN),
             "schema already has {}",
             ROW_ID_COLUMN
         );
+        let row_id_col = Column::new(
+            ROW_ID_COLUMN,
+            ValueType::Int,
+            ColumnPropertiesBuilder::new()
+                .not_null()
+                .primary_key()
+                .build(),
+            None,
+        );
 
-        // let properties = ColumnPropertiesBuilder::new().
-
-        // let row_id_col = Column::new(ROW_ID_COLUMN, ValueType::Int)
+        self.columns.insert(0, row_id_col);
+        self.index = self
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, col)| (col.name.clone(), i))
+            .collect();
     }
 }
 
@@ -69,14 +92,21 @@ pub struct Column {
     name: String,
     data_type: ValueType,
     properties: ColumnProperties,
+    default: Option<Value>,
 }
 
 impl Column {
-    pub fn new(name: &str, data_type: ValueType, properties: ColumnProperties) -> Self {
+    pub fn new(
+        name: &str,
+        data_type: ValueType,
+        properties: ColumnProperties,
+        default: Option<Value>,
+    ) -> Self {
         Self {
             name: name.to_string(),
             data_type,
             properties,
+            default,
         }
     }
 
@@ -86,6 +116,7 @@ impl Column {
         builder.add(Value::Text(Text::new(self.name.clone())));
         builder.add(Value::Int(self.data_type as u8 as i64));
         builder.add(Value::Int(self.properties.flags as i64));
+        builder.add(self.default.clone().unwrap_or(Value::Null));
 
         builder.serialize_to_record()
     }
@@ -94,8 +125,12 @@ impl Column {
         let name = record.get_value(0).to_text().to_owned();
         let data_type = ValueType::from(record.get_value(1).to_int() as u8);
         let properties = ColumnProperties::from(record.get_value(2).to_int() as u8);
+        let default = match record.get_value(3).to_owned() {
+            Value::Null => None,
+            val => Some(val),
+        };
 
-        Self::new(&name, data_type, properties)
+        Self::new(&name, data_type, properties, default)
     }
 }
 
@@ -131,7 +166,7 @@ impl ColumnProperties {
     }
 
     pub fn set_not_null(&mut self) {
-        self.flags ^= Self::NULL;
+        self.flags &= !Self::NULL;
     }
 }
 
