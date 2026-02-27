@@ -1,8 +1,5 @@
 use tokio::net::TcpStream;
 
-use crate::error::DatabaseResult;
-
-
 pub struct Connection {
     stream: TcpStream,
 }

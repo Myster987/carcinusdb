@@ -21,8 +21,6 @@ use crate::{
     utils::io::{BlockIO, IO},
 };
 
-pub mod schema;
-
 pub const CARCINUSDB_MASTER_TABLE: &'static str = "carcinusdb_master";
 pub const CARCINUSDB_MASTER_TABLE_ROOT: PageNumber = 1;
 
@@ -30,9 +28,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("invalid bytes")]
-    InvalidBytes,
-
     // io
     #[error("invalid hostname: {hostname}\nmessage: {msg}")]
     InvalidHostname { msg: String, hostname: String },
@@ -50,10 +45,10 @@ pub enum Error {
 
     // internal
     #[error(transparent)]
-    UtilsError(#[from] crate::utils::Error),
+    Utils(#[from] crate::utils::Error),
 
     #[error(transparent)]
-    StorageError(#[from] crate::storage::Error),
+    Storage(#[from] crate::storage::Error),
 
     #[error(transparent)]
     Sql(#[from] crate::sql::Error),

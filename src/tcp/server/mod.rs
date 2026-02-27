@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use connection::Connection;
 use tokio::net::TcpListener;
 
-use crate::error::DatabaseResult;
+use crate::database::Result;
 
 pub mod connection;
 pub struct TcpServer {
@@ -11,7 +11,7 @@ pub struct TcpServer {
 }
 
 impl TcpServer {
-    pub async fn new(addr: SocketAddr) -> DatabaseResult<Self> {
+    pub async fn new(addr: SocketAddr) -> Result<Self> {
         let listener = TcpListener::bind(addr).await?;
 
         Ok(Self { listener })
@@ -21,7 +21,7 @@ impl TcpServer {
         self.listener.local_addr().unwrap()
     }
 
-    pub async fn accept_connection(&self) -> DatabaseResult<Connection> {
+    pub async fn accept_connection(&self) -> Result<Connection> {
         let (stream, _) = self.listener.accept().await?;
 
         Ok(Connection::new(stream))
