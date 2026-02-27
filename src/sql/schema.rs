@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
+use thiserror::Error;
+
 use crate::{
-    database,
     sql::{
         record::{Record, RecordBuilder},
         types::{Value, ValueType, text::Text},
@@ -11,36 +12,55 @@ use crate::{
 
 pub const ROW_ID_COLUMN: &str = "row_id";
 
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("table \"{0}\" not found in database.")]
+    TableNotFound(String),
+}
+
 pub struct Catalog {
-    tables: HashMap<String, Schema>,
+    tables: HashMap<String, TableMetadata>,
 }
 
 impl Catalog {
-    pub fn get_table(&self, name: &str) -> database::Result<&Schema> {
-        // self.tables.get(name)
-        todo!()
+    pub fn get_table(&self, name: &str) -> Result<&TableMetadata> {
+        self.tables
+            .get(name)
+            .ok_or(Error::TableNotFound(name.to_string()))
     }
+}
+
+pub struct IndexMetadata {
+    pub root: PageNumber,
+    pub name: String,
+    pub column: Column,
+    pub schema: Schema,
+    pub unique: bool,
+}
+
+pub struct TableMetadata {
+    pub root: PageNumber,
+    pub name: String,
+    pub schema: Schema,
+    pub indexes: Vec<IndexMetadata>,
 }
 
 pub struct Schema {
     columns: Vec<Column>,
     index: HashMap<String, usize>,
-    b_tree_root: PageNumber,
 }
 
 impl Schema {
-    pub fn new(columns: Vec<Column>, b_tree_root: PageNumber) -> Self {
+    pub fn new(columns: Vec<Column>) -> Self {
         let index = columns
             .iter()
             .enumerate()
             .map(|(i, col)| (col.name.clone(), i))
             .collect();
 
-        Self {
-            columns,
-            b_tree_root,
-            index,
-        }
+        Self { columns, index }
     }
 
     pub fn len(&self) -> usize {
