@@ -1,13 +1,19 @@
 use crate::sql::{
     self,
-    statement::{
-        Assignment, BinaryOperator, Column, Constrains, Create, DataType, Drop, Expression,
-        Statement, UnaryOperator,
+    parser::{
+        statement::{
+            Assignment, BinaryOperator, Column, Constrains, Create, DataType, Drop, Expression,
+            Statement, UnaryOperator,
+        },
+        token::{Keyword, Token},
+        tokenizer::Tokenizer,
     },
-    token::{Keyword, Token},
-    tokenizer::Tokenizer,
     types::{Value, text::Text},
 };
+
+pub mod statement;
+pub mod token;
+pub mod tokenizer;
 
 /// Trait to implement all esential statements.
 pub trait StatementParser {

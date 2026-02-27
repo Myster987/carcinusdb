@@ -2,7 +2,7 @@ use std::{iter::Peekable, str::Chars};
 
 use crate::sql::{
     self,
-    token::{Keyword, Token, Whitespace},
+    parser::token::{Keyword, Token, Whitespace},
 };
 
 pub struct Stream<'a> {

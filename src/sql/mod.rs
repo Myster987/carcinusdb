@@ -1,12 +1,9 @@
 use thiserror::Error;
 
-use crate::sql::token::Token;
+use crate::sql::parser::token::Token;
 
 pub mod parser;
 pub mod record;
-pub mod statement;
-pub mod token;
-pub mod tokenizer;
 pub mod types;
 
 pub type Result<T> = std::result::Result<T, Error>;

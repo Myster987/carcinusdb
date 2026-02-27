@@ -232,6 +232,7 @@ impl Display for DataType {
 pub enum Constrains {
     PrimaryKey,
     Unique,
+    NotNull,
 }
 
 impl Display for Constrains {
@@ -239,6 +240,7 @@ impl Display for Constrains {
         f.write_str(match self {
             Self::PrimaryKey => "PRIMARY KEY",
             Self::Unique => "UNIQUE",
+            Self::NotNull => "NOT NULL",
         })
     }
 }
