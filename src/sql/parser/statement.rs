@@ -13,7 +13,7 @@ pub enum Statement {
     },
     Insert {
         into: String,
-        columns: Option<Vec<String>>,
+        columns: Vec<String>,
         values: Vec<Vec<Expression>>,
     },
     Update {
@@ -64,7 +64,7 @@ impl Display for Statement {
                 values,
             } => {
                 write!(f, "INSERT INTO {into}")?;
-                if let Some(columns) = columns {
+                if columns.len() > 0 {
                     write!(f, " ({})", fmt_join(columns, ", "))?;
                 }
                 let mut fmt_values = vec![];
@@ -228,7 +228,7 @@ impl Display for DataType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Constrains {
     PrimaryKey,
     Unique,

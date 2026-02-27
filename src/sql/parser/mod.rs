@@ -49,6 +49,7 @@ impl<'a> Parser<'a> {
     pub fn new(input: &'a str) -> sql::Result<Self> {
         let tokenzied = Tokenizer::new(input).into_iter().collect();
         let valid_tokens = Self::validate(tokenzied)?;
+
         Ok(Self {
             input,
             position: 0,
@@ -325,14 +326,14 @@ impl<'a> Parser<'a> {
         self.parse_comma_separeted(Self::parse_identifier, true)
     }
 
-    fn parse_optional_identifier_list(&mut self) -> sql::Result<Option<Vec<String>>> {
+    fn parse_optional_identifier_list(&mut self) -> sql::Result<Vec<String>> {
         if self
             .peek_token()
             .is_ok_and(|token| matches!(token, Token::LeftParen))
         {
-            Ok(Some(self.parse_identifier_list()?))
+            Ok(self.parse_identifier_list()?)
         } else {
-            Ok(None)
+            Ok(vec![])
         }
     }
 
