@@ -1,10 +1,19 @@
 use thiserror::Error;
 
-use crate::sql::parser::token::Token;
+use crate::sql::parser::{Parser, statement::Statement, token::Token};
 
+pub mod analyzer;
+pub mod executor;
 pub mod parser;
 pub mod record;
+pub mod schema;
 pub mod types;
+
+pub fn pipeline(input: &str) -> Result<Statement> {
+    let statement = Parser::new(input)?.parse_statement()?;
+
+    Ok(statement)
+}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
