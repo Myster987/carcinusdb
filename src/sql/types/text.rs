@@ -6,7 +6,7 @@ pub enum TextKind {
     Json,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Text {
     value: String,
     kind: TextKind,

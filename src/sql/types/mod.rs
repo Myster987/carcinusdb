@@ -37,7 +37,7 @@ impl From<u8> for ValueType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Null,
     Bool(bool),
