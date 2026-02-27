@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
+    database,
     sql::{
         record::{Record, RecordBuilder},
         types::{Value, ValueType, text::Text},
@@ -15,8 +16,9 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    pub fn get_table(&self, name: &str) -> Option<&Schema> {
-        self.tables.get(name)
+    pub fn get_table(&self, name: &str) -> database::Result<&Schema> {
+        // self.tables.get(name)
+        todo!()
     }
 }
 

@@ -1,9 +1,9 @@
 use std::{cell::RefCell, path::Path, rc::Rc, sync::Arc};
 
 use arc_swap::ArcSwap;
+use thiserror::Error;
 
 use crate::{
-    error::DatabaseResult,
     os::{Open, OpenOptions},
     storage::{
         PageNumber,
@@ -26,7 +26,46 @@ pub mod schema;
 pub const CARCINUSDB_MASTER_TABLE: &'static str = "carcinusdb_master";
 pub const CARCINUSDB_MASTER_TABLE_ROOT: PageNumber = 1;
 
-pub async fn run(hostname: String, port: u16) -> DatabaseResult<()> {
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("invalid bytes")]
+    InvalidBytes,
+
+    // io
+    #[error("invalid hostname: {hostname}\nmessage: {msg}")]
+    InvalidHostname { msg: String, hostname: String },
+    #[error("provided path is not file: {0}")]
+    InvalidFilePath(String),
+    #[error("invalid port number: {0}")]
+    InvalidPort(String),
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    // env
+    #[error(transparent)]
+    Env(#[from] std::env::VarError),
+
+    // internal
+    #[error(transparent)]
+    UtilsError(#[from] crate::utils::Error),
+
+    #[error(transparent)]
+    StorageError(#[from] crate::storage::Error),
+
+    #[error(transparent)]
+    Sql(#[from] crate::sql::Error),
+
+    // other
+    #[error("error msg: {0}")]
+    Other(String),
+    #[error("unknown database error")]
+    Unknown,
+}
+
+pub async fn run(hostname: String, port: u16) -> Result<()> {
     log::info!("Starting CarcinusDB...");
 
     let addr = format!("{hostname}:{port}")
@@ -44,7 +83,7 @@ pub async fn run(hostname: String, port: u16) -> DatabaseResult<()> {
     Ok(())
 }
 
-pub fn handle_connection(conn: Connection) -> DatabaseResult<()> {
+pub fn handle_connection(conn: Connection) -> Result<()> {
     log::info!("Connection from: {}", conn.client_address());
 
     Ok(())
@@ -89,7 +128,7 @@ impl Database {
     /// // this will create "test-db.db" and "test-db-wal.db"
     /// let db = Database::open("./test-db.db");
     /// ```
-    pub fn open(path: impl AsRef<Path>) -> DatabaseResult<Self> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let is_initialized = path.as_ref().exists();
 
         let file = OpenOptions::default()
@@ -163,7 +202,7 @@ impl Database {
         Ok(Self { pager })
     }
 
-    pub fn begin_read<'a>(&'a self) -> DatabaseResult<DatabaseReadTransaction> {
+    pub fn begin_read<'a>(&'a self) -> Result<DatabaseReadTransaction> {
         let wal_tx = self.pager.wal.begin_read_tx()?;
 
         Ok(DatabaseReadTransaction {
@@ -172,7 +211,7 @@ impl Database {
         })
     }
 
-    pub fn begin_write<'a>(&'a self) -> DatabaseResult<DatabaseWriteTransaction<'a>> {
+    pub fn begin_write<'a>(&'a self) -> Result<DatabaseWriteTransaction<'a>> {
         let wal_tx = self.pager.wal.begin_write_tx()?;
 
         Ok(DatabaseWriteTransaction {
@@ -193,7 +232,7 @@ impl DatabaseReadTransaction {
     }
 
     #[must_use]
-    pub fn commit(self) -> DatabaseResult<()> {
+    pub fn commit(self) -> Result<()> {
         Ok(())
     }
 }
@@ -217,7 +256,7 @@ impl<'tx> DatabaseWriteTransaction<'tx> {
 
     /// Flushes dirty pages into WAL and marks them as clean. Might run checkpoint.
     #[must_use]
-    pub fn commit(self) -> DatabaseResult<()> {
+    pub fn commit(self) -> Result<()> {
         let mut wal_tx = Rc::into_inner(self.wal_tx)
             .expect("Something is still using this transaction")
             .into_inner();

@@ -1,5 +1,4 @@
 pub mod database;
-pub mod error;
 pub mod os;
 pub mod query;
 pub mod sql;

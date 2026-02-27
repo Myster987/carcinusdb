@@ -1,7 +1,6 @@
 use std::env;
 
 mod database;
-mod error;
 mod os;
 mod query;
 mod sql;
