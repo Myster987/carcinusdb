@@ -40,11 +40,23 @@ pub struct IndexMetadata {
     pub unique: bool,
 }
 
+impl IndexMetadata {
+    pub fn index_of(&self, column: &str) -> Option<usize> {
+        self.schema.index_of(column)
+    }
+}
+
 pub struct TableMetadata {
     pub root: PageNumber,
     pub name: String,
     pub schema: Schema,
     pub indexes: Vec<IndexMetadata>,
+}
+
+impl TableMetadata {
+    pub fn index_of(&self, column: &str) -> Option<usize> {
+        self.schema.index_of(column)
+    }
 }
 
 pub struct Schema {
@@ -65,6 +77,10 @@ impl Schema {
 
     pub fn len(&self) -> usize {
         self.columns.len()
+    }
+
+    pub fn column_names(&self) -> Vec<String> {
+        self.columns.iter().map(|col| col.name.to_owned()).collect()
     }
 
     pub fn index_of(&self, column: &str) -> Option<usize> {
