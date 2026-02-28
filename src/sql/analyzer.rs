@@ -6,7 +6,7 @@ use crate::{
     database::CARCINUSDB_MASTER_TABLE,
     sql::{
         parser::statement::{Constrains, Create, Statement},
-        schema::Catalog,
+        schema::{Catalog, ROW_ID_COLUMN},
     },
 };
 
@@ -21,21 +21,22 @@ pub enum Error {
     MasterTableModification,
 
     // create
-    // - table
-    #[error("table {0} already exists. use different name or delete existing one.")]
+    #[error("table \"{0}\" already exists. use different name or delete existing one.")]
     TableAlreadyExists(String),
-    #[error("table can't containt duplicated column names.")]
-    TableContainsDuplicateNames,
+    #[error("duplicated column names. {reason}")]
+    ContainsDuplicateNames { reason: String },
     #[error("table contains multiple primary keys (support not planed).")]
     MultiplePrimaryKeys,
-    #[error("table {0} not fou")]
+    #[error("table \"{0}\" not found")]
     TableNotFound(String),
-
-    // - index
+    #[error("table contains {expected} columns, but attempted to insert {got}")]
+    ColumnCountMismatch { expected: usize, got: usize },
     #[error("index not marked as unique (not supported yet)")]
     UniqueIndexNotSupported,
-    #[error("index {0} already exists. use different name or delete existing one.")]
+    #[error("index \"{0}\" already exists. use different name or delete existing one.")]
     IndexAlreadyExists(String),
+    #[error("attempted to use column \"{0}\", that doesn't exist.")]
+    ColumnNotFound(String),
 
     // schema
     #[error(transparent)]
@@ -54,7 +55,9 @@ pub fn analyze(statement: &Statement, catalog: &mut Catalog) -> Result<()> {
 
             for col in columns {
                 if !duplicates.insert(&col.name) {
-                    return Err(Error::TableContainsDuplicateNames);
+                    return Err(Error::ContainsDuplicateNames {
+                        reason: "table can't contain duplicated names.".to_string(),
+                    });
                 }
 
                 if col.constrains.contains(&Constrains::PrimaryKey) {
@@ -78,6 +81,15 @@ pub fn analyze(statement: &Statement, catalog: &mut Catalog) -> Result<()> {
 
             let table_metadata = catalog.get_table(table)?;
 
+            if !table_metadata
+                .schema
+                .column_names()
+                .iter()
+                .any(|col| col == column)
+            {
+                return Err(Error::ColumnNotFound(column.to_owned()));
+            }
+
             if table_metadata
                 .indexes
                 .iter()
@@ -98,7 +110,39 @@ pub fn analyze(statement: &Statement, catalog: &mut Catalog) -> Result<()> {
                 return Err(Error::MasterTableModification);
             }
 
-            let columns = columns.as_slice();
+            let mut columns = columns.as_slice();
+
+            let table_column_names;
+
+            if columns.is_empty() {
+                table_column_names = table_metadata.schema.column_names();
+                columns = table_column_names.as_slice();
+                if columns[0] == ROW_ID_COLUMN {
+                    columns = &table_column_names[1..];
+                }
+            }
+
+            let mut duplicates = HashSet::new();
+
+            for col in columns {
+                if table_metadata.index_of(col).is_none() {
+                    return Err(Error::ColumnNotFound(col.to_owned()));
+                }
+                if !duplicates.insert(col) {
+                    return Err(Error::D);
+                }
+            }
+
+            let column_mismatch = values.iter().position(|v| v.len() != columns.len());
+
+            if let Some(bad_len) = column_mismatch {
+                return Err(Error::ColumnCountMismatch {
+                    expected: columns.len(),
+                    got: bad_len,
+                });
+            }
+
+            // if columns.len() != v
         }
         _ => todo!(),
     }
