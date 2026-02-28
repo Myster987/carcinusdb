@@ -208,9 +208,9 @@ impl Display for UnaryOperator {
 #[derive(Debug)]
 pub enum DataType {
     Int,
-    UnsignedInt,
-    BigInt,
-    UnsignedBig,
+    // UnsignedInt,
+    // BigInt,
+    // UnsignedBig,
     Boolean,
     VarChar(usize),
 }
@@ -219,9 +219,9 @@ impl Display for DataType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Int => f.write_str("INT"),
-            Self::UnsignedInt => f.write_str("INT UNSIGNED"),
-            Self::BigInt => f.write_str("BIGINT"),
-            Self::UnsignedBig => f.write_str("BIGINT UNSIGNED"),
+            // Self::UnsignedInt => f.write_str("INT UNSIGNED"),
+            // Self::BigInt => f.write_str("BIGINT"),
+            // Self::UnsignedBig => f.write_str("BIGINT UNSIGNED"),
             Self::Boolean => f.write_str("BOOL"),
             Self::VarChar(len) => write!(f, "VARCHAR({len})"),
         }

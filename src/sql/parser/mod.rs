@@ -348,18 +348,18 @@ impl<'a> Parser<'a> {
     fn parse_data_type(&mut self) -> sql::Result<DataType> {
         match self.next_keyword()? {
             Keyword::Int => Ok(DataType::Int),
-            Keyword::BigInt => Ok(DataType::BigInt),
-            Keyword::Unsigned => match self.next_keyword()? {
-                Keyword::Int => Ok(DataType::UnsignedInt),
-                Keyword::BigInt => Ok(DataType::UnsignedBig),
-                bad => Err(sql::Error::ExpectedOneOf {
-                    expected: vec![
-                        Token::Keyword(Keyword::Int),
-                        Token::Keyword(Keyword::BigInt),
-                    ],
-                    found: Token::Keyword(bad),
-                }),
-            },
+            // Keyword::BigInt => Ok(DataType::BigInt),
+            // Keyword::Unsigned => match self.next_keyword()? {
+            //     Keyword::Int => Ok(DataType::UnsignedInt),
+            //     Keyword::BigInt => Ok(DataType::UnsignedBig),
+            //     bad => Err(sql::Error::ExpectedOneOf {
+            //         expected: vec![
+            //             Token::Keyword(Keyword::Int),
+            //             Token::Keyword(Keyword::BigInt),
+            //         ],
+            //         found: Token::Keyword(bad),
+            //     }),
+            // },
             Keyword::Bool => Ok(DataType::Boolean),
             Keyword::Varchar => {
                 self.expect_token(Token::LeftParen)?;
