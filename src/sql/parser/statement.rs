@@ -212,7 +212,8 @@ pub enum DataType {
     // BigInt,
     // UnsignedBig,
     Boolean,
-    VarChar(usize),
+    // VarChar(usize),
+    Text,
 }
 
 impl Display for DataType {
@@ -223,7 +224,8 @@ impl Display for DataType {
             // Self::BigInt => f.write_str("BIGINT"),
             // Self::UnsignedBig => f.write_str("BIGINT UNSIGNED"),
             Self::Boolean => f.write_str("BOOL"),
-            Self::VarChar(len) => write!(f, "VARCHAR({len})"),
+            // Self::VarChar(len) => write!(f, "VARCHAR({len})"),
+            Self::Text => f.write_str("TEXT"),
         }
     }
 }

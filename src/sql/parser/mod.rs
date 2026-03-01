@@ -361,16 +361,17 @@ impl<'a> Parser<'a> {
             //     }),
             // },
             Keyword::Bool => Ok(DataType::Boolean),
-            Keyword::Varchar => {
-                self.expect_token(Token::LeftParen)?;
-                let length = match self.parse_expression()? {
-                    Expression::Value(Value::Int(val)) => val as usize,
-                    _ => Err(sql::Error::InvalidQuery(self.position))?,
-                };
-                self.expect_token(Token::RightParen)?;
+            // Keyword::Varchar => {
+            //     self.expect_token(Token::LeftParen)?;
+            //     let length = match self.parse_expression()? {
+            //         Expression::Value(Value::Int(val)) => val as usize,
+            //         _ => Err(sql::Error::InvalidQuery(self.position))?,
+            //     };
+            //     self.expect_token(Token::RightParen)?;
 
-                Ok(DataType::VarChar(length))
-            }
+            //     Ok(DataType::VarChar(length))
+            // }
+            Keyword::Text => Ok(DataType::Text),
             _ => Err(sql::Error::InvalidQuery(self.position)),
         }
     }
