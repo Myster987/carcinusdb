@@ -689,7 +689,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         match search_result {
             SearchResult::Found { page: _, slot } => {
                 if options.is_replace() {
-                    self.try_insert_into_leaf(slot, entry, true)?;
+                    self.try_insert_into_leaf(slot, entry, true, true)?;
 
                     Ok(record)
                 } else {
@@ -697,9 +697,49 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 }
             }
             SearchResult::NotFound { page: _, slot } => {
-                self.try_insert_into_leaf(slot, entry, false)?;
+                self.try_insert_into_leaf(slot, entry, false, true)?;
 
                 Ok(record)
+            }
+        }
+    }
+
+    pub fn insert_seqence(
+        &mut self,
+        entries: Vec<BTreeKey<'_>>,
+        options: InsertOptions,
+    ) -> storage::Result<Option<Vec<Record<'static>>>> {
+        assert!(
+            entries.len() > 0,
+            "caller should ensure that entires are present"
+        );
+
+        let first_entry = entries.first().unwrap();
+
+        let search_result = self.seek(&first_entry)?;
+
+        match search_result {
+            SearchResult::Found { page, slot } => {
+                if options.is_replace() {
+                    todo!()
+                } else {
+                    Err(storage::Error::DuplicateKey)
+                }
+            }
+            SearchResult::NotFound { page, slot } => {
+                if !options.is_replace() {
+                    // check for duplicates
+                    let leaf_page = self.pager.read_page(self.tx.borrow().deref(), page)?;
+                    let guard = leaf_page.lock_shared();
+
+                    for entry in &entries[1..] {
+                        if self.binary_search(&*guard, entry)?.is_ok() {
+                            return Err(storage::Error::DuplicateKey);
+                        }
+                    }
+                }
+
+                todo!()
             }
         }
     }
@@ -712,6 +752,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         slot_number: SlotNumber,
         entry: BTreeKey<'_>,
         replace: bool,
+        should_balance: bool,
     ) -> storage::Result<()> {
         let page = self
             .pager
@@ -729,7 +770,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 guard.insert_cell(slot_number, cell);
             }
 
-            if guard.is_overflow() {
+            if should_balance && guard.is_overflow() {
                 drop(guard);
                 self.balance()?;
             }
