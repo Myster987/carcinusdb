@@ -60,7 +60,7 @@ impl TableMetadata {
 }
 
 pub struct Schema {
-    columns: Vec<Column>,
+    pub columns: Vec<Column>,
     index: HashMap<String, usize>,
 }
 
@@ -127,10 +127,10 @@ impl Schema {
 }
 
 pub struct Column {
-    name: String,
-    data_type: ValueType,
-    properties: ColumnProperties,
-    default: Option<Value>,
+    pub name: String,
+    pub data_type: ValueType,
+    pub properties: ColumnProperties,
+    pub default: Option<Value>,
 }
 
 impl Column {
