@@ -711,37 +711,36 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     ) -> storage::Result<Option<Vec<Record<'static>>>> {
         assert!(
             entries.len() > 0,
-            "caller should ensure that entires are present"
+            "caller should ensure that entires are present."
         );
 
         let first_entry = entries.first().unwrap();
 
-        let search_result = self.seek(&first_entry)?;
+        self.seek(&first_entry)?;
 
-        match search_result {
-            SearchResult::Found { page, slot } => {
-                if options.is_replace() {
-                    todo!()
-                } else {
-                    Err(storage::Error::DuplicateKey)
+        let records = if options.is_returning() {
+            entries
+                .iter()
+                .map(|e| e.get_record().map(|r| r.to_owned()))
+                .collect()
+        } else {
+            None
+        };
+
+        for entry in entries {
+            let slot = self.find_insertion_point(&entry)?;
+
+            match slot {
+                Ok(existing_slot) if options.is_replace() => {
+                    self.try_insert_into_leaf(existing_slot, entry, true, true)?;
                 }
-            }
-            SearchResult::NotFound { page, slot } => {
-                if !options.is_replace() {
-                    // check for duplicates
-                    let leaf_page = self.pager.read_page(self.tx.borrow().deref(), page)?;
-                    let guard = leaf_page.lock_shared();
-
-                    for entry in &entries[1..] {
-                        if self.binary_search(&*guard, entry)?.is_ok() {
-                            return Err(storage::Error::DuplicateKey);
-                        }
-                    }
+                Ok(_) => return Err(storage::Error::DuplicateKey),
+                Err(insert_slot) => {
+                    self.try_insert_into_leaf(insert_slot, entry, false, true)?;
                 }
-
-                todo!()
             }
         }
+        Ok(records)
     }
 
     /// Attempts to insert entry into leaf page at given slot number. This
@@ -780,6 +779,39 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             .mark_dirty_auto_flush(self.tx.borrow_mut().deref_mut(), &page)?;
 
         Ok(())
+    }
+
+    /// Finds the correct slot for entry on current leaf or following right
+    /// siblings. Does a full seek (rebuilding path_stack) when crossing a
+    /// page boundary, so balance() always has correct parent stack.
+    fn find_insertion_point(
+        &mut self,
+        entry: &BTreeKey<'_>,
+    ) -> storage::Result<Result<SlotNumber, SlotNumber>> {
+        loop {
+            let page = self
+                .pager
+                .read_page(self.tx.borrow().deref(), self.current_page)?;
+            let guard = page.lock_shared();
+
+            if !guard.is_leaf() {
+                drop(guard);
+                return match self.seek(entry)? {
+                    SearchResult::Found { slot, .. } => Ok(Ok(slot)),
+                    SearchResult::NotFound { slot, .. } => Ok(Err(slot)),
+                };
+            }
+
+            if self.key_in_range(&guard, entry)? {
+                return self.binary_search(&guard, entry);
+            }
+
+            drop(guard);
+            return match self.seek(entry)? {
+                SearchResult::Found { slot, .. } => Ok(Ok(slot)),
+                SearchResult::NotFound { slot, .. } => Ok(Err(slot)),
+            };
+        }
     }
 
     pub fn delete(
@@ -1129,12 +1161,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     )?;
                 }
 
-                // sort pages to optimize for sequential io.
-                BinaryHeap::from_iter(siblings.iter().map(|s| Reverse(s.page)))
-                    .iter()
-                    .enumerate()
-                    .for_each(|(i, Reverse(page))| siblings[i].page = *page);
-
                 for (i, sibling) in siblings.iter().enumerate() {
                     let page = self
                         .pager
@@ -1264,12 +1290,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     self.pager
                         .free_page(self.tx.borrow_mut().deref_mut(), freed.page)?;
                 }
-
-                // sort pages to optimize for sequential io.
-                BinaryHeap::from_iter(siblings.iter().map(|s| Reverse(s.page)))
-                    .iter()
-                    .enumerate()
-                    .for_each(|(i, Reverse(page))| siblings[i].page = *page);
 
                 let last_sibling = siblings.last().unwrap();
                 parent_guard.set_child(divider_index, last_sibling.page);
