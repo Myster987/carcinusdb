@@ -5,8 +5,8 @@ use thiserror::Error;
 use crate::{
     database::CARCINUSDB_MASTER_TABLE,
     sql::{
-        parser::statement::{Constrains, Create, Statement},
-        schema::{Catalog, ROW_ID_COLUMN},
+        parser::statement::{Constrains, Create, Expression, Statement},
+        schema::{Catalog, ROW_ID_COLUMN, TableMetadata},
     },
 };
 
@@ -37,6 +37,8 @@ pub enum Error {
     IndexAlreadyExists(String),
     #[error("attempted to use column \"{0}\", that doesn't exist.")]
     ColumnNotFound(String),
+    #[error("attempted to modify hidden \"row_id\" column.")]
+    RowIdAssignment,
 
     // schema
     #[error(transparent)]
@@ -58,6 +60,10 @@ pub fn analyze(statement: &Statement, catalog: &mut Catalog) -> Result<()> {
                     return Err(Error::ContainsDuplicateNames {
                         reason: "table can't contain duplicated names.".to_string(),
                     });
+                }
+
+                if col.name == ROW_ID_COLUMN {
+                    return Err(Error::RowIdAssignment);
                 }
 
                 if col.constrains.contains(&Constrains::PrimaryKey) {
@@ -129,7 +135,10 @@ pub fn analyze(statement: &Statement, catalog: &mut Catalog) -> Result<()> {
                     return Err(Error::ColumnNotFound(col.to_owned()));
                 }
                 if !duplicates.insert(col) {
-                    return Err(Error::D);
+                    return Err(Error::ContainsDuplicateNames {
+                        reason: "attempted to insert while selecting duplicated columns"
+                            .to_string(),
+                    });
                 }
             }
 
@@ -142,6 +151,19 @@ pub fn analyze(statement: &Statement, catalog: &mut Catalog) -> Result<()> {
                 });
             }
 
+            let table_len = if table_metadata.schema.columns[0].name == ROW_ID_COLUMN {
+                table_metadata.schema.len() - 1
+            } else {
+                table_metadata.schema.len()
+            };
+
+            if table_len != columns.len() {
+                return Err(Error::ColumnCountMismatch {
+                    expected: table_len,
+                    got: columns.len(),
+                });
+            }
+
             // if columns.len() != v
         }
         _ => todo!(),
@@ -149,3 +171,22 @@ pub fn analyze(statement: &Statement, catalog: &mut Catalog) -> Result<()> {
 
     Ok(())
 }
+
+// fn analyze_assignment(
+//     table: &TableMetadata,
+//     column: &str,
+//     value: &Expression,
+//     allow_identifier: bool,
+// ) -> Result<()> {
+//     if column == ROW_ID_COLUMN {
+//         return Err(Error::RowIdAssignment);
+//     }
+
+//     let index = table
+//         .index_of(column)
+//         .ok_or(Error::ColumnNotFound(column.to_owned()))?;
+
+//     let data_type = table.schema.columns[index].data_type;
+
+//     let expected_data_type =
+// }
