@@ -372,6 +372,7 @@ impl<'a> Parser<'a> {
             //     Ok(DataType::VarChar(length))
             // }
             Keyword::Text => Ok(DataType::Text),
+            Keyword::Blob => Ok(DataType::Blob),
             _ => Err(sql::Error::InvalidQuery(self.position)),
         }
     }
