@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn test_insert() -> anyhow::Result<()> {
-        simple_logger::init_with_level(log::Level::Info)?;
+        simple_logger::init_with_level(log::Level::Debug)?;
 
         let db = Database::open(TEST_DB_NAME)?;
 
@@ -314,53 +314,6 @@ mod tests {
                 cursor.insert(BTreeKey::new_table_key(i, Some(record)), options)?;
             }
         }
-
-        tx.commit()?;
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_seqential_insert() -> anyhow::Result<()> {
-        simple_logger::init_with_level(log::Level::Info)?;
-
-        let db = Database::open("test-db-seq.db")?;
-
-        let tx = db.begin_write()?;
-
-        {
-            let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
-
-            let options = InsertOptionsBuilder::new().build();
-
-            let start = KEYS_START;
-            let end = KEYS_END;
-            let batch_size = 100;
-
-            for chunk_start in (start..end).step_by(batch_size) {
-                let chunk_end = (chunk_start + batch_size as i64).min(end);
-
-                let entries = (chunk_start..chunk_end)
-                    .map(|i| {
-                        let mut record = RecordBuilder::new();
-
-                        record.add(Value::Null);
-                        record.add(Value::Int(i));
-                        record.add(Value::Text(Text::new(format!(
-                            "Maciek Kowalski {i} i Antoni Kowalski {i}"
-                        ))));
-
-                        let record = record.serialize_to_record();
-
-                        BTreeKey::new_table_key(i, Some(record))
-                    })
-                    .collect();
-
-                cursor.insert_seqence(entries, options)?;
-            }
-        }
-
-        log::info!("Batch writes completed!");
 
         tx.commit()?;
 

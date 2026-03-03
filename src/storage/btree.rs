@@ -689,7 +689,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         match search_result {
             SearchResult::Found { page: _, slot } => {
                 if options.is_replace() {
-                    self.try_insert_into_leaf(slot, entry, true, true)?;
+                    self.try_insert_into_leaf(slot, entry, true)?;
 
                     Ok(record)
                 } else {
@@ -697,50 +697,11 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 }
             }
             SearchResult::NotFound { page: _, slot } => {
-                self.try_insert_into_leaf(slot, entry, false, true)?;
+                self.try_insert_into_leaf(slot, entry, false)?;
 
                 Ok(record)
             }
         }
-    }
-
-    pub fn insert_seqence(
-        &mut self,
-        entries: Vec<BTreeKey<'_>>,
-        options: InsertOptions,
-    ) -> storage::Result<Option<Vec<Record<'static>>>> {
-        assert!(
-            entries.len() > 0,
-            "caller should ensure that entires are present."
-        );
-
-        let first_entry = entries.first().unwrap();
-
-        self.seek(&first_entry)?;
-
-        let records = if options.is_returning() {
-            entries
-                .iter()
-                .map(|e| e.get_record().map(|r| r.to_owned()))
-                .collect()
-        } else {
-            None
-        };
-
-        for entry in entries {
-            let slot = self.find_insertion_point(&entry)?;
-
-            match slot {
-                Ok(existing_slot) if options.is_replace() => {
-                    self.try_insert_into_leaf(existing_slot, entry, true, true)?;
-                }
-                Ok(_) => return Err(storage::Error::DuplicateKey),
-                Err(insert_slot) => {
-                    self.try_insert_into_leaf(insert_slot, entry, false, true)?;
-                }
-            }
-        }
-        Ok(records)
     }
 
     /// Attempts to insert entry into leaf page at given slot number. This
@@ -751,7 +712,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         slot_number: SlotNumber,
         entry: BTreeKey<'_>,
         replace: bool,
-        should_balance: bool,
     ) -> storage::Result<()> {
         let page = self
             .pager
@@ -769,7 +729,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 guard.insert_cell(slot_number, cell);
             }
 
-            if should_balance && guard.is_overflow() {
+            if guard.is_overflow() {
                 drop(guard);
                 self.balance()?;
             }
@@ -779,39 +739,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             .mark_dirty_auto_flush(self.tx.borrow_mut().deref_mut(), &page)?;
 
         Ok(())
-    }
-
-    /// Finds the correct slot for entry on current leaf or following right
-    /// siblings. Does a full seek (rebuilding path_stack) when crossing a
-    /// page boundary, so balance() always has correct parent stack.
-    fn find_insertion_point(
-        &mut self,
-        entry: &BTreeKey<'_>,
-    ) -> storage::Result<Result<SlotNumber, SlotNumber>> {
-        loop {
-            let page = self
-                .pager
-                .read_page(self.tx.borrow().deref(), self.current_page)?;
-            let guard = page.lock_shared();
-
-            if !guard.is_leaf() {
-                drop(guard);
-                return match self.seek(entry)? {
-                    SearchResult::Found { slot, .. } => Ok(Ok(slot)),
-                    SearchResult::NotFound { slot, .. } => Ok(Err(slot)),
-                };
-            }
-
-            if self.key_in_range(&guard, entry)? {
-                return self.binary_search(&guard, entry);
-            }
-
-            drop(guard);
-            return match self.seek(entry)? {
-                SearchResult::Found { slot, .. } => Ok(Ok(slot)),
-                SearchResult::NotFound { slot, .. } => Ok(Err(slot)),
-            };
-        }
     }
 
     pub fn delete(
