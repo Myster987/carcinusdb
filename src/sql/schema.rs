@@ -75,6 +75,10 @@ impl Schema {
         Self { columns, index }
     }
 
+    pub fn empty() -> Self {
+        Self::new(vec![])
+    }
+
     pub fn len(&self) -> usize {
         self.columns.len()
     }
