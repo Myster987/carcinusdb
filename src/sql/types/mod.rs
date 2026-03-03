@@ -13,7 +13,7 @@ pub mod serial;
 pub mod text;
 
 #[repr(u8)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum ValueType {
     Null,
     Bool,

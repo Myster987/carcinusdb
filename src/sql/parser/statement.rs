@@ -3,7 +3,7 @@ use std::fmt::{Display, Write};
 use crate::sql::types::Value;
 
 /// SQL statement.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Statement {
     Select {
         columns: Vec<Expression>,
@@ -117,7 +117,7 @@ impl Display for Statement {
 }
 
 /// Used in select, insert, update, delete.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Expression {
     Identifier(String),
 
@@ -154,7 +154,7 @@ impl Display for Expression {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum BinaryOperator {
     Eq,
     Neq,
@@ -189,7 +189,7 @@ impl Display for BinaryOperator {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum UnaryOperator {
     Plus,
     Minus,
@@ -205,7 +205,7 @@ impl Display for UnaryOperator {
 }
 
 /// SQL data types.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum DataType {
     Int,
     // UnsignedInt,
@@ -214,6 +214,7 @@ pub enum DataType {
     Boolean,
     // VarChar(usize),
     Text,
+    Blob,
 }
 
 impl Display for DataType {
@@ -226,11 +227,12 @@ impl Display for DataType {
             Self::Boolean => f.write_str("BOOL"),
             // Self::VarChar(len) => write!(f, "VARCHAR({len})"),
             Self::Text => f.write_str("TEXT"),
+            Self::Blob => f.write_str("BLOB"),
         }
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Constrains {
     PrimaryKey,
     Unique,
@@ -248,7 +250,7 @@ impl Display for Constrains {
 }
 
 /// UPDATE helper.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Assignment {
     pub identifier: String,
     pub value: Expression,
@@ -261,7 +263,7 @@ impl Display for Assignment {
 }
 
 /// SQL column type.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Column {
     pub name: String,
     pub data_type: DataType,
@@ -306,7 +308,7 @@ impl Display for Column {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Create {
     Database(String),
     Table {
@@ -342,7 +344,7 @@ impl Display for Create {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Drop {
     Database(String),
     Table(String),
