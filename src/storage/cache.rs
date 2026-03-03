@@ -63,6 +63,15 @@ impl<S: BuildHasher> ShardedClockCache<S> {
     pub fn insert(&self, key: PageNumber, page: Arc<MemPage>) -> Result<()> {
         self.get_shard(&key).lock().try_insert(key, page)
     }
+
+    pub fn drain_overflow(&self) -> Vec<(PageNumber, Arc<MemPage>)> {
+        let mut result = Vec::new();
+        for shard in &self.shards {
+            let mut guard = shard.lock();
+            result.extend(guard.dirty_overflow.drain());
+        }
+        result
+    }
 }
 
 struct ClockEntry {
@@ -84,6 +93,7 @@ pub struct ClockCache {
     pages: Vec<Option<ClockEntry>>,
     /// key: page number, value: index in clock.
     map: HashMap<PageNumber, usize>,
+    dirty_overflow: HashMap<PageNumber, Arc<MemPage>>,
     /// Current clock hand position.
     hand: usize,
 }
@@ -98,6 +108,7 @@ impl ClockCache {
             capacity,
             pages,
             map: HashMap::with_capacity(capacity),
+            dirty_overflow: HashMap::new(),
             hand: 0,
         }
     }
@@ -108,24 +119,44 @@ impl ClockCache {
             self.pages[*index] = Some(ClockEntry::new(page));
             return Ok(());
         }
-        // free spot
-        let insert_at = self.make_room()?;
 
-        // replace old entry
-        let old_one = self.pages[insert_at].replace(ClockEntry::new(page));
-
-        // delete old key
-        if let Some(old_entry) = old_one {
-            self.map.remove(&old_entry.page.id());
+        // update overflow in place
+        if self.dirty_overflow.contains_key(&key) {
+            self.dirty_overflow.insert(key, page);
+            return Ok(());
         }
 
-        // insert new key
-        self.map.insert(key, insert_at);
+        // free spot or insert into overflow
+        match self.make_room() {
+            Ok(insert_at) => {
+                // replace old entry
+                let old_one = self.pages[insert_at].replace(ClockEntry::new(page));
+
+                // delete old key
+                if let Some(old_entry) = old_one {
+                    self.map.remove(&old_entry.page.id());
+                }
+
+                // insert new key
+                self.map.insert(key, insert_at);
+            }
+            Err(Error::AllPagesPinned) => {
+                if page.is_dirty() {
+                    self.dirty_overflow.insert(key, page);
+                } else {
+                    return Err(Error::AllPagesPinned);
+                }
+            }
+        }
 
         Ok(())
     }
 
     pub fn get(&mut self, key: &PageNumber) -> Option<Arc<MemPage>> {
+        if let Some(page) = self.dirty_overflow.get(key) {
+            return Some(page.clone());
+        }
+
         if let Some(index) = self.map.get(key) {
             let entry = self.pages[*index].as_mut().unwrap();
 
@@ -148,7 +179,9 @@ impl ClockCache {
 
         loop {
             if let Some(entry) = &mut self.pages[current_position] {
-                if entry.page.pin_count() == 0 || !entry.page.is_dirty() {
+                let pinned = entry.page.pin_count() > 0;
+
+                if !pinned && !entry.page.is_dirty() {
                     if entry.usage_count == 0 {
                         self.hand = (current_position + 1) % self.capacity;
                         return Ok(current_position);
@@ -162,7 +195,7 @@ impl ClockCache {
                             1
                         },
                     );
-                } else {
+                } else if pinned {
                     pinned_count += 1;
                 }
             } else {

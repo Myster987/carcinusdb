@@ -1,8 +1,8 @@
 use std::{
     borrow::Cow,
     cell::RefCell,
-    cmp::{Ordering, Reverse, min},
-    collections::{BinaryHeap, VecDeque},
+    cmp::{Ordering, min},
+    collections::VecDeque,
     ops::{Deref, DerefMut},
     rc::Rc,
     sync::Arc,

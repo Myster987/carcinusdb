@@ -736,8 +736,6 @@ impl Pager {
     ) -> storage::Result<()> {
         let dirty_page_numbers: Vec<_> = self.dirty_pages.iter().map(|pn| *pn).collect();
 
-        log::trace!("Flushing dirty pages: {:?}", dirty_page_numbers);
-
         let dirty_pages: Vec<_> = dirty_page_numbers
             .iter()
             .map(|pn| self.read_page(tx, *pn).unwrap())
@@ -759,6 +757,10 @@ impl Pager {
         dirty_page_numbers.iter().for_each(|pn| {
             self.dirty_pages.remove(&*pn);
         });
+
+        for (key, page) in self.page_cache.drain_overflow() {
+            self.page_cache.insert(key, page)?;
+        }
 
         Ok(())
     }
