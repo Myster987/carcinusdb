@@ -49,7 +49,7 @@ pub enum Error {
 
     // types
     #[error(transparent)]
-    Type(#[from] TypeError),
+    TypeError(#[from] TypeError),
 }
 
 #[derive(Debug, Error)]
@@ -241,7 +241,7 @@ fn analyze_expression(schema: &Schema, expr: &Expression) -> Result<ValueType> {
 
         Expression::UnaryOperation { operator, expr } => {
             if !matches!(analyze_expression(schema, expr)?, ValueType::Int) {
-                return Err(Error::Type(TypeError::ExpectedType {
+                return Err(Error::TypeError(TypeError::ExpectedType {
                     expected: ValueType::Int,
                     found: *expr.clone(),
                 }));
@@ -258,7 +258,7 @@ fn analyze_expression(schema: &Schema, expr: &Expression) -> Result<ValueType> {
             let right_data_type = analyze_expression(schema, rigth)?;
 
             if left_data_type != right_data_type {
-                return Err(Error::Type(TypeError::CannotApplyBinary {
+                return Err(Error::TypeError(TypeError::CannotApplyBinary {
                     left: *left.clone(),
                     operator: *operator,
                     right: *rigth.clone(),
@@ -287,7 +287,7 @@ fn analyze_expression(schema: &Schema, expr: &Expression) -> Result<ValueType> {
                 }
 
                 _ => {
-                    return Err(Error::Type(TypeError::CannotApplyBinary {
+                    return Err(Error::TypeError(TypeError::CannotApplyBinary {
                         left: *left.clone(),
                         operator: *operator,
                         right: *rigth.clone(),
@@ -299,7 +299,7 @@ fn analyze_expression(schema: &Schema, expr: &Expression) -> Result<ValueType> {
         Expression::Nested(expr) => analyze_expression(schema, expr)?,
 
         Expression::Wildcard => {
-            return Err(Error::Type(TypeError::UnexpectedExpression {
+            return Err(Error::TypeError(TypeError::UnexpectedExpression {
                 expr: Expression::Wildcard,
             }));
         }
