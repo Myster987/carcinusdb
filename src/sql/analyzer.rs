@@ -1,12 +1,15 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, ops::Deref};
 
 use thiserror::Error;
 
 use crate::{
     database::CARCINUSDB_MASTER_TABLE,
     sql::{
-        parser::statement::{Constrains, Create, Expression, Statement},
-        schema::{Catalog, ROW_ID_COLUMN, TableMetadata},
+        parser::statement::{
+            BinaryOperator, Constrains, Create, DataType, Expression, Statement, UnaryOperator,
+        },
+        schema::{Catalog, ROW_ID_COLUMN, Schema, TableMetadata},
+        types::{Value, ValueType},
     },
 };
 
@@ -43,6 +46,31 @@ pub enum Error {
     // schema
     #[error(transparent)]
     Schema(#[from] crate::sql::schema::Error),
+
+    // types
+    #[error(transparent)]
+    Type(#[from] TypeError),
+}
+
+#[derive(Debug, Error)]
+pub enum TypeError {
+    // CannotApplyUnary {
+    //     operator: UnaryOperator,
+    //     value: Value,
+    // }
+    #[error("cannot apply this binary operator: {left} {operator} {right}")]
+    CannotApplyBinary {
+        left: Expression,
+        operator: BinaryOperator,
+        right: Expression,
+    },
+    #[error("expected type: {expected:?}, but found: {found}")]
+    ExpectedType {
+        expected: ValueType,
+        found: Expression,
+    },
+    #[error("unexpected expression: {expr}")]
+    UnexpectedExpression { expr: Expression },
 }
 
 pub fn analyze(statement: &Statement, catalog: &mut Catalog) -> Result<()> {
@@ -164,7 +192,9 @@ pub fn analyze(statement: &Statement, catalog: &mut Catalog) -> Result<()> {
                 });
             }
 
-            // if columns.len() != v
+            for row in values {
+                for (expr, col) in row.iter().zip(columns) {}
+            }
         }
         _ => todo!(),
     }
@@ -172,21 +202,106 @@ pub fn analyze(statement: &Statement, catalog: &mut Catalog) -> Result<()> {
     Ok(())
 }
 
-// fn analyze_assignment(
-//     table: &TableMetadata,
-//     column: &str,
-//     value: &Expression,
-//     allow_identifier: bool,
-// ) -> Result<()> {
-//     if column == ROW_ID_COLUMN {
-//         return Err(Error::RowIdAssignment);
-//     }
+fn analyze_assignment(
+    table: &TableMetadata,
+    column: &str,
+    value: &Expression,
+    allow_identifier: bool,
+) -> Result<()> {
+    if column == ROW_ID_COLUMN {
+        return Err(Error::RowIdAssignment);
+    }
 
-//     let index = table
-//         .index_of(column)
-//         .ok_or(Error::ColumnNotFound(column.to_owned()))?;
+    let index = table
+        .index_of(column)
+        .ok_or(Error::ColumnNotFound(column.to_owned()))?;
 
-//     let data_type = table.schema.columns[index].data_type;
+    let expected_data_type = table.schema.columns[index].data_type;
 
-//     let expected_data_type =
-// }
+    let found_data_type = if allow_identifier {
+        analyze_expression(&table.schema, value)
+    } else {
+        analyze_expression(&Schema::empty(), value)
+    };
+
+    todo!()
+}
+
+fn analyze_expression(schema: &Schema, expr: &Expression) -> Result<ValueType> {
+    Ok(match expr {
+        Expression::Value(val) => val.value_type(),
+
+        Expression::Identifier(ident) => {
+            let index = schema
+                .index_of(ident)
+                .ok_or(Error::ColumnNotFound(ident.to_owned()))?;
+
+            schema.columns[index].data_type
+        }
+
+        Expression::UnaryOperation { operator, expr } => {
+            if !matches!(analyze_expression(schema, expr)?, ValueType::Int) {
+                return Err(Error::Type(TypeError::ExpectedType {
+                    expected: ValueType::Int,
+                    found: *expr.clone(),
+                }));
+            }
+            ValueType::Null
+        }
+
+        Expression::BinaryOperation {
+            left,
+            operator,
+            rigth,
+        } => {
+            let left_data_type = analyze_expression(schema, left)?;
+            let right_data_type = analyze_expression(schema, rigth)?;
+
+            if left_data_type != right_data_type {
+                return Err(Error::Type(TypeError::CannotApplyBinary {
+                    left: *left.clone(),
+                    operator: *operator,
+                    right: *rigth.clone(),
+                }));
+            }
+
+            match operator {
+                BinaryOperator::Eq
+                | BinaryOperator::Neq
+                | BinaryOperator::Lt
+                | BinaryOperator::LtEq
+                | BinaryOperator::Gt
+                | BinaryOperator::GtEq => ValueType::Bool,
+
+                BinaryOperator::And | BinaryOperator::Or if left_data_type == ValueType::Bool => {
+                    ValueType::Bool
+                }
+
+                BinaryOperator::Add
+                | BinaryOperator::Sub
+                | BinaryOperator::Div
+                | BinaryOperator::Mul
+                    if left_data_type == ValueType::Int =>
+                {
+                    ValueType::Int
+                }
+
+                _ => {
+                    return Err(Error::Type(TypeError::CannotApplyBinary {
+                        left: *left.clone(),
+                        operator: *operator,
+                        right: *rigth.clone(),
+                    }));
+                }
+            }
+        }
+
+        Expression::Nested(expr) => analyze_expression(schema, expr)?,
+
+        Expression::Wildcard => {
+            return Err(Error::Type(TypeError::UnexpectedExpression {
+                expr: Expression::Wildcard,
+            }));
+        }
+    })
+}
