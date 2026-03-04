@@ -1,15 +1,13 @@
-use std::{collections::HashSet, ops::Deref};
+use std::collections::HashSet;
 
 use thiserror::Error;
 
 use crate::{
     database::CARCINUSDB_MASTER_TABLE,
     sql::{
-        parser::statement::{
-            BinaryOperator, Constrains, Create, DataType, Expression, Statement, UnaryOperator,
-        },
+        parser::statement::{BinaryOperator, Constrains, Create, Drop, Expression, Statement},
         schema::{Catalog, ROW_ID_COLUMN, Schema, TableMetadata},
-        types::{Value, ValueType},
+        types::ValueType,
     },
 };
 
@@ -193,13 +191,88 @@ pub fn analyze(statement: &Statement, catalog: &mut Catalog) -> Result<()> {
             }
 
             for row in values {
-                for (expr, col) in row.iter().zip(columns) {}
+                for (expr, col) in row.iter().zip(columns) {
+                    analyze_assignment(&table_metadata, col, expr, false)?;
+                }
             }
         }
+
+        Statement::Select {
+            columns,
+            from,
+            r#where,
+            order_by,
+        } => {
+            let table_metadata = catalog.get_table(from)?;
+
+            for expr in columns {
+                if expr != &Expression::Wildcard {
+                    analyze_expression(&table_metadata.schema, expr)?;
+                }
+            }
+
+            analyze_where(&table_metadata.schema, r#where)?;
+
+            for expr in order_by {
+                analyze_expression(&table_metadata.schema, expr)?;
+            }
+        }
+
+        Statement::Delete { from, r#where } => {
+            let table_metadata = catalog.get_table(from)?;
+
+            if from == CARCINUSDB_MASTER_TABLE {
+                return Err(Error::MasterTableModification);
+            }
+
+            analyze_where(&table_metadata.schema, r#where)?;
+        }
+
+        Statement::Update {
+            table,
+            columns,
+            r#where,
+        } => {
+            let table_metadata = catalog.get_table(table)?;
+
+            if table == CARCINUSDB_MASTER_TABLE {
+                return Err(Error::MasterTableModification);
+            }
+
+            for col in columns {
+                analyze_assignment(&table_metadata, &col.identifier, &col.value, true)?;
+            }
+
+            analyze_where(&table_metadata.schema, r#where)?;
+        }
+
+        Statement::Explain(inner) => {
+            analyze(inner, catalog)?;
+        }
+
+        Statement::Drop(Drop::Table(table)) => {
+            catalog.get_table(table)?;
+        }
+
         _ => todo!(),
     }
 
     Ok(())
+}
+
+fn analyze_where(schema: &Schema, r#where: &Option<Expression>) -> Result<()> {
+    let Some(expr) = r#where else {
+        return Ok(());
+    };
+
+    if let ValueType::Bool = analyze_expression(schema, expr)? {
+        return Ok(());
+    }
+
+    Err(Error::TypeError(TypeError::ExpectedType {
+        expected: ValueType::Bool,
+        found: expr.clone(),
+    }))
 }
 
 fn analyze_assignment(
@@ -219,14 +292,22 @@ fn analyze_assignment(
     let expected_data_type = table.schema.columns[index].data_type;
 
     let found_data_type = if allow_identifier {
-        analyze_expression(&table.schema, value)
+        analyze_expression(&table.schema, value)?
     } else {
-        analyze_expression(&Schema::empty(), value)
+        analyze_expression(&Schema::empty(), value)?
     };
 
-    todo!()
+    if expected_data_type != found_data_type {
+        return Err(Error::TypeError(TypeError::ExpectedType {
+            expected: expected_data_type,
+            found: value.clone(),
+        }));
+    }
+
+    Ok(())
 }
 
+/// Evaluates into what given expression results.
 fn analyze_expression(schema: &Schema, expr: &Expression) -> Result<ValueType> {
     Ok(match expr {
         Expression::Value(val) => val.value_type(),
