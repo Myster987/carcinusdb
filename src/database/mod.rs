@@ -5,6 +5,7 @@ use thiserror::Error;
 
 use crate::{
     os::{Open, OpenOptions},
+    sql::schema::Catalog,
     storage::{
         PageNumber,
         btree::BTreeCursor,
@@ -109,6 +110,7 @@ impl MemDatabaseHeader {
 }
 
 pub struct Database {
+    catalog: Arc<Catalog>,
     pager: Arc<Pager>,
 }
 
@@ -194,7 +196,9 @@ impl Database {
             is_initialized,
         )?);
 
-        Ok(Self { pager })
+        let catalog = todo!();
+
+        Ok(Self { pager, catalog })
     }
 
     pub fn begin_read<'a>(&'a self) -> Result<DatabaseReadTransaction> {
