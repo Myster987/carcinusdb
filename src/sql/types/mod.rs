@@ -2,6 +2,7 @@ use std::fmt::Display;
 
 use crate::sql::{
     self,
+    parser::statement::DataType,
     types::{
         serial::{SerialType, SerialTypeKind},
         text::{AnyText, Text, TextKind, TextRef},
@@ -33,6 +34,17 @@ impl From<u8> for ValueType {
             4 => Self::Text,
             5 => Self::Error,
             _ => unreachable!(),
+        }
+    }
+}
+
+impl From<DataType> for ValueType {
+    fn from(value: DataType) -> Self {
+        match value {
+            DataType::Boolean => ValueType::Bool,
+            DataType::Int => ValueType::Int,
+            DataType::Blob => ValueType::Blob,
+            DataType::Text => ValueType::Text,
         }
     }
 }
