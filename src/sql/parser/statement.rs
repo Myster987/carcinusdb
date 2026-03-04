@@ -9,7 +9,7 @@ pub enum Statement {
         columns: Vec<Expression>,
         from: String,
         r#where: Option<Expression>,
-        order_by: Option<Vec<Expression>>,
+        order_by: Vec<Expression>,
     },
     Insert {
         into: String,
@@ -53,7 +53,7 @@ impl Display for Statement {
                     write!(f, " WHERE {where_expression}")?;
                 }
 
-                if let Some(order_by) = order_by {
+                if !order_by.is_empty() {
                     write!(f, " ORDER BY {}", &fmt_join(order_by, ", "))?;
                 }
                 Ok(())

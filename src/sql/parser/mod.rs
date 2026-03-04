@@ -15,6 +15,10 @@ pub mod statement;
 pub mod token;
 pub mod tokenizer;
 
+pub fn parse(sql: &str) -> sql::Result<Statement> {
+    Parser::new(sql)?.parse_statement()
+}
+
 /// Trait to implement all esential statements.
 pub trait StatementParser {
     fn parse_explain(&mut self) -> sql::Result<Statement>;
@@ -429,12 +433,12 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_order_by(&mut self) -> sql::Result<Option<Vec<Expression>>> {
+    fn parse_order_by(&mut self) -> sql::Result<Vec<Expression>> {
         if self.consume_optional_keyword(Keyword::Order) {
             self.expect_keyword(Keyword::By)?;
-            Ok(Some(self.parse_comma_separeted_values()?))
+            Ok(self.parse_comma_separeted_values()?)
         } else {
-            Ok(None)
+            Ok(vec![])
         }
     }
 
