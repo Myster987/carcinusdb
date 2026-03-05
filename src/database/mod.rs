@@ -196,7 +196,17 @@ impl Database {
             is_initialized,
         )?);
 
-        let catalog = todo!();
+        let catalog = {
+            let tx = pager.wal.begin_read_tx()?;
+            let cursor = BTreeCursor::new(
+                Rc::new(RefCell::new(tx)),
+                &pager,
+                CARCINUSDB_MASTER_TABLE_ROOT,
+                1,
+            );
+
+            Arc::new(Catalog::from_cursor(cursor)?)
+        };
 
         Ok(Self { pager, catalog })
     }

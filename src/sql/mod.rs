@@ -1,6 +1,9 @@
 use thiserror::Error;
 
-use crate::sql::parser::{Parser, statement::Statement, token::Token};
+use crate::sql::{
+    analyzer::analyze,
+    parser::{Parser, statement::Statement, token::Token},
+};
 
 pub mod analyzer;
 pub mod executor;
@@ -11,6 +14,8 @@ pub mod types;
 
 pub fn pipeline(input: &str) -> Result<Statement> {
     let statement = Parser::new(input)?.parse_statement()?;
+
+    // analyze(&statement, )
 
     Ok(statement)
 }
