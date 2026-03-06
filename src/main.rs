@@ -2,7 +2,6 @@ use std::env;
 
 mod database;
 mod os;
-mod query;
 mod sql;
 mod storage;
 mod tcp;
