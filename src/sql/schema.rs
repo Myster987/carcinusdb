@@ -28,6 +28,7 @@ pub enum Error {
     TableNotFound(String),
 }
 
+#[derive(Debug)]
 pub struct Catalog {
     tables: DashMap<String, TableMetadata>,
 }

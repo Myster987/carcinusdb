@@ -5,9 +5,11 @@ use thiserror::Error;
 use crate::{
     database::CARCINUSDB_MASTER_TABLE,
     sql::{
-        parser::statement::{BinaryOperator, Constrains, Create, Drop, Expression, Statement},
+        parser::statement::{
+            BinaryOperator, Constrains, Create, Drop, Expression, Statement, UnaryOperator,
+        },
         schema::{Catalog, ROW_ID_COLUMN, Schema, TableMetadata},
-        types::ValueType,
+        types::{Value, ValueType},
     },
 };
 
@@ -52,10 +54,11 @@ pub enum Error {
 
 #[derive(Debug, Error)]
 pub enum TypeError {
-    // CannotApplyUnary {
-    //     operator: UnaryOperator,
-    //     value: Value,
-    // }
+    #[error("cannot apply unary operator: {operator}{value}")]
+    CannotApplyUnary {
+        operator: UnaryOperator,
+        value: Value,
+    },
     #[error("cannot apply this binary operator: {left} {operator} {right}")]
     CannotApplyBinary {
         left: Expression,
@@ -71,7 +74,7 @@ pub enum TypeError {
     UnexpectedExpression { expr: Expression },
 }
 
-pub fn analyze(statement: &Statement, catalog: &mut Catalog) -> Result<()> {
+pub fn analyze(statement: &Statement, catalog: &Catalog) -> Result<()> {
     match statement {
         Statement::Create(Create::Table { name, columns }) => {
             if let Ok(_) = catalog.get_table(name) {
