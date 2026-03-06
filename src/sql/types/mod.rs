@@ -1,4 +1,7 @@
-use std::fmt::Display;
+use std::{
+    fmt::Display,
+    ops::{Add, Div, Mul, Sub},
+};
 
 use crate::sql::{
     self,
@@ -112,6 +115,50 @@ impl PartialOrd for Value {
 impl Ord for Value {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.as_value_ref().cmp(&other.as_value_ref())
+    }
+}
+
+impl Add for Value {
+    type Output = Value;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (Value::Int(a), Value::Int(b)) => Value::Int(a + b),
+            _ => Value::Null,
+        }
+    }
+}
+
+impl Sub for Value {
+    type Output = Value;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (Value::Int(a), Value::Int(b)) => Value::Int(a - b),
+            _ => Value::Null,
+        }
+    }
+}
+
+impl Mul for Value {
+    type Output = Value;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (Value::Int(a), Value::Int(b)) => Value::Int(a * b),
+            _ => Value::Null,
+        }
+    }
+}
+
+impl Div for Value {
+    type Output = Value;
+
+    fn div(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (Value::Int(a), Value::Int(b)) => Value::Int(a / b),
+            _ => Value::Null,
+        }
     }
 }
 
@@ -344,32 +391,19 @@ impl<'a> Ord for ValueRef<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::sql::record::RecordBuilder;
-
     use super::*;
 
     #[test]
     fn test_value_comparison() -> anyhow::Result<()> {
-        let mut test_record = RecordBuilder::new();
+        let a = Value::Int(10);
+        let b = Value::Int(10);
 
-        test_record.add(Value::Int(123));
-        test_record.add(Value::Bool(true));
-        test_record.add(Value::Text(Text::new("123".into())));
+        assert!(a == b);
 
-        println!("{:?}", test_record);
+        let a = Value::Text(Text::new("test".into()));
+        let b = Value::Text(Text::new("test".into()));
 
-        println!("{:?}", test_record.get(0));
-        println!("{:?}", test_record.get(1));
-        println!("{:?}", test_record.get(2));
-
-        assert!(*test_record.get(0) == Value::Int(123));
-        println!("{:?}", test_record.get(0).cmp(&Value::Int(125)));
-        println!(
-            "{:?}",
-            test_record
-                .get(2)
-                .cmp(&Value::Text(Text::new("124".into())))
-        );
+        assert!(a == b);
 
         Ok(())
     }
