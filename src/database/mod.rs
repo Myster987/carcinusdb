@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::{
     os::{Open, OpenOptions},
-    sql::schema::Catalog,
+    sql::{self, parser::statement::Statement, schema::Catalog},
     storage::{
         PageNumber,
         btree::BTreeCursor,
@@ -15,11 +15,12 @@ use crate::{
         pager::Pager,
         wal::{
             WriteAheadLog,
-            transaction::{ReadTransaction, WriteTransaction},
+            transaction::{ReadTransaction, ReadTx, WriteTransaction},
         },
     },
     tcp::server::{TcpServer, connection::Connection},
     utils::io::{BlockIO, IO},
+    vm::query_result::QueryResult,
 };
 
 pub const CARCINUSDB_MASTER_TABLE: &'static str = "carcinusdb_master";
@@ -208,6 +209,8 @@ impl Database {
             Arc::new(Catalog::from_cursor(cursor)?)
         };
 
+        log::debug!("Catalog: {:?}", catalog);
+
         Ok(Self { pager, catalog })
     }
 
@@ -217,6 +220,7 @@ impl Database {
         Ok(DatabaseReadTransaction {
             wal_tx: Rc::new(RefCell::new(wal_tx)),
             pager: self.pager.clone(),
+            catalog: self.catalog.clone(),
         })
     }
 
@@ -226,19 +230,33 @@ impl Database {
         Ok(DatabaseWriteTransaction {
             wal_tx: Rc::new(RefCell::new(wal_tx)),
             pager: self.pager.clone(),
+            catalog: self.catalog.clone(),
         })
     }
+
+    // pub fn prepare(&self, sql: &str) ->
 }
 
 pub struct DatabaseReadTransaction {
     wal_tx: Rc<RefCell<ReadTransaction>>,
     pager: Arc<Pager>,
+    catalog: Arc<Catalog>,
 }
 
 impl DatabaseReadTransaction {
     pub fn cursor(&self, root: PageNumber) -> BTreeCursor<'_, ReadTransaction> {
         BTreeCursor::new(self.wal_tx.clone(), &self.pager, root, 0)
     }
+
+    // pub fn execute(&self, sql: &str) -> Result<QueryResult> {
+    //     let statement = sql::pipeline(sql, &self.catalog)?;
+
+    //     match statement {
+    //         select @ Statement::Select { .. } => {
+    //             let plan =
+    //         }
+    //     }
+    // }
 
     #[must_use]
     pub fn commit(self) -> Result<()> {
@@ -249,6 +267,7 @@ impl DatabaseReadTransaction {
 pub struct DatabaseWriteTransaction<'tx> {
     wal_tx: Rc<RefCell<WriteTransaction<'tx>>>,
     pager: Arc<Pager>,
+    catalog: Arc<Catalog>,
 }
 
 impl<'tx> DatabaseWriteTransaction<'tx> {
