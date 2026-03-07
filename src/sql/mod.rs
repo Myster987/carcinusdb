@@ -1,21 +1,30 @@
+use std::sync::Arc;
+
 use thiserror::Error;
 
 use crate::sql::{
     analyzer::analyze,
-    parser::{Parser, statement::Statement, token::Token},
+    optimizer::optimize,
+    parser::{parse, statement::Statement, token::Token},
+    prepare::prepare,
+    schema::Catalog,
 };
 
 pub mod analyzer;
-pub mod executor;
+pub mod optimizer;
 pub mod parser;
+pub mod planner;
+pub mod prepare;
 pub mod record;
 pub mod schema;
 pub mod types;
 
-pub fn pipeline(input: &str) -> Result<Statement> {
-    let statement = Parser::new(input)?.parse_statement()?;
+pub fn pipeline(input: &str, catalog: &Arc<Catalog>) -> Result<Statement> {
+    let mut statement = parse(input)?;
 
-    // analyze(&statement, )
+    analyze(&statement, &*catalog)?;
+    optimize(&mut statement)?;
+    prepare(&mut statement, &*catalog)?;
 
     Ok(statement)
 }
@@ -51,4 +60,16 @@ pub enum Error {
     // record
     #[error("corrupted record")]
     CorruptedRecord(#[from] crate::utils::Error),
+
+    // analyzer
+    #[error(transparent)]
+    AnalyzerError(#[from] analyzer::Error),
+
+    // type error
+    #[error(transparent)]
+    TypeError(#[from] analyzer::TypeError),
+
+    // schema
+    #[error(transparent)]
+    SchemaError(#[from] schema::Error),
 }
