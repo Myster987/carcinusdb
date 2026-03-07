@@ -26,6 +26,10 @@ impl<'a> Record<'a> {
         Self { payload, cursor }
     }
 
+    pub fn empty() -> Self {
+        Self::from_owned(vec![])
+    }
+
     pub fn from_borrowed(payload: &'a [u8]) -> Self {
         Self::new(Cow::Borrowed(payload))
     }
