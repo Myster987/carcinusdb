@@ -13,7 +13,7 @@ use crate::{
     },
     storage::{
         self, PageNumber,
-        btree::{BTreeCursor, DatabaseCursor},
+        btree::{BTreeCursor, DatabaseCursor, RowId},
         wal::transaction::ReadTx,
     },
 };
@@ -41,6 +41,17 @@ impl Catalog {
             .ok_or(Error::TableNotFound(name.to_string()))
     }
 
+    pub fn get_next_row_id_of_table(&self, name: &str) -> Result<i64> {
+        let mut table = self
+            .tables
+            .get_mut(name)
+            .ok_or(Error::TableNotFound(name.to_string()))?;
+
+        let row_id = table.next_row_id;
+        table.next_row_id += 1;
+        Ok(row_id)
+    }
+
     pub fn from_cursor<Tx: ReadTx>(mut master_cursor: BTreeCursor<Tx>) -> storage::Result<Self> {
         let tables = DashMap::new();
         let mut pending_indexes = Vec::new();
@@ -58,9 +69,17 @@ impl Catalog {
                 "table" => {
                     match parser::parse(sql.to_text()).map_err(|_| storage::Error::Corruped)? {
                         Statement::Create(Create::Table { name, columns }) => {
+                            let next_row_id = master_cursor.next_row_id()?;
+
                             let schema =
                                 Schema::new(columns.into_iter().map(|col| col.into()).collect());
-                            let table = TableMetadata::new(root_page, name.clone(), schema, vec![]);
+                            let table = TableMetadata::new(
+                                root_page,
+                                name.clone(),
+                                schema,
+                                vec![],
+                                next_row_id,
+                            );
 
                             tables.insert(name, table)
                         }
@@ -161,6 +180,7 @@ pub struct TableMetadata {
     pub name: String,
     pub schema: Schema,
     pub indexes: Vec<IndexMetadata>,
+    next_row_id: RowId,
 }
 
 impl TableMetadata {
@@ -169,12 +189,14 @@ impl TableMetadata {
         name: String,
         schema: Schema,
         indexes: Vec<IndexMetadata>,
+        next_row_id: RowId,
     ) -> Self {
         Self {
             root,
             name,
             schema,
             indexes,
+            next_row_id,
         }
     }
 

@@ -22,14 +22,16 @@ use crate::{
     utils::bytes::VarInt,
 };
 
+pub type RowId = i64;
+
 #[derive(Debug)]
 pub enum BTreeKey<'a> {
-    TableKey((i64, Option<Record<'a>>)),
+    TableKey((RowId, Option<Record<'a>>)),
     IndexKey(Record<'a>),
 }
 
 impl<'a> BTreeKey<'a> {
-    pub fn new_table_key(row_id: i64, record: Option<Record<'a>>) -> Self {
+    pub fn new_table_key(row_id: RowId, record: Option<Record<'a>>) -> Self {
         Self::TableKey((row_id, record))
     }
 
@@ -62,7 +64,7 @@ impl<'a> BTreeKey<'a> {
     /// # Safety
     ///
     /// Caller must ensure that this is valid table key.
-    pub fn row_id(&self) -> i64 {
+    pub fn row_id(&self) -> RowId {
         match self {
             Self::TableKey((row_id, _)) => *row_id,
             _ => panic!("Shouldn't be called on index keys."),
@@ -376,6 +378,25 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
         self.current_page = self.root;
         self.path_stack.clear();
         self.done = false;
+    }
+
+    /// Returns next row id that should be used for allocation. If called on
+    /// index B-tree, this function will panic.
+    pub fn next_row_id(&mut self) -> storage::Result<RowId> {
+        self.go_to_root();
+        if !self.seek_last()? {
+            return Ok(1);
+        }
+
+        let page = self
+            .pager
+            .read_page(self.tx.borrow().deref(), self.current_page)?;
+        let guard = page.lock_shared();
+
+        match self.extracty_key(&*guard, self.current_slot)? {
+            BTreeKey::TableKey((row_id, _)) => Ok(row_id + 1),
+            _ => panic!("This function should only be called on table B-trees."),
+        }
     }
 }
 

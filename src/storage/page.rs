@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    storage::{self, Error, PageNumber, SLOT_SIZE, SlotNumber},
+    storage::{self, Error, PageNumber, SLOT_SIZE, SlotNumber, btree::RowId},
     utils::{
         buffer::{Buffer, DropFn},
         bytes::{self, BytesCursor, VarInt},
@@ -1630,13 +1630,13 @@ pub struct TableInternalCell {
     /// Left child of BTree Page.
     pub left_child: PageNumber,
     /// Unique ID of row.
-    pub row_id: i64,
+    pub row_id: RowId,
 }
 
 impl TableInternalCell {
     /// Creates owned version of cell. Caller must ensure that payload overflow
     /// is handled first, because this function will put everything in single buffer.
-    pub fn new(row_id: i64, left_child: PageNumber) -> Self {
+    pub fn new(row_id: RowId, left_child: PageNumber) -> Self {
         let raw = Vec::new();
         let mut cursor = BytesCursor::new(raw);
 
@@ -1711,7 +1711,7 @@ pub struct TableLeafCell {
     /// Pointer to whole cell content. (used for copying cell).
     raw: Vec<u8>,
     /// Unique ID of row.
-    pub row_id: i64,
+    pub row_id: RowId,
     /// Total size of Cell including overflow Pages.
     payload_size: VarInt,
     /// Pointer to content of cell living in Page. It doesn't include overflowing payload.
@@ -1725,7 +1725,7 @@ impl TableLeafCell {
     /// Creates owned version of cell. Caller must ensure that payload overflow
     /// is handled first, because this function will put everything in single buffer.
     pub fn new(
-        row_id: i64,
+        row_id: RowId,
         payload_size: VarInt,
         payload: &[u8],
         first_overflow: Option<PageNumber>,
@@ -2071,7 +2071,7 @@ impl<'a> CellOps for IndexLeafCellRef<'a> {
 pub struct TableInternalCellRef<'a> {
     raw: &'a [u8],
     pub left_child: PageNumber,
-    pub row_id: i64,
+    pub row_id: RowId,
 }
 
 impl<'a> TableInternalCellRef<'a> {
@@ -2137,7 +2137,7 @@ impl<'a> CellOps for TableInternalCellRef<'a> {
 #[derive(Debug)]
 pub struct TableLeafCellRef<'a> {
     raw: &'a [u8],
-    pub row_id: i64,
+    pub row_id: RowId,
     payload_size: VarInt,
     payload_ref: PayloadRef,
     first_overflow: Option<PageNumber>,
