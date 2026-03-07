@@ -405,6 +405,11 @@ mod tests {
 
         assert!(a == b);
 
+        let a = Value::Text(Text::new("test1".into()));
+        let b = Value::Text(Text::new("test".into()));
+
+        assert!(a != b);
+
         Ok(())
     }
 }
