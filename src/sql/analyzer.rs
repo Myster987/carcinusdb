@@ -163,6 +163,9 @@ pub fn analyze(statement: &Statement, catalog: &Catalog) -> Result<()> {
                 if table_metadata.index_of(col).is_none() {
                     return Err(Error::ColumnNotFound(col.to_owned()));
                 }
+                if col == ROW_ID_COLUMN {
+                    return Err(Error::RowIdAssignment);
+                }
                 if !duplicates.insert(col) {
                     return Err(Error::ContainsDuplicateNames {
                         reason: "attempted to insert while selecting duplicated columns"
@@ -336,16 +339,16 @@ fn analyze_expression(schema: &Schema, expr: &Expression) -> Result<ValueType> {
         Expression::BinaryOperation {
             left,
             operator,
-            rigth,
+            right,
         } => {
             let left_data_type = analyze_expression(schema, left)?;
-            let right_data_type = analyze_expression(schema, rigth)?;
+            let right_data_type = analyze_expression(schema, right)?;
 
             if left_data_type != right_data_type {
                 return Err(Error::TypeError(TypeError::CannotApplyBinary {
                     left: *left.clone(),
                     operator: *operator,
-                    right: *rigth.clone(),
+                    right: *right.clone(),
                 }));
             }
 
@@ -374,7 +377,7 @@ fn analyze_expression(schema: &Schema, expr: &Expression) -> Result<ValueType> {
                     return Err(Error::TypeError(TypeError::CannotApplyBinary {
                         left: *left.clone(),
                         operator: *operator,
-                        right: *rigth.clone(),
+                        right: *right.clone(),
                     }));
                 }
             }

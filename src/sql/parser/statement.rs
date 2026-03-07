@@ -128,7 +128,7 @@ pub enum Expression {
     BinaryOperation {
         left: Box<Expression>,
         operator: BinaryOperator,
-        rigth: Box<Expression>,
+        right: Box<Expression>,
     },
     UnaryOperation {
         operator: UnaryOperator,
@@ -146,8 +146,8 @@ impl Display for Expression {
             Self::BinaryOperation {
                 left,
                 operator,
-                rigth,
-            } => write!(f, "{left} {operator} {rigth}"),
+                right,
+            } => write!(f, "{left} {operator} {right}"),
             Self::UnaryOperation { operator, expr } => write!(f, "{operator}{expr}"),
             Self::Nested(expr) => write!(f, "({expr})"),
         }

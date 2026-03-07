@@ -284,7 +284,7 @@ impl<'a> Parser<'a> {
         Ok(Expression::BinaryOperation {
             left: Box::new(left),
             operator,
-            rigth: Box::new(self.parse_expr(precedence)?),
+            right: Box::new(self.parse_expr(precedence)?),
         })
     }
 
