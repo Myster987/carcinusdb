@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::{
     os::{Open, OpenOptions},
-    sql::{self, parser::statement::Statement, schema::Catalog},
+    sql::schema::Catalog,
     storage::{
         PageNumber,
         btree::BTreeCursor,
@@ -20,7 +20,6 @@ use crate::{
     },
     tcp::server::{TcpServer, connection::Connection},
     utils::io::{BlockIO, IO},
-    vm::query_result::QueryResult,
 };
 
 pub const CARCINUSDB_MASTER_TABLE: &'static str = "carcinusdb_master";
@@ -233,8 +232,12 @@ impl Database {
             catalog: self.catalog.clone(),
         })
     }
+}
 
-    // pub fn prepare(&self, sql: &str) ->
+pub trait DatabaseTransaction {
+    fn pager(&self) -> &Arc<Pager>;
+    fn catalog(&self) -> &Arc<Catalog>;
+    fn read_cursor(&self, root: PageNumber) -> BTreeCursor<'_, impl ReadTx>;
 }
 
 pub struct DatabaseReadTransaction {
@@ -261,6 +264,20 @@ impl DatabaseReadTransaction {
     #[must_use]
     pub fn commit(self) -> Result<()> {
         Ok(())
+    }
+}
+
+impl DatabaseTransaction for DatabaseReadTransaction {
+    fn catalog(&self) -> &Arc<Catalog> {
+        &self.catalog
+    }
+
+    fn pager(&self) -> &Arc<Pager> {
+        &self.pager
+    }
+
+    fn read_cursor(&self, root: PageNumber) -> BTreeCursor<'_, impl ReadTx> {
+        self.cursor(root)
     }
 }
 
@@ -294,6 +311,20 @@ impl<'tx> DatabaseWriteTransaction<'tx> {
         self.pager.wal.commit(&mut wal_tx)?;
 
         Ok(())
+    }
+}
+
+impl DatabaseTransaction for DatabaseWriteTransaction<'_> {
+    fn catalog(&self) -> &Arc<Catalog> {
+        &self.catalog
+    }
+
+    fn pager(&self) -> &Arc<Pager> {
+        &self.pager
+    }
+
+    fn read_cursor(&self, root: PageNumber) -> BTreeCursor<'_, impl ReadTx> {
+        self.cursor(root)
     }
 }
 
