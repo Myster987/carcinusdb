@@ -4,16 +4,25 @@ use thiserror::Error;
 
 pub mod expression;
 pub mod operator;
+pub mod planner;
 pub mod query_result;
-pub mod seq_scan;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error(transparent)]
-    Storage(#[from] crate::storage::Error),
-
     #[error("division by zero: {0} / {1}")]
     DivisionByZero(i64, i64),
+
+    #[error(transparent)]
+    StorageError(#[from] crate::storage::Error),
+
+    #[error(transparent)]
+    SqlError(#[from] crate::sql::Error),
+
+    #[error(transparent)]
+    AnalyzerError(#[from] crate::sql::analyzer::Error),
+
+    #[error(transparent)]
+    SchemaError(#[from] crate::sql::schema::Error),
 }
