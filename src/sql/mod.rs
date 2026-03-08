@@ -13,7 +13,6 @@ use crate::sql::{
 pub mod analyzer;
 pub mod optimizer;
 pub mod parser;
-pub mod planner;
 pub mod prepare;
 pub mod record;
 pub mod schema;
@@ -72,4 +71,21 @@ pub enum Error {
     // schema
     #[error(transparent)]
     SchemaError(#[from] schema::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pipeline() -> anyhow::Result<()> {
+        let sql = "SELECT * FROM test WHERE test.id = 1 + 2 - 4;";
+
+        let mut statement = parse(sql)?;
+        optimize(&mut statement)?;
+
+        println!("{:?}", statement);
+
+        Ok(())
+    }
 }
