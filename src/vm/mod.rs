@@ -2,6 +2,8 @@
 
 use thiserror::Error;
 
+use crate::sql::parser::statement::Expression;
+
 pub mod expression;
 pub mod operator;
 pub mod planner;
@@ -13,6 +15,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("division by zero: {0} / {1}")]
     DivisionByZero(i64, i64),
+
+    #[error("unsupported expression: {0}")]
+    Unsupported(Expression),
 
     #[error(transparent)]
     StorageError(#[from] crate::storage::Error),
