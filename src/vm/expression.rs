@@ -52,6 +52,13 @@ pub fn resolve_expression_to_value(
             };
 
             Ok(match operator {
+                // arithmetic
+                BinaryOperator::Add => left + right,
+                BinaryOperator::Sub => left - right,
+                BinaryOperator::Mul => left * right,
+                BinaryOperator::Div => left / right,
+
+                // comparison
                 BinaryOperator::Eq => Value::Bool(left == right),
                 BinaryOperator::Neq => Value::Bool(left != right),
                 BinaryOperator::Lt => Value::Bool(left < right),
@@ -59,6 +66,7 @@ pub fn resolve_expression_to_value(
                 BinaryOperator::Gt => Value::Bool(left > right),
                 BinaryOperator::GtEq => Value::Bool(left >= right),
 
+                // logical
                 logical @ (BinaryOperator::And | BinaryOperator::Or) => {
                     let (Value::Bool(left), Value::Bool(right)) = (&left, &right) else {
                         return Err(mismatched_types());
@@ -70,11 +78,6 @@ pub fn resolve_expression_to_value(
                         _ => unreachable!(),
                     }
                 }
-
-                BinaryOperator::Add => left + right,
-                BinaryOperator::Sub => left - right,
-                BinaryOperator::Mul => left * right,
-                BinaryOperator::Div => left / right,
             })
         }
 
