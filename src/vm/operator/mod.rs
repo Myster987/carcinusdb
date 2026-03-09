@@ -4,6 +4,7 @@ use crate::{
 };
 
 pub mod filter;
+pub mod projection;
 pub mod seq_scan;
 
 pub type Row = Record<'static>;

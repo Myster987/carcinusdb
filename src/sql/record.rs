@@ -75,6 +75,16 @@ impl<'a> Record<'a> {
             cursor: Rc::new(RefCell::new(self.cursor.borrow().clone())),
         }
     }
+
+    pub fn project(&self, indices: &[usize]) -> sql::Result<Record<'static>> {
+        let mut projected_record = RecordBuilder::new();
+
+        for i in indices {
+            projected_record.add(self.try_get_value(*i)?.to_owned());
+        }
+
+        Ok(projected_record.serialize_to_record())
+    }
 }
 
 impl<'a> Debug for Record<'a> {
