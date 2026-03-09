@@ -1,7 +1,10 @@
 use crate::{
     database::DatabaseTransaction,
     sql::parser::statement::{Assignment, Create, Drop, Expression, Statement},
-    vm::{self, operator::Operator, operator::seq_scan::SeqScan},
+    vm::{
+        self,
+        operator::{Operator, filter::Filter, projection::Projection, seq_scan::SeqScan},
+    },
 };
 
 pub enum ExecutionPlan<'tx> {
@@ -96,5 +99,15 @@ fn plan_select<'tx, Tx: DatabaseTransaction>(
     let table = tx.catalog().get_table(&from)?;
     let cursor = tx.read_cursor(table.root);
 
-    Ok(Box::new(SeqScan::new(cursor, table.schema.clone())))
+    let mut plan: Box<dyn Operator + 'tx> = Box::new(SeqScan::new(cursor, table.schema.clone()));
+
+    if let Some(expr) = r#where {
+        plan = Box::new(Filter::new(plan, expr));
+    }
+
+    if !columns.is_empty() {
+        plan = Box::new(Projection::new(plan, columns)?);
+    }
+
+    Ok(plan)
 }
