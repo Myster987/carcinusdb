@@ -237,7 +237,7 @@ impl Database {
 pub trait DatabaseTransaction {
     fn pager(&self) -> &Arc<Pager>;
     fn catalog(&self) -> &Arc<Catalog>;
-    fn read_cursor(&self, root: PageNumber) -> BTreeCursor<'_, impl ReadTx>;
+    fn read_cursor<'tx>(&'tx self, root: PageNumber) -> BTreeCursor<'tx, impl ReadTx>;
 }
 
 pub struct DatabaseReadTransaction {
@@ -276,7 +276,7 @@ impl DatabaseTransaction for DatabaseReadTransaction {
         &self.pager
     }
 
-    fn read_cursor(&self, root: PageNumber) -> BTreeCursor<'_, impl ReadTx> {
+    fn read_cursor<'tx>(&'tx self, root: PageNumber) -> BTreeCursor<'tx, impl ReadTx> {
         self.cursor(root)
     }
 }
@@ -314,7 +314,7 @@ impl<'tx> DatabaseWriteTransaction<'tx> {
     }
 }
 
-impl DatabaseTransaction for DatabaseWriteTransaction<'_> {
+impl<'a> DatabaseTransaction for DatabaseWriteTransaction<'a> {
     fn catalog(&self) -> &Arc<Catalog> {
         &self.catalog
     }
@@ -323,7 +323,7 @@ impl DatabaseTransaction for DatabaseWriteTransaction<'_> {
         &self.pager
     }
 
-    fn read_cursor(&self, root: PageNumber) -> BTreeCursor<'_, impl ReadTx> {
+    fn read_cursor<'tx>(&'tx self, root: PageNumber) -> BTreeCursor<'tx, impl ReadTx> {
         self.cursor(root)
     }
 }
