@@ -1,25 +1,26 @@
-use std::{cell::RefCell, path::Path, rc::Rc, sync::Arc};
+use std::{cell::RefCell, ops::DerefMut, path::Path, rc::Rc, sync::Arc};
 
 use arc_swap::ArcSwap;
 use thiserror::Error;
 
 use crate::{
     os::{Open, OpenOptions},
-    sql::schema::Catalog,
+    sql::{self, schema::Catalog},
     storage::{
-        PageNumber,
-        btree::BTreeCursor,
+        self, PageNumber,
+        btree::{BTreeCursor, BTreeType},
         buffer_pool::BufferPool,
         cache::ShardedClockCache,
         page::{DATABASE_HEADER_SIZE, DatabaseHeader},
         pager::Pager,
         wal::{
             WriteAheadLog,
-            transaction::{ReadTransaction, ReadTx, WriteTransaction},
+            transaction::{ReadTransaction, ReadTx, WriteTransaction, WriteTx},
         },
     },
     tcp::server::{TcpServer, connection::Connection},
     utils::io::{BlockIO, IO},
+    vm::{self, query_result::QueryResult},
 };
 
 pub const CARCINUSDB_MASTER_TABLE: &'static str = "carcinusdb_master";
@@ -53,6 +54,9 @@ pub enum Error {
 
     #[error(transparent)]
     Sql(#[from] crate::sql::Error),
+
+    #[error(transparent)]
+    VmError(#[from] crate::vm::Error),
 
     // other
     #[error("error msg: {0}")]
@@ -234,10 +238,15 @@ impl Database {
     }
 }
 
-pub trait DatabaseTransaction {
+pub trait ReadDbTx {
     fn pager(&self) -> &Arc<Pager>;
     fn catalog(&self) -> &Arc<Catalog>;
     fn read_cursor<'tx>(&'tx self, root: PageNumber) -> BTreeCursor<'tx, impl ReadTx>;
+}
+
+pub trait WriteDbTx: ReadDbTx {
+    fn write_cursor<'tx>(&'tx self, root: PageNumber) -> BTreeCursor<'tx, impl WriteTx>;
+    fn create_btree(&self, btree_type: BTreeType) -> storage::Result<PageNumber>;
 }
 
 pub struct DatabaseReadTransaction {
@@ -251,15 +260,12 @@ impl DatabaseReadTransaction {
         BTreeCursor::new(self.wal_tx.clone(), &self.pager, root, 0)
     }
 
-    // pub fn execute(&self, sql: &str) -> Result<QueryResult> {
-    //     let statement = sql::pipeline(sql, &self.catalog)?;
+    pub fn execute<'tx>(&'tx self, sql: &str) -> Result<QueryResult<'tx>> {
+        let statement = sql::pipeline(self, sql)?;
 
-    //     match statement {
-    //         select @ Statement::Select { .. } => {
-    //             let plan =
-    //         }
-    //     }
-    // }
+        let plan = vm::planner::plan(statement, self)?;
+        vm::execute_read(plan).map_err(Into::into)
+    }
 
     #[must_use]
     pub fn commit(self) -> Result<()> {
@@ -267,7 +273,7 @@ impl DatabaseReadTransaction {
     }
 }
 
-impl DatabaseTransaction for DatabaseReadTransaction {
+impl ReadDbTx for DatabaseReadTransaction {
     fn catalog(&self) -> &Arc<Catalog> {
         &self.catalog
     }
@@ -299,6 +305,13 @@ impl<'tx> DatabaseWriteTransaction<'tx> {
         )
     }
 
+    pub fn execute(&self, sql: &str) -> Result<QueryResult<'_>> {
+        let statement = sql::pipeline(self, sql)?;
+
+        let plan = vm::planner::plan(statement, self)?;
+        vm::execute_write(self, plan).map_err(Into::into)
+    }
+
     /// Flushes dirty pages into WAL and marks them as clean. Might run checkpoint.
     #[must_use]
     pub fn commit(self) -> Result<()> {
@@ -314,7 +327,7 @@ impl<'tx> DatabaseWriteTransaction<'tx> {
     }
 }
 
-impl<'a> DatabaseTransaction for DatabaseWriteTransaction<'a> {
+impl<'a> ReadDbTx for DatabaseWriteTransaction<'a> {
     fn catalog(&self) -> &Arc<Catalog> {
         &self.catalog
     }
@@ -325,6 +338,17 @@ impl<'a> DatabaseTransaction for DatabaseWriteTransaction<'a> {
 
     fn read_cursor<'tx>(&'tx self, root: PageNumber) -> BTreeCursor<'tx, impl ReadTx> {
         self.cursor(root)
+    }
+}
+
+impl<'tx> WriteDbTx for DatabaseWriteTransaction<'tx> {
+    fn write_cursor<'a>(&'a self, root: PageNumber) -> BTreeCursor<'a, impl WriteTx> {
+        self.cursor(root)
+    }
+
+    fn create_btree(&self, btree_type: BTreeType) -> storage::Result<PageNumber> {
+        self.pager
+            .btree_create(self.wal_tx.borrow_mut().deref_mut(), btree_type)
     }
 }
 
@@ -458,6 +482,33 @@ mod tests {
             let deleted_record = cursor.delete(&BTreeKey::new_table_key(4, None), options)?;
 
             println!("{:?}", deleted_record);
+        }
+
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_execute() -> anyhow::Result<()> {
+        simple_logger::init()?;
+
+        let db = Database::open(TEST_DB_NAME)?;
+
+        let tx = db.begin_write()?;
+
+        {
+            // let query = tx.execute("CREATE TABLE test (id INT PRIMARY KEY, name TEXT);")?;
+
+            // log::debug!("Query: {:?}", query);
+
+            log::debug!("catalog: {:?}", tx.catalog);
+
+            let query = tx.execute("SELECT id FROM test;")?;
+
+            log::debug!("Query: {:?}", query);
+
+            // log::info!("\"test\" table created.");
         }
 
         tx.commit()?;

@@ -1,5 +1,5 @@
 use crate::{
-    database::DatabaseTransaction,
+    database::ReadDbTx,
     sql::parser::statement::{Assignment, Create, Drop, Expression, Statement},
     vm::{
         self,
@@ -40,10 +40,7 @@ pub enum ExecutionPlan<'tx> {
     Explain(Box<ExecutionPlan<'tx>>),
 }
 
-pub fn plan<'tx, Tx: DatabaseTransaction>(
-    stmt: Statement,
-    tx: &'tx Tx,
-) -> vm::Result<ExecutionPlan<'tx>> {
+pub fn plan<'tx, Tx: ReadDbTx>(stmt: Statement, tx: &'tx Tx) -> vm::Result<ExecutionPlan<'tx>> {
     match stmt {
         Statement::Select {
             columns,
@@ -89,7 +86,7 @@ pub fn plan<'tx, Tx: DatabaseTransaction>(
     }
 }
 
-fn plan_select<'tx, Tx: DatabaseTransaction>(
+fn plan_select<'tx, Tx: ReadDbTx>(
     columns: Vec<Expression>,
     from: String,
     r#where: Option<Expression>,

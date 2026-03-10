@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 use dashmap::DashMap;
 use thiserror::Error;
@@ -14,6 +14,7 @@ use crate::{
     storage::{
         self, PageNumber,
         btree::{BTreeCursor, DatabaseCursor, RowId},
+        pager::Pager,
         wal::transaction::ReadTx,
     },
 };
@@ -41,15 +42,8 @@ impl Catalog {
             .ok_or(Error::TableNotFound(name.to_string()))
     }
 
-    pub fn get_next_row_id_of_table(&self, name: &str) -> Result<i64> {
-        let mut table = self
-            .tables
-            .get_mut(name)
-            .ok_or(Error::TableNotFound(name.to_string()))?;
-
-        let row_id = table.next_row_id;
-        table.next_row_id += 1;
-        Ok(row_id)
+    pub fn insert_table(&self, name: String, table: TableMetadata) {
+        self.tables.insert(name, table);
     }
 
     pub fn from_cursor<Tx: ReadTx>(mut master_cursor: BTreeCursor<Tx>) -> storage::Result<Self> {
@@ -61,33 +55,32 @@ impl Catalog {
         {
             let record = master_cursor.try_record()?;
 
+            // master table row format
+            // 0. type
+            // 1. name
+            // 2. tbl_name
+            // 3. root_page
+            // 4. sql
+
             let r#type = record.get_value(0);
             let root_page = record.get_value(3).to_int() as PageNumber;
             let sql = record.get_value(4);
 
             match r#type.to_text() {
                 "table" => {
-                    match parser::parse(sql.to_text()).map_err(|_| storage::Error::Corruped)? {
+                    match parser::parse(sql.to_text()).map_err(|_| storage::Error::Corrupted)? {
                         Statement::Create(Create::Table { name, columns }) => {
-                            let next_row_id = master_cursor.next_row_id()?;
-
                             let schema =
                                 Schema::new(columns.into_iter().map(|col| col.into()).collect());
-                            let table = TableMetadata::new(
-                                root_page,
-                                name.clone(),
-                                schema,
-                                vec![],
-                                next_row_id,
-                            );
+                            let table = TableMetadata::new(root_page, name.clone(), schema, vec![]);
 
                             tables.insert(name, table)
                         }
-                        _ => return Err(storage::Error::Corruped),
+                        _ => return Err(storage::Error::Corrupted),
                     };
                 }
                 "index" => {
-                    match parser::parse(sql.to_text()).map_err(|_| storage::Error::Corruped)? {
+                    match parser::parse(sql.to_text()).map_err(|_| storage::Error::Corrupted)? {
                         Statement::Create(Create::Index {
                             name,
                             table,
@@ -102,21 +95,21 @@ impl Catalog {
                                 unique,
                             });
                         }
-                        _ => return Err(storage::Error::Corruped),
+                        _ => return Err(storage::Error::Corrupted),
                     }
                 }
-                _ => return Err(storage::Error::Corruped),
+                _ => return Err(storage::Error::Corrupted),
             }
         }
 
         for pending in pending_indexes {
             let mut table = tables
                 .get_mut(&pending.table)
-                .ok_or(storage::Error::Corruped)?;
+                .ok_or(storage::Error::Corrupted)?;
 
             let index = table
                 .index_of(&pending.column)
-                .ok_or(storage::Error::Corruped)?;
+                .ok_or(storage::Error::Corrupted)?;
 
             let column = table.schema.columns[index].clone();
 
@@ -180,7 +173,6 @@ pub struct TableMetadata {
     pub name: String,
     pub schema: Schema,
     pub indexes: Vec<IndexMetadata>,
-    next_row_id: RowId,
 }
 
 impl TableMetadata {
@@ -189,14 +181,12 @@ impl TableMetadata {
         name: String,
         schema: Schema,
         indexes: Vec<IndexMetadata>,
-        next_row_id: RowId,
     ) -> Self {
         Self {
             root,
             name,
             schema,
             indexes,
-            next_row_id,
         }
     }
 

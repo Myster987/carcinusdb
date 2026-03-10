@@ -2,12 +2,14 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-use crate::sql::{
-    analyzer::analyze,
-    optimizer::optimize,
-    parser::{parse, statement::Statement, token::Token},
-    prepare::prepare,
-    schema::Catalog,
+use crate::{
+    database::ReadDbTx,
+    sql::{
+        analyzer::analyze,
+        optimizer::optimize,
+        parser::{parse, statement::Statement, token::Token},
+        prepare::prepare,
+    },
 };
 
 pub mod analyzer;
@@ -18,12 +20,12 @@ pub mod record;
 pub mod schema;
 pub mod types;
 
-pub fn pipeline(input: &str, catalog: &Arc<Catalog>) -> Result<Statement> {
+pub fn pipeline<Tx: ReadDbTx>(tx: &Tx, input: &str) -> Result<Statement> {
     let mut statement = parse(input)?;
 
-    analyze(&statement, &*catalog)?;
+    analyze(&statement, tx.catalog())?;
     optimize(&mut statement)?;
-    prepare(&mut statement, &*catalog)?;
+    prepare(tx, &mut statement)?;
 
     Ok(statement)
 }

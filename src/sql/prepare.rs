@@ -1,11 +1,15 @@
-use crate::sql::{
-    self,
-    parser::statement::{Expression, Statement},
-    schema::{Catalog, ROW_ID_COLUMN},
-    types::Value,
+use crate::{
+    database::ReadDbTx,
+    sql::{
+        self,
+        parser::statement::{Expression, Statement},
+        schema::ROW_ID_COLUMN,
+        types::Value,
+    },
 };
 
-pub fn prepare(statement: &mut Statement, catalog: &Catalog) -> sql::Result<()> {
+pub fn prepare<Tx: ReadDbTx>(tx: &Tx, statement: &mut Statement) -> sql::Result<()> {
+    let catalog = tx.catalog();
     match statement {
         Statement::Select { columns, from, .. }
             if columns.iter().any(|expr| *expr == Expression::Wildcard) =>
@@ -49,9 +53,15 @@ pub fn prepare(statement: &mut Statement, catalog: &Catalog) -> sql::Result<()> 
                 if columns[0] != ROW_ID_COLUMN {
                     columns.insert(0, ROW_ID_COLUMN.into());
                 }
+
+                let mut current_row_id = tx
+                    .read_cursor(metadata.root)
+                    .next_row_id()
+                    .map_err(|_| sql::Error::InvalidSerialType)?;
+
                 for row in values.iter_mut() {
-                    let row_id = catalog.get_next_row_id_of_table(into)?;
-                    row.insert(0, Expression::Value(Value::Int(row_id.into())));
+                    row.insert(0, Expression::Value(Value::Int(current_row_id)));
+                    current_row_id += 1;
                 }
             }
 
@@ -63,7 +73,7 @@ pub fn prepare(statement: &mut Statement, catalog: &Catalog) -> sql::Result<()> 
         }
 
         Statement::Explain(inner) => {
-            prepare(&mut *inner, catalog)?;
+            prepare(tx, &mut *inner)?;
         }
 
         _ => {} // Nothing to do here.

@@ -2,8 +2,16 @@
 
 use thiserror::Error;
 
-use crate::sql::parser::statement::Expression;
+use crate::{
+    database::WriteDbTx,
+    sql::parser::statement::Expression,
+    vm::{
+        planner::ExecutionPlan,
+        query_result::{QueryResult, RowIterator},
+    },
+};
 
+pub mod ddl;
 pub mod expression;
 pub mod operator;
 pub mod planner;
@@ -30,4 +38,23 @@ pub enum Error {
 
     #[error(transparent)]
     SchemaError(#[from] crate::sql::schema::Error),
+}
+
+pub fn execute_read<'tx>(plan: ExecutionPlan<'tx>) -> Result<QueryResult<'tx>> {
+    match plan {
+        ExecutionPlan::Select(operator) => Ok(QueryResult::Rows(RowIterator::new(operator))),
+        _ => todo!(),
+    }
+}
+
+pub fn execute_write<'tx, Tx: WriteDbTx>(
+    tx: &'tx Tx,
+    plan: ExecutionPlan<'tx>,
+) -> Result<QueryResult<'tx>> {
+    match plan {
+        ExecutionPlan::Select(operator) => Ok(QueryResult::Rows(RowIterator::new(operator))),
+        ExecutionPlan::Create(create) => ddl::create(tx, create),
+
+        _ => todo!(),
+    }
 }
