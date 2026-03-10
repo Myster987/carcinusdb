@@ -315,7 +315,7 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
         }
 
         if result.len() != total_size {
-            return Err(storage::Error::Corruped);
+            return Err(storage::Error::Corrupted);
         }
 
         Ok(Record::from_owned(result))
@@ -366,7 +366,7 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
         }
 
         if result.len() != total_size {
-            return Err(storage::Error::Corruped);
+            return Err(storage::Error::Corrupted);
         }
 
         Ok(Cow::Owned(result))
@@ -380,6 +380,15 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
         self.done = false;
     }
 
+    pub fn row_id(&self) -> storage::Result<RowId> {
+        let page = self
+            .pager
+            .read_page(self.tx.borrow().deref(), self.current_page)?;
+        let guard = page.lock_shared();
+        let key = self.extracty_key(&guard, self.current_slot)?;
+        Ok(key.row_id())
+    }
+
     /// Returns next row id that should be used for allocation. If called on
     /// index B-tree, this function will panic.
     pub fn next_row_id(&mut self) -> storage::Result<RowId> {
@@ -388,15 +397,7 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
             return Ok(1);
         }
 
-        let page = self
-            .pager
-            .read_page(self.tx.borrow().deref(), self.current_page)?;
-        let guard = page.lock_shared();
-
-        match self.extracty_key(&*guard, self.current_slot)? {
-            BTreeKey::TableKey((row_id, _)) => Ok(row_id + 1),
-            _ => panic!("This function should only be called on table B-trees."),
-        }
+        Ok(self.row_id()? + 1)
     }
 }
 
