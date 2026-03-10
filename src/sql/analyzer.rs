@@ -45,7 +45,7 @@ pub enum Error {
 
     // schema
     #[error(transparent)]
-    Schema(#[from] crate::sql::schema::Error),
+    SchemaError(#[from] crate::sql::schema::Error),
 
     // types
     #[error(transparent)]
