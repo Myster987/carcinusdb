@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+use std::collections::HashMap;
 
 use dashmap::DashMap;
 use thiserror::Error;
@@ -13,8 +13,7 @@ use crate::{
     },
     storage::{
         self, PageNumber,
-        btree::{BTreeCursor, DatabaseCursor, RowId},
-        pager::Pager,
+        btree::{BTreeCursor, DatabaseCursor},
         wal::transaction::ReadTx,
     },
 };

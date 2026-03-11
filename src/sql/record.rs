@@ -90,19 +90,14 @@ impl<'a> Record<'a> {
 impl<'a> Debug for Record<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut dbg_table = DebugTable::new();
-        let mut header = Vec::new();
         let mut row = Vec::new();
 
         for i in 0..self.len() {
-            // let serial_type = &self.column_values[i];
-            let dyn_ref: Box<dyn Debug> = Box::new(self.get_value(i));
-            header.push(format!("column {} value", i + 1));
-            row.push(dyn_ref);
+            dbg_table.add_column(&format!("column {} value", i + 1));
+            row.push(format!("{:?}", self.get_value(i)));
         }
 
-        header.iter().for_each(|h| dbg_table.add_column(h));
-
-        dbg_table.insert_row(row.iter().map(|v| v.as_ref()).collect());
+        dbg_table.insert_row(row);
 
         dbg_table.fmt(f)
     }
@@ -208,6 +203,10 @@ impl RecordBuilder {
         Self { values: Vec::new() }
     }
 
+    pub fn clear(&mut self) {
+        self.values.clear();
+    }
+
     pub fn add(&mut self, value: Value) {
         self.values.push(value);
     }
@@ -297,19 +296,14 @@ impl RecordBuilder {
 impl Debug for RecordBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut dbg_table = DebugTable::new();
-        let mut header = Vec::new();
         let mut row = Vec::new();
 
         for (i, val) in self.values.iter().enumerate() {
-            // let serial_type = &self.column_values[i];
-            let dyn_ref: Box<dyn Debug> = Box::new(val);
-            header.push(format!("column {} value", i + 1));
-            row.push(dyn_ref);
+            dbg_table.add_column(&format!("column {} value", i + 1));
+            row.push(format!("{:?}", val));
         }
 
-        header.iter().for_each(|h| dbg_table.add_column(h));
-
-        dbg_table.insert_row(row.iter().map(|v| v.as_ref()).collect());
+        dbg_table.insert_row(row);
 
         dbg_table.fmt(f)
     }

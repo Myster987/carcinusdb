@@ -30,7 +30,7 @@ pub enum Error {
     InvalidPageType,
     #[error("page number must be grater than 0")]
     PageNumberOutOfRange,
-    #[error("page is corrupted. Expected state doesn't match")]
+    #[error("page is corrupted. Expected state doesn't match.")]
     Corrupted,
     #[error("cell slot number is out of range")]
     CellIndexOutRange,

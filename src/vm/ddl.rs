@@ -9,7 +9,7 @@ use crate::{
         schema::{Schema, TableMetadata},
         types::{Value, text::Text},
     },
-    storage::btree::{BTreeKey, BTreeType, InsertOptionsBuilder},
+    storage::btree::{BTreeKey, BTreeType, InsertOptions},
     vm::{self, query_result::QueryResult},
 };
 
@@ -33,7 +33,6 @@ fn create_table<'tx, Tx: WriteDbTx>(
 ) -> vm::Result<QueryResult<'tx>> {
     let root_page = tx.create_btree(BTreeType::Table)?;
 
-    // 2. reconstruct the original sql to store in master table
     let sql = reconstruct_create_table_sql(&name, &columns);
 
     let mut record = RecordBuilder::new();
@@ -52,7 +51,7 @@ fn create_table<'tx, Tx: WriteDbTx>(
 
     cursor.insert(
         BTreeKey::new_table_key(row_id, Some(record)),
-        InsertOptionsBuilder::new().build(),
+        InsertOptions::default(),
     )?;
 
     let schema = Schema::new(columns.into_iter().map(|c| c.into()).collect());
@@ -65,7 +64,7 @@ fn create_table<'tx, Tx: WriteDbTx>(
     Ok(QueryResult::RowsAffected(1))
 }
 
-// reconstructs "CREATE TABLE name (col1 TYPE, col2 TYPE NOT NULL, ...)"
+// Reconstructs "CREATE TABLE name (col1 TYPE, col2 TYPE NOT NULL, ...)" SQL.
 fn reconstruct_create_table_sql(name: &str, columns: &[parser::statement::Column]) -> String {
     let cols = columns
         .iter()
@@ -83,5 +82,5 @@ fn reconstruct_create_table_sql(name: &str, columns: &[parser::statement::Column
         .collect::<Vec<_>>()
         .join(", ");
 
-    format!("CREATE TABLE {name} ({cols})")
+    format!("CREATE TABLE {name} ({cols});")
 }

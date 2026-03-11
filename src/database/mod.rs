@@ -212,8 +212,6 @@ impl Database {
             Arc::new(Catalog::from_cursor(cursor)?)
         };
 
-        log::debug!("Catalog: {:?}", catalog);
-
         Ok(Self { pager, catalog })
     }
 
@@ -502,13 +500,13 @@ mod tests {
 
             // log::debug!("Query: {:?}", query);
 
-            log::debug!("catalog: {:?}", tx.catalog);
+            // let query = tx.execute("INSERT INTO test VALUES (2, \"test_2\");")?;
 
-            let query = tx.execute("SELECT id FROM test;")?;
+            // log::debug!("Query: {:?}", query);
 
-            log::debug!("Query: {:?}", query);
+            let query = tx.execute("SELECT * FROM test WHERE id = 1;")?;
 
-            // log::info!("\"test\" table created.");
+            println!("{}", query.to_string()?);
         }
 
         tx.commit()?;
