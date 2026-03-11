@@ -1,13 +1,37 @@
 use std::fmt::Debug;
 
-use crate::vm::{
-    self,
-    operator::{Operator, Row},
+use crate::{
+    utils::debug_table::DebugTable,
+    vm::{
+        self,
+        operator::{Operator, Row},
+    },
 };
 
 pub enum QueryResult<'tx> {
     Rows(RowIterator<'tx>),
     RowsAffected(usize),
+}
+
+impl<'tx> QueryResult<'tx> {
+    pub fn to_string(self) -> vm::Result<String> {
+        match self {
+            Self::RowsAffected(affected) => Ok(format!("{} rows affected", affected)),
+            Self::Rows(rows) => {
+                let columns = rows.operator.schema().column_names();
+                let collected = rows.collect::<vm::Result<Vec<_>>>()?;
+
+                let mut table = DebugTable::new();
+                columns.iter().for_each(|col| table.add_column(col));
+
+                for row in &collected {
+                    table.insert_row(row.values().iter().map(|v| v.to_string()).collect());
+                }
+
+                Ok(format!("{}", table))
+            }
+        }
+    }
 }
 
 impl Debug for QueryResult<'_> {
