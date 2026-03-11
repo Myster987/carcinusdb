@@ -12,6 +12,7 @@ use crate::{
 };
 
 pub mod ddl;
+pub mod dml;
 pub mod expression;
 pub mod operator;
 pub mod planner;
@@ -43,7 +44,7 @@ pub enum Error {
 pub fn execute_read<'tx>(plan: ExecutionPlan<'tx>) -> Result<QueryResult<'tx>> {
     match plan {
         ExecutionPlan::Select(operator) => Ok(QueryResult::Rows(RowIterator::new(operator))),
-        _ => todo!(),
+        _ => unreachable!(),
     }
 }
 
@@ -53,8 +54,14 @@ pub fn execute_write<'tx, Tx: WriteDbTx>(
 ) -> Result<QueryResult<'tx>> {
     match plan {
         ExecutionPlan::Select(operator) => Ok(QueryResult::Rows(RowIterator::new(operator))),
+
         ExecutionPlan::Create(create) => ddl::create(tx, create),
 
+        ExecutionPlan::Insert {
+            into,
+            columns,
+            values,
+        } => dml::insert(tx, into, columns, values),
         _ => todo!(),
     }
 }
