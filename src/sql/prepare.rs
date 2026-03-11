@@ -68,7 +68,9 @@ pub fn prepare<Tx: ReadDbTx>(tx: &Tx, statement: &mut Statement) -> sql::Result<
             for current_index in 0..metadata.schema.len() {
                 let sorted_index = metadata.schema.index_of(&columns[current_index]).unwrap();
                 columns.swap(current_index, sorted_index);
-                values.swap(current_index, sorted_index);
+                for row in values.iter_mut() {
+                    row.swap(current_index, sorted_index);
+                }
             }
         }
 
