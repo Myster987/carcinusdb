@@ -1,5 +1,5 @@
 use crate::{
-    sql::{self, parser::statement::Expression},
+    sql::{self, parser::statement::Expression, schema::Schema},
     vm::{
         self,
         operator::{Operator, Row},
@@ -9,23 +9,35 @@ use crate::{
 pub struct Projection<'tx> {
     child: Box<dyn Operator + 'tx>,
     indicies: Vec<usize>,
+    schema: Schema,
 }
 
 impl<'tx> Projection<'tx> {
     pub fn new(child: Box<dyn Operator + 'tx>, columns: Vec<Expression>) -> vm::Result<Self> {
-        let schema = child.schema();
+        let child_schema = child.schema();
 
         let indicies = columns
             .iter()
             .map(|expr| match expr {
-                Expression::Identifier(ident) => schema
+                Expression::Identifier(ident) => child_schema
                     .index_of(ident)
                     .ok_or(sql::analyzer::Error::ColumnNotFound(ident.to_owned()).into()),
                 _ => Err(vm::Error::Unsupported(expr.clone())),
             })
             .collect::<vm::Result<Vec<usize>>>()?;
 
-        Ok(Self { child, indicies })
+        let output_schema = indicies
+            .iter()
+            .map(|&i| child_schema.columns[i].clone())
+            .collect();
+
+        let schema = Schema::new(output_schema);
+
+        Ok(Self {
+            child,
+            indicies,
+            schema,
+        })
     }
 }
 
@@ -38,6 +50,6 @@ impl<'tx> Operator for Projection<'tx> {
     }
 
     fn schema(&self) -> &crate::sql::schema::Schema {
-        self.child.schema()
+        &self.schema
     }
 }
