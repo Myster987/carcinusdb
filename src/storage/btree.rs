@@ -786,6 +786,21 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         }
     }
 
+    pub fn delete_current(
+        &mut self,
+        options: DeleteOptions,
+    ) -> storage::Result<Option<Record<'static>>> {
+        let removed_cell = self.try_delete_from_leaf(self.current_slot)?;
+
+        let record = if options.is_returning() {
+            Some(self.owned_record_from_cell(&removed_cell)?)
+        } else {
+            None
+        };
+
+        Ok(record)
+    }
+
     fn try_delete_from_leaf(&mut self, slot_number: SlotNumber) -> storage::Result<BTreeCell> {
         let page = self
             .pager
@@ -835,8 +850,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         log::trace!("Children allocated: left - {left_child} right - {right_child}");
 
         let mut cells: VecDeque<_> = root_guard.drain(..).collect();
-
-        log::debug!("Root after drain overflow: {}", root_guard.is_overflow());
 
         let cell_sizes: Vec<_> = cells.iter().map(|c| c.local_size()).collect();
 
