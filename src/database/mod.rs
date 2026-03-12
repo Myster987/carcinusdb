@@ -261,7 +261,7 @@ impl DatabaseReadTransaction {
     pub fn execute<'tx>(&'tx self, sql: &str) -> Result<QueryResult<'tx>> {
         let statement = sql::pipeline(self, sql)?;
 
-        let plan = vm::planner::plan(statement, self)?;
+        let plan = vm::planner::plan_read(statement, self)?;
         vm::execute_read(plan).map_err(Into::into)
     }
 
@@ -306,7 +306,7 @@ impl<'tx> DatabaseWriteTransaction<'tx> {
     pub fn execute(&self, sql: &str) -> Result<QueryResult<'_>> {
         let statement = sql::pipeline(self, sql)?;
 
-        let plan = vm::planner::plan(statement, self)?;
+        let plan = vm::planner::plan_write(statement, self)?;
         vm::execute_write(self, plan).map_err(Into::into)
     }
 
@@ -500,11 +500,19 @@ mod tests {
 
             // log::debug!("Query: {:?}", query);
 
-            // let query = tx.execute("INSERT INTO test VALUES (2, \"test_2\");")?;
+            // let query = tx.execute("INSERT INTO test VALUES (3, \"test_3\");")?;
 
-            // log::debug!("Query: {:?}", query);
+            // println!("{}", query.to_string()?);
 
-            let query = tx.execute("SELECT * FROM test WHERE id = 1;")?;
+            let query = tx.execute("SELECT name, id FROM test;")?;
+
+            println!("{}", query.to_string()?);
+
+            let query = tx.execute("DELETE FROM test;")?;
+
+            println!("{}", query.to_string()?);
+
+            let query = tx.execute("SELECT name, id FROM test;")?;
 
             println!("{}", query.to_string()?);
         }
