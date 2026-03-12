@@ -25,6 +25,9 @@ pub enum Error {
     #[error("division by zero: {0} / {1}")]
     DivisionByZero(i64, i64),
 
+    #[error("transaction is in read only mode.")]
+    ReadOnly,
+
     #[error("unsupported expression: {0}")]
     Unsupported(Expression),
 
@@ -43,8 +46,8 @@ pub enum Error {
 
 pub fn execute_read<'tx>(plan: ExecutionPlan<'tx>) -> Result<QueryResult<'tx>> {
     match plan {
-        ExecutionPlan::Select(operator) => Ok(QueryResult::Rows(RowIterator::new(operator))),
-        _ => unreachable!(),
+        ExecutionPlan::Query(operator) => Ok(QueryResult::Rows(RowIterator::new(operator))),
+        _ => Err(Error::ReadOnly),
     }
 }
 
@@ -53,15 +56,10 @@ pub fn execute_write<'tx, Tx: WriteDbTx>(
     plan: ExecutionPlan<'tx>,
 ) -> Result<QueryResult<'tx>> {
     match plan {
-        ExecutionPlan::Select(operator) => Ok(QueryResult::Rows(RowIterator::new(operator))),
+        ExecutionPlan::Query(operator) => Ok(QueryResult::Rows(RowIterator::new(operator))),
 
         ExecutionPlan::Create(create) => ddl::create(tx, create),
 
-        ExecutionPlan::Insert {
-            into,
-            columns,
-            values,
-        } => dml::insert(tx, into, columns, values),
         _ => todo!(),
     }
 }

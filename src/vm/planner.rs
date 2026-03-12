@@ -1,29 +1,17 @@
 use crate::{
-    database::ReadDbTx,
+    database::{ReadDbTx, WriteDbTx},
     sql::parser::statement::{Assignment, Create, Drop, Expression, Statement},
-    vm::{
-        self,
-        operator::{Operator, filter::Filter, projection::Projection, seq_scan::SeqScan},
-    },
+    vm::{self, dml, operator::Operator},
 };
 
 pub enum ExecutionPlan<'tx> {
     // iterator based
-    Select(Box<dyn Operator + 'tx>),
+    Query(Box<dyn Operator + 'tx>),
 
     // literal - execute immediately
-    Insert {
-        into: String,
-        columns: Vec<String>,
-        values: Vec<Vec<Expression>>,
-    },
     Update {
         table: String,
         columns: Vec<Assignment>,
-        r#where: Option<Expression>,
-    },
-    Delete {
-        from: String,
         r#where: Option<Expression>,
     },
 
@@ -40,27 +28,55 @@ pub enum ExecutionPlan<'tx> {
     Explain(Box<ExecutionPlan<'tx>>),
 }
 
-pub fn plan<'tx, Tx: ReadDbTx>(stmt: Statement, tx: &'tx Tx) -> vm::Result<ExecutionPlan<'tx>> {
-    match stmt {
+pub fn plan_read<'tx, Tx: ReadDbTx>(
+    statement: Statement,
+    tx: &'tx Tx,
+) -> vm::Result<ExecutionPlan<'tx>> {
+    match statement {
         Statement::Select {
             columns,
             from,
             r#where,
             order_by,
-        } => Ok(ExecutionPlan::Select(plan_select(
-            columns, from, r#where, order_by, tx,
-        )?)),
+        } => {
+            let select = dml::select::Select::new(tx, columns, from, r#where, order_by)?;
+            Ok(ExecutionPlan::Query(Box::new(select)))
+        }
 
-        // literal - planner just forwards them
+        Statement::Explain(inner) => Ok(ExecutionPlan::Explain(Box::new(plan_read(*inner, tx)?))),
+
+        _ => Err(vm::Error::ReadOnly),
+    }
+}
+
+pub fn plan_write<'tx>(
+    statement: Statement,
+    tx: &'tx impl WriteDbTx,
+) -> vm::Result<ExecutionPlan<'tx>> {
+    match statement {
+        Statement::Select {
+            columns,
+            from,
+            r#where,
+            order_by,
+        } => {
+            let select = dml::select::Select::new(tx, columns, from, r#where, order_by)?;
+            Ok(ExecutionPlan::Query(Box::new(select)))
+        }
         Statement::Insert {
             into,
             columns,
             values,
-        } => Ok(ExecutionPlan::Insert {
-            into,
-            columns,
-            values,
-        }),
+        } => {
+            let table = tx.catalog().get_table(&into)?;
+            let insert = dml::insert::Insert::new(
+                tx.write_cursor(table.root),
+                table.schema,
+                columns,
+                values,
+            );
+            Ok(ExecutionPlan::Query(Box::new(insert)))
+        }
         Statement::Update {
             table,
             columns,
@@ -70,7 +86,13 @@ pub fn plan<'tx, Tx: ReadDbTx>(stmt: Statement, tx: &'tx Tx) -> vm::Result<Execu
             columns,
             r#where,
         }),
-        Statement::Delete { from, r#where } => Ok(ExecutionPlan::Delete { from, r#where }),
+        Statement::Delete { from, r#where } => {
+            let table = tx.catalog().get_table(&from)?;
+            let delete =
+                dml::delete::Delete::new(tx.write_cursor(table.root), table.schema, r#where)?;
+            Ok(ExecutionPlan::Query(Box::new(delete)))
+        }
+
         Statement::Create(s) => Ok(ExecutionPlan::Create(s)),
         Statement::Drop(s) => Ok(ExecutionPlan::Drop(s)),
 
@@ -78,33 +100,6 @@ pub fn plan<'tx, Tx: ReadDbTx>(stmt: Statement, tx: &'tx Tx) -> vm::Result<Execu
         Statement::Rollback => Ok(ExecutionPlan::Rollback),
         Statement::Commit => Ok(ExecutionPlan::Commit),
 
-        // recursively plan the inner statement
-        Statement::Explain(inner) => {
-            let inner_plan = plan(*inner, tx)?;
-            Ok(ExecutionPlan::Explain(Box::new(inner_plan)))
-        }
+        Statement::Explain(inner) => Ok(ExecutionPlan::Explain(Box::new(plan_write(*inner, tx)?))),
     }
-}
-
-fn plan_select<'tx, Tx: ReadDbTx>(
-    columns: Vec<Expression>,
-    from: String,
-    r#where: Option<Expression>,
-    order_by: Vec<Expression>,
-    tx: &'tx Tx,
-) -> vm::Result<Box<dyn Operator + 'tx>> {
-    let table = tx.catalog().get_table(&from)?;
-    let cursor = tx.read_cursor(table.root);
-
-    let mut plan: Box<dyn Operator + 'tx> = Box::new(SeqScan::new(cursor, table.schema.clone()));
-
-    if let Some(expr) = r#where {
-        plan = Box::new(Filter::new(plan, expr));
-    }
-
-    if !columns.is_empty() {
-        plan = Box::new(Projection::new(plan, columns)?);
-    }
-
-    Ok(plan)
 }
