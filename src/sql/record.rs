@@ -211,6 +211,10 @@ impl RecordBuilder {
         self.values.push(value);
     }
 
+    pub fn set(&mut self, index: usize, new_value: Value) -> Value {
+        std::mem::replace(&mut self.values[index], new_value)
+    }
+
     fn calculate_header_size(size_of_serial_types: usize) -> usize {
         if size_of_serial_types < i8::MAX as usize {
             return size_of_serial_types + 1;
@@ -290,6 +294,16 @@ impl RecordBuilder {
 
     pub fn get(&self, index: usize) -> &Value {
         &self.values[index]
+    }
+
+    pub fn from_record(record: &Record<'_>) -> Self {
+        Self {
+            values: record
+                .values()
+                .iter()
+                .map(|value| value.to_owned())
+                .collect(),
+        }
     }
 }
 
