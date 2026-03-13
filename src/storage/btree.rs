@@ -726,6 +726,22 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         }
     }
 
+    pub fn update_current(
+        &mut self,
+        entry: BTreeKey<'_>,
+        options: InsertOptions,
+    ) -> storage::Result<Option<Record<'static>>> {
+        let record = if options.is_returning() {
+            entry.get_record().map(|r| r.to_owned())
+        } else {
+            None
+        };
+
+        self.try_insert_into_leaf(self.current_slot, entry, true)?;
+
+        Ok(record)
+    }
+
     /// Attempts to insert entry into leaf page at given slot number. This
     /// function may cause page split and automatic flush of dirty pages,
     /// after write operation is completed.
