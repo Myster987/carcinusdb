@@ -1,19 +1,12 @@
 use crate::{
     database::{ReadDbTx, WriteDbTx},
-    sql::parser::statement::{Assignment, Create, Drop, Expression, Statement},
+    sql::parser::statement::{Create, Drop, Statement},
     vm::{self, dml, operator::Operator},
 };
 
 pub enum ExecutionPlan<'tx> {
     // iterator based
     Query(Box<dyn Operator + 'tx>),
-
-    // literal - execute immediately
-    Update {
-        table: String,
-        columns: Vec<Assignment>,
-        r#where: Option<Expression>,
-    },
 
     // table or index
     Create(Create),
@@ -81,11 +74,16 @@ pub fn plan_write<'tx>(
             table,
             columns,
             r#where,
-        } => Ok(ExecutionPlan::Update {
-            table,
-            columns,
-            r#where,
-        }),
+        } => {
+            let table = tx.catalog().get_table(&table)?;
+            let update = dml::update::Update::new(
+                tx.write_cursor(table.root),
+                table.schema,
+                columns,
+                r#where,
+            )?;
+            Ok(ExecutionPlan::Query(Box::new(update)))
+        }
         Statement::Delete { from, r#where } => {
             let table = tx.catalog().get_table(&from)?;
             let delete =
