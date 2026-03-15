@@ -50,6 +50,10 @@ impl<'a> Record<'a> {
         self.cursor.borrow_mut().get_value(&self.payload, index)
     }
 
+    pub fn size(&self) -> usize {
+        self.payload.len()
+    }
+
     pub fn count(&self) -> usize {
         self.cursor.borrow_mut().len(&self.payload)
     }
