@@ -657,15 +657,21 @@ impl Page {
         // we can fit new cell in
         if old_cell_size >= new_cell_size {
             let freed_space = old_cell_size - new_cell_size;
-            let offset = self.slot_array().get(index) + new_cell_size as u16;
+            let cell_start = self.slot_array().get(index);
 
-            self.freeblock_list()
-                .push_freeblock(offset, freed_space as u16);
+            if freed_space < 4 {
+                self.set_free_fragments(self.free_fragments() + freed_space as u8);
+            } else {
+                let freeblock_offset = cell_start + new_cell_size as u16;
+
+                self.freeblock_list()
+                    .push_freeblock(freeblock_offset, freed_space as u16);
+            }
 
             // copy old cell
             let owned_old_cell = old_cell.to_owned();
 
-            let _ = write_btree_cell(self.as_ptr(), offset, &new_cell);
+            let _ = write_btree_cell(self.as_ptr(), cell_start, &new_cell);
 
             return Ok(owned_old_cell);
         }
