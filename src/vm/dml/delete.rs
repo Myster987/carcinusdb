@@ -1,72 +1,66 @@
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
+
 use crate::{
-    sql::{parser::statement::Expression, schema::Schema, types::Value},
+    sql::{parser::statement::Expression, schema::Schema},
     storage::{
-        btree::{BTreeCursor, DatabaseCursor, DeleteOptions},
+        btree::{BTreeCursor, DeleteOptions},
         wal::transaction::WriteTx,
     },
     vm::{
         self,
-        expression::resolve_expression_to_value,
-        operator::{Operator, Row},
+        operator::{Operator, Row, filter::Filter, seq_scan::SeqScan},
     },
 };
-pub struct Delete<'tx, Tx: WriteTx> {
-    cursor: BTreeCursor<'tx, Tx>,
-    predicate: Option<Expression>,
-    schema: Schema,
-    started: bool,
+
+pub struct Delete<'tx, Tx: WriteTx + 'tx> {
+    cursor: Rc<RefCell<BTreeCursor<'tx, Tx>>>,
+    operator: Box<dyn Operator + 'tx>,
+    skip_advance: Rc<Cell<bool>>,
 }
 
-impl<'tx, Tx: WriteTx> Delete<'tx, Tx> {
+impl<'tx, Tx: WriteTx + 'tx> Delete<'tx, Tx> {
     pub fn new(
         cursor: BTreeCursor<'tx, Tx>,
         schema: Schema,
-        predicate: Option<Expression>,
+        r#where: Option<Expression>,
     ) -> vm::Result<Self> {
+        let cursor = Rc::new(RefCell::new(cursor));
+        let scan = SeqScan::new(cursor.clone(), schema);
+        let skip_advance = scan.skip_advance.clone();
+
+        let mut plan: Box<dyn Operator + 'tx> = Box::new(scan);
+
+        if let Some(expr) = r#where {
+            plan = Box::new(Filter::new(plan, expr));
+        }
+
         Ok(Self {
             cursor,
-            predicate,
-            schema,
-            started: false,
+            operator: plan,
+            skip_advance,
         })
     }
 }
 
 impl<'tx, Tx: WriteTx> Operator for Delete<'tx, Tx> {
     fn next(&mut self) -> vm::Result<Option<Row>> {
-        if !self.started {
-            self.started = true;
-            if !self.cursor.seek_first()? {
-                return Ok(None);
-            }
-        }
+        let Some(row) = self.operator.next()? else {
+            return Ok(None);
+        };
 
-        loop {
-            let row = match self.cursor.try_record() {
-                Ok(row) => row,
-                Err(_) => return Ok(None),
-            };
+        self.cursor
+            .borrow_mut()
+            .delete_current(DeleteOptions::default())?;
+        // tell SeqScan: cursor already advanced, skip next advance
+        self.skip_advance.set(true);
 
-            let matches = match &self.predicate {
-                None => true,
-                Some(expr) => matches!(
-                    resolve_expression_to_value(&row, &self.schema, expr)?,
-                    Value::Bool(true)
-                ),
-            };
-
-            if matches {
-                self.cursor.delete_current(DeleteOptions::default())?;
-                return Ok(Some(row));
-            } else {
-                if !self.cursor.next()? {
-                    return Ok(None);
-                }
-            }
-        }
+        Ok(Some(row))
     }
 
     fn schema(&self) -> &Schema {
-        &self.schema
+        self.operator.schema()
     }
 }

@@ -1,3 +1,8 @@
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
+
 use crate::{
     sql::schema::Schema,
     storage::{
@@ -11,35 +16,41 @@ use crate::{
 };
 
 pub struct SeqScan<'tx, Tx: ReadTx> {
-    cursor: BTreeCursor<'tx, Tx>,
+    cursor: Rc<RefCell<BTreeCursor<'tx, Tx>>>,
     schema: Schema,
     started: bool,
+    pub skip_advance: Rc<Cell<bool>>,
 }
 
 impl<'tx, Tx: ReadTx> SeqScan<'tx, Tx> {
-    pub fn new(cursor: BTreeCursor<'tx, Tx>, schema: Schema) -> Self {
+    pub fn new(cursor: Rc<RefCell<BTreeCursor<'tx, Tx>>>, schema: Schema) -> Self {
         Self {
             cursor,
             schema,
             started: false,
+            skip_advance: Rc::new(Cell::new(false)),
         }
     }
 }
 
 impl<'tx, Tx: ReadTx> Operator for SeqScan<'tx, Tx> {
     fn next(&mut self) -> vm::Result<Option<Row>> {
+        let mut cursor = self.cursor.borrow_mut();
         if !self.started {
             self.started = true;
-            if !self.cursor.seek_first()? {
+            if !cursor.seek_first()? {
                 return Ok(None);
             }
+        } else if self.skip_advance.get() {
+            // cursor already advanced by delete/update — just read current
+            self.skip_advance.set(false);
         } else {
-            if !self.cursor.next()? {
+            if !cursor.next()? {
                 return Ok(None);
             }
         }
 
-        let record = self.cursor.try_record()?;
+        let record = cursor.try_record()?;
         Ok(Some(record.to_owned()))
     }
 
