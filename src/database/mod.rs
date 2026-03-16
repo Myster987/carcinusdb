@@ -496,23 +496,28 @@ mod tests {
         let tx = db.begin_write()?;
 
         {
-            // let query = tx.execute("CREATE TABLE test (id INT PRIMARY KEY, name TEXT);")?;
+            let query = tx.execute("CREATE TABLE test (id INT PRIMARY KEY, name TEXT);")?;
 
-            // log::debug!("Query: {:?}", query);
+            log::debug!("Query: {:?}", query);
 
-            // let query = tx.execute("INSERT INTO test VALUES (3, \"test_3\");")?;
+            for i in 1..=10 {
+                let sql = format!("INSERT INTO test VALUES ({i}, 'test_{i}');");
+                let query = tx.execute(&sql)?;
+                println!("{}", query.to_string()?);
+            }
 
-            // println!("{}", query.to_string()?);
+            let query = tx.execute("UPDATE test SET name = 'macie' WHERE id = 1;")?;
+            println!("{}", query.to_string()?);
 
-            let query = tx.execute("SELECT name, id FROM test;")?;
+            let query = tx.execute("SELECT * FROM test;")?;
 
             println!("{}", query.to_string()?);
 
-            let query = tx.execute("DELETE FROM test;")?;
+            let query = tx.execute("DELETE FROM test WHERE id >= 5;")?;
 
             println!("{}", query.to_string()?);
 
-            let query = tx.execute("SELECT name, id FROM test;")?;
+            let query = tx.execute("SELECT * FROM test;")?;
 
             println!("{}", query.to_string()?);
         }
