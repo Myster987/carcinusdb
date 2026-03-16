@@ -1,6 +1,9 @@
 use crate::{
     database::{ReadDbTx, WriteDbTx},
-    sql::parser::statement::{Create, Drop, Statement},
+    sql::{
+        parser::statement::{Create, Drop, Expression, Statement},
+        schema::{IndexMetadata, TableMetadata},
+    },
     vm::{self, dml, operator::Operator},
 };
 
@@ -32,7 +35,14 @@ pub fn plan_read<'tx, Tx: ReadDbTx>(
             r#where,
             order_by,
         } => {
-            let select = dml::select::Select::new(tx, columns, from, r#where, order_by)?;
+            let table = tx.catalog().get_table(&from)?;
+            let select = dml::select::Select::new(
+                tx.read_cursor(table.root),
+                table.schema,
+                columns,
+                r#where,
+                order_by,
+            )?;
             Ok(ExecutionPlan::Query(Box::new(select)))
         }
 
@@ -53,7 +63,14 @@ pub fn plan_write<'tx>(
             r#where,
             order_by,
         } => {
-            let select = dml::select::Select::new(tx, columns, from, r#where, order_by)?;
+            let table = tx.catalog().get_table(&from)?;
+            let select = dml::select::Select::new(
+                tx.read_cursor(table.root),
+                table.schema,
+                columns,
+                r#where,
+                order_by,
+            )?;
             Ok(ExecutionPlan::Query(Box::new(select)))
         }
         Statement::Insert {

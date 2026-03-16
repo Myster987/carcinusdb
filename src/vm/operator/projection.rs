@@ -49,7 +49,7 @@ impl<'tx> Operator for Projection<'tx> {
         }
     }
 
-    fn schema(&self) -> &crate::sql::schema::Schema {
+    fn schema(&self) -> &Schema {
         &self.schema
     }
 }
