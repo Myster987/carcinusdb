@@ -294,8 +294,9 @@ fn analyze_assignment(
     let index = table
         .index_of(column)
         .ok_or(Error::ColumnNotFound(column.to_owned()))?;
+    let schema_column = &table.schema.columns[index];
 
-    let expected_data_type = table.schema.columns[index].data_type;
+    let expected_data_type = schema_column.data_type;
 
     let found_data_type = if allow_identifier {
         analyze_expression(&table.schema, value)?
@@ -303,7 +304,11 @@ fn analyze_assignment(
         analyze_expression(&Schema::empty(), value)?
     };
 
-    if expected_data_type != found_data_type {
+    if expected_data_type != found_data_type && schema_column.default.is_none() {
+        if matches!(found_data_type, ValueType::Null) && schema_column.properties.is_null() {
+            return Ok(());
+        }
+
         return Err(Error::TypeError(TypeError::ExpectedType {
             expected: expected_data_type,
             found: value.clone(),

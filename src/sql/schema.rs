@@ -329,6 +329,10 @@ impl ColumnProperties {
         self.flags & Self::NULL != 0
     }
 
+    pub fn is_not_null(&self) -> bool {
+        !self.is_null()
+    }
+
     pub fn set_null(&mut self) {
         self.flags |= Self::NULL;
     }
