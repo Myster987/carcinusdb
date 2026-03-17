@@ -863,8 +863,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         let root_guard = root_page.lock_exclusive();
         let is_leaf = root_guard.is_leaf();
 
-        log::trace!("Children allocated: left - {left_child} right - {right_child}");
-
         let mut cells: VecDeque<_> = root_guard.drain(..).collect();
 
         let cell_sizes: Vec<_> = cells.iter().map(|c| c.local_size()).collect();
@@ -889,8 +887,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         };
 
         {
-            log::trace!("Moving cells to left child {}", left_child);
-
             let left_child = self.pager.read_page(self.tx.borrow().deref(), left_child)?;
             let left_child_guard = left_child.lock_exclusive();
 
@@ -917,8 +913,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         }
 
         {
-            log::trace!("Moving cells to right child {}", right_child);
-
             let right_child = self
                 .pager
                 .read_page(self.tx.borrow().deref(), right_child)?;
@@ -959,11 +953,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
     fn balance(&mut self) -> storage::Result<()> {
         log::trace!("Begin balance at page: {}", self.current_page);
-        log::trace!(
-            "Parents of page {}: {:?}",
-            self.current_page,
-            self.path_stack
-        );
 
         loop {
             let current_page = self
