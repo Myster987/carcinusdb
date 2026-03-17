@@ -50,7 +50,9 @@ impl<'tx, Tx: ReadTx> Operator for SeqScan<'tx, Tx> {
             }
         }
 
-        let record = cursor.try_record()?;
+        let Ok(record) = cursor.try_record() else {
+            return Ok(None);
+        };
         Ok(Some(record.to_owned()))
     }
 
