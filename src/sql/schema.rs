@@ -57,7 +57,7 @@ impl Catalog {
             // master table row format
             // 0. type
             // 1. name
-            // 2. tbl_name
+            // 2. table_name
             // 3. root_page
             // 4. sql
 

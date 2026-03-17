@@ -127,6 +127,8 @@ impl<'a> Tokenizer<'a> {
             "UNIQUE" => Keyword::Unique,
             "TABLE" => Keyword::Table,
             "DATABASE" => Keyword::Database,
+            "NOT" => Keyword::Not,
+            "NULL" => Keyword::Null,
             "INT" => Keyword::Int,
             // "BIGINT" => Keyword::BigInt,
             // "UNSIGNED" => Keyword::Unsigned,

@@ -58,6 +58,12 @@ pub enum Error {
     #[error("invalid value of type {0}")]
     InvalidValue(&'static str),
 
+    // prepare
+    #[error("null value in column \"{0}\" violates not-null constraint")]
+    NotNullViolation(String),
+    #[error("column \"{0}\" has no default value and no value was provided")]
+    MissingValue(String),
+
     // record
     #[error("corrupted record")]
     CorruptedRecord(#[from] crate::utils::Error),

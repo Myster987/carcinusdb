@@ -207,6 +207,7 @@ impl Display for UnaryOperator {
 /// SQL data types.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum DataType {
+    Null,
     Int,
     // UnsignedInt,
     // BigInt,
@@ -220,6 +221,7 @@ pub enum DataType {
 impl Display for DataType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Null => f.write_str("NULL"),
             Self::Int => f.write_str("INT"),
             // Self::UnsignedInt => f.write_str("INT UNSIGNED"),
             // Self::BigInt => f.write_str("BIGINT"),

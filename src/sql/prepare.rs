@@ -72,6 +72,36 @@ pub fn prepare<Tx: ReadDbTx>(tx: &Tx, statement: &mut Statement) -> sql::Result<
                     row.swap(current_index, sorted_index);
                 }
             }
+
+            for col in metadata.schema.columns.iter() {
+                if col.name == ROW_ID_COLUMN {
+                    continue;
+                }
+
+                let col_idx = metadata.schema.index_of(&col.name).unwrap();
+                let provided = columns.contains(&col.name);
+
+                for row in values.iter_mut() {
+                    if provided {
+                        if col.properties.is_not_null() {
+                            if let Expression::Value(Value::Null) = &row[col_idx] {
+                                return Err(sql::Error::NotNullViolation(col.name.clone()));
+                            }
+                        }
+                    } else {
+                        let value = match &col.default {
+                            Some(default) => Expression::Value(default.clone()),
+                            None if col.properties.is_null() => Expression::Value(Value::Null),
+                            None => return Err(sql::Error::MissingValue(col.name.clone())),
+                        };
+                        if col_idx < row.len() {
+                            row[col_idx] = value;
+                        } else {
+                            row.push(value);
+                        }
+                    }
+                }
+            }
         }
 
         Statement::Explain(inner) => {

@@ -234,6 +234,7 @@ impl<'a> Parser<'a> {
             Token::Identifier(identifier) => Ok(Expression::Identifier(identifier)),
             Token::Mul => Ok(Expression::Wildcard),
 
+            Token::Keyword(Keyword::Null) => Ok(Expression::Value(Value::Null)),
             Token::String(value) => Ok(Expression::Value(Value::Text(Text::new(value)))),
             Token::Keyword(Keyword::True) => Ok(Expression::Value(Value::Bool(true))),
             Token::Keyword(Keyword::False) => Ok(Expression::Value(Value::Bool(false))),
@@ -351,6 +352,7 @@ impl<'a> Parser<'a> {
 
     fn parse_data_type(&mut self) -> sql::Result<DataType> {
         match self.next_keyword()? {
+            Keyword::Null => Ok(DataType::Null),
             Keyword::Int => Ok(DataType::Int),
             // Keyword::BigInt => Ok(DataType::BigInt),
             // Keyword::Unsigned => match self.next_keyword()? {
@@ -404,7 +406,7 @@ impl<'a> Parser<'a> {
         let mut constrains = vec![];
 
         loop {
-            let constrain = self.consume_one_of(&[Keyword::Primary, Keyword::Unique]);
+            let constrain = self.consume_one_of(&[Keyword::Primary, Keyword::Unique, Keyword::Not]);
             match constrain {
                 Keyword::Primary => {
                     self.expect_keyword(Keyword::Key)?;
@@ -412,6 +414,10 @@ impl<'a> Parser<'a> {
                 }
                 Keyword::Unique => {
                     constrains.push(Constrains::Unique);
+                }
+                Keyword::Not => {
+                    self.expect_keyword(Keyword::Null)?;
+                    constrains.push(Constrains::NotNull);
                 }
                 Keyword::None => break,
                 _ => unreachable!(),

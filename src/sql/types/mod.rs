@@ -44,6 +44,7 @@ impl From<u8> for ValueType {
 impl From<DataType> for ValueType {
     fn from(value: DataType) -> Self {
         match value {
+            DataType::Null => ValueType::Null,
             DataType::Boolean => ValueType::Bool,
             DataType::Int => ValueType::Int,
             DataType::Blob => ValueType::Blob,
