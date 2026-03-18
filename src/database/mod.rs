@@ -5,7 +5,11 @@ use thiserror::Error;
 
 use crate::{
     os::{Open, OpenOptions},
-    sql::{self, schema::Catalog},
+    sql::{
+        self,
+        schema::{Catalog, Column, ColumnProperties, Schema, TableMetadata},
+        types::ValueType,
+    },
     storage::{
         self, PageNumber,
         btree::{BTreeCursor, BTreeType},
@@ -211,6 +215,51 @@ impl Database {
 
             Arc::new(Catalog::from_cursor(cursor)?)
         };
+
+        let master_columns = {
+            let mut v = Vec::with_capacity(5);
+            v.push(Column::new(
+                "type",
+                ValueType::Text,
+                ColumnProperties::default(),
+                None,
+            ));
+            v.push(Column::new(
+                "name",
+                ValueType::Text,
+                ColumnProperties::default(),
+                None,
+            ));
+            v.push(Column::new(
+                "table_name",
+                ValueType::Text,
+                ColumnProperties::default(),
+                None,
+            ));
+            v.push(Column::new(
+                "root_page",
+                ValueType::Int,
+                ColumnProperties::default(),
+                None,
+            ));
+            v.push(Column::new(
+                "sql",
+                ValueType::Text,
+                ColumnProperties::default(),
+                None,
+            ));
+            v
+        };
+
+        let master_schema = Schema::new(master_columns);
+        let master_table = TableMetadata::new(
+            CARCINUSDB_MASTER_TABLE_ROOT,
+            CARCINUSDB_MASTER_TABLE.to_string(),
+            master_schema,
+            vec![],
+        );
+
+        catalog.insert_table(CARCINUSDB_MASTER_TABLE.to_string(), master_table);
 
         Ok(Self { pager, catalog })
     }
@@ -496,12 +545,19 @@ mod tests {
         let tx = db.begin_write()?;
 
         {
-            let query = tx.execute("CREATE TABLE test (id INT PRIMARY KEY, name TEXT);")?;
+            let query =
+                tx.execute("CREATE TABLE test (id INT PRIMARY KEY, name TEXT, age INT);")?;
 
             log::debug!("Query: {:?}", query);
 
+            println!(
+                "{}",
+                tx.execute(&format!("SELECT * FROM {CARCINUSDB_MASTER_TABLE};"))?
+                    .to_string()?
+            );
+
             for i in 1..=10 {
-                let sql = format!("INSERT INTO test VALUES ({i}, 'test_{i}');");
+                let sql = format!("INSERT INTO test VALUES ({i}, 'test_{i}', {});", i + 20);
                 let query = tx.execute(&sql)?;
                 println!("{}", query.to_string()?);
             }
