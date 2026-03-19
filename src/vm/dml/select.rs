@@ -1,31 +1,67 @@
 use std::{cell::RefCell, rc::Rc};
 
 use crate::{
+    database::ReadDbTx,
     sql::{parser::statement::Expression, schema::Schema},
-    storage::{btree::BTreeCursor, wal::transaction::ReadTx},
     vm::{
         self,
-        operator::{Operator, Row, filter::Filter, projection::Projection, seq_scan::SeqScan},
+        operator::{
+            Operator, Row,
+            filter::Filter,
+            index_scan::{IndexScan, ScanKind, find_index},
+            projection::Projection,
+            seq_scan::SeqScan,
+        },
     },
 };
 
-pub struct Select<'tx, Tx: ReadTx + 'tx> {
-    _cursor: Rc<RefCell<BTreeCursor<'tx, Tx>>>,
+pub struct Select<'tx> {
     operator: Box<dyn Operator + 'tx>,
 }
 
-impl<'tx, Tx: ReadTx + 'tx> Select<'tx, Tx> {
-    pub fn new(
-        cursor: BTreeCursor<'tx, Tx>,
-        schema: Schema,
+impl<'tx> Select<'tx> {
+    pub fn new<DbTx: ReadDbTx>(
+        tx: &'tx DbTx,
         columns: Vec<Expression>,
+        from: String,
         r#where: Option<Expression>,
         order_by: Vec<Expression>,
     ) -> vm::Result<Self> {
-        let cursor = Rc::new(RefCell::new(cursor));
-        let mut plan: Box<dyn Operator + 'tx> = Box::new(SeqScan::new(cursor.clone(), schema));
+        let table = tx.catalog().get_table(&from)?;
 
-        if let Some(expr) = r#where {
+        let (scan, residual): (Box<dyn Operator + 'tx>, Option<Expression>) =
+            match find_index(&r#where, &table) {
+                Some((index, ScanKind::Eq(val), residual)) => {
+                    let op = Box::new(IndexScan::eq(
+                        Rc::new(RefCell::new(tx.read_cursor(index.root))),
+                        Rc::new(RefCell::new(tx.read_cursor(table.root))),
+                        val,
+                        table.schema.clone(),
+                    ));
+                    (op, residual)
+                }
+                Some((index, ScanKind::Range(lo, hi), residual)) => {
+                    let op = Box::new(IndexScan::range(
+                        Rc::new(RefCell::new(tx.read_cursor(index.root))),
+                        Rc::new(RefCell::new(tx.read_cursor(table.root))),
+                        lo,
+                        hi,
+                        table.schema.clone(),
+                    ));
+                    (op, residual)
+                }
+                None => {
+                    let op = Box::new(SeqScan::new(
+                        Rc::new(RefCell::new(tx.read_cursor(table.root))),
+                        table.schema.clone(),
+                    ));
+                    (op, r#where) // full where goes to filter
+                }
+            };
+
+        let mut plan: Box<dyn Operator + 'tx> = scan;
+
+        if let Some(expr) = residual {
             plan = Box::new(Filter::new(plan, expr));
         }
 
@@ -33,14 +69,11 @@ impl<'tx, Tx: ReadTx + 'tx> Select<'tx, Tx> {
             plan = Box::new(Projection::new(plan, columns)?);
         }
 
-        Ok(Self {
-            _cursor: cursor,
-            operator: plan,
-        })
+        Ok(Self { operator: plan })
     }
 }
 
-impl<'tx, Tx: ReadTx + 'tx> Operator for Select<'tx, Tx> {
+impl<'tx> Operator for Select<'tx> {
     fn next(&mut self) -> vm::Result<Option<Row>> {
         self.operator.next()
     }
