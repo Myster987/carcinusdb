@@ -81,7 +81,7 @@ impl<'a> Record<'a> {
     }
 
     pub fn project(&self, indices: &[usize]) -> sql::Result<Record<'static>> {
-        let mut projected_record = RecordBuilder::new();
+        let mut projected_record = RecordMut::new();
 
         for i in indices {
             projected_record.add(self.try_get_value(*i)?.to_owned());
@@ -198,11 +198,11 @@ impl RecordCursor {
     }
 }
 
-pub struct RecordBuilder {
+pub struct RecordMut {
     values: Vec<Value>,
 }
 
-impl RecordBuilder {
+impl RecordMut {
     pub fn new() -> Self {
         Self { values: Vec::new() }
     }
@@ -311,7 +311,7 @@ impl RecordBuilder {
     }
 }
 
-impl Debug for RecordBuilder {
+impl Debug for RecordMut {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut dbg_table = DebugTable::new();
         let mut row = Vec::new();
@@ -324,6 +324,27 @@ impl Debug for RecordBuilder {
         dbg_table.insert_row(row);
 
         dbg_table.fmt(f)
+    }
+}
+
+pub struct RecordBuilder {
+    record: RecordMut,
+}
+
+impl RecordBuilder {
+    pub fn new() -> Self {
+        Self {
+            record: RecordMut::new(),
+        }
+    }
+
+    pub fn add(mut self, value: Value) -> Self {
+        self.record.add(value);
+        self
+    }
+
+    pub fn build(self) -> Record<'static> {
+        self.record.serialize_to_record()
     }
 }
 
@@ -394,7 +415,7 @@ mod tests {
 
     #[test]
     fn test_record_builder() -> anyhow::Result<()> {
-        let mut builder = RecordBuilder::new();
+        let mut builder = RecordMut::new();
 
         builder.add(Value::Text(Text::new("Sample text".repeat(5))));
         builder.add(Value::Null);
