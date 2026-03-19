@@ -3,7 +3,12 @@ use std::mem;
 use hashbrown::HashSet;
 
 use crate::{
-    sql::{parser::statement::Expression, record::RecordBuilder, schema::Schema, types::Value},
+    sql::{
+        parser::statement::Expression,
+        record::{RecordBuilder, RecordMut},
+        schema::Schema,
+        types::Value,
+    },
     storage::{
         btree::{BTreeCursor, BTreeKey, InsertOptions},
         wal::transaction::WriteTx,
@@ -20,7 +25,7 @@ pub struct Insert<'tx, Tx: WriteTx> {
     indices: HashSet<usize>,
     values: Vec<Vec<Expression>>,
     current: usize,
-    record_builder: RecordBuilder,
+    temp_record: RecordMut,
 }
 
 impl<'tx, Tx: WriteTx> Insert<'tx, Tx> {
@@ -41,7 +46,7 @@ impl<'tx, Tx: WriteTx> Insert<'tx, Tx> {
             indices,
             values,
             current: 0,
-            record_builder: RecordBuilder::new(),
+            temp_record: RecordMut::new(),
         }
     }
 }
@@ -71,14 +76,14 @@ impl<'tx, Tx: WriteTx> Operator for Insert<'tx, Tx> {
                     return Err(vm::Error::Unsupported(expr));
                 };
                 pop_record += 1;
-                self.record_builder.add(value);
+                self.temp_record.add(value);
             } else {
-                self.record_builder.add(Value::Null);
+                self.temp_record.add(Value::Null);
             }
         }
 
-        let record = self.record_builder.serialize_to_record();
-        self.record_builder.clear();
+        let record = self.temp_record.serialize_to_record();
+        self.temp_record.clear();
 
         self.cursor
             .insert(

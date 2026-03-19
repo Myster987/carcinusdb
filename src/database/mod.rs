@@ -405,7 +405,7 @@ mod tests {
 
     use crate::{
         sql::{
-            record::RecordBuilder,
+            record::RecordMut,
             types::{Value, text::Text},
         },
         storage::btree::{BTreeKey, DatabaseCursor, DeleteOptionsBuilder, InsertOptionsBuilder},
@@ -436,7 +436,7 @@ mod tests {
             let options = InsertOptionsBuilder::new().build();
 
             for i in start..end {
-                let mut record = RecordBuilder::new();
+                let mut record = RecordMut::new();
 
                 record.add(Value::Null);
                 record.add(Value::Int(i));

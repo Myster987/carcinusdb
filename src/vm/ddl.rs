@@ -5,7 +5,7 @@ use crate::{
             self,
             statement::{Constrains, Create},
         },
-        record::RecordBuilder,
+        record::RecordMut,
         schema::{Schema, TableMetadata},
         types::{Value, text::Text},
     },
@@ -35,7 +35,7 @@ fn create_table<'tx, Tx: WriteDbTx>(
 
     let sql = reconstruct_create_table_sql(&name, &columns);
 
-    let mut record = RecordBuilder::new();
+    let mut record = RecordMut::new();
 
     record.add(Value::Text(Text::new("table".into()))); // type
     record.add(Value::Text(Text::new(name.clone()))); // name

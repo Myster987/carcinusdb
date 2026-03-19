@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::{
     sql::{
         parser::statement::{Assignment, Expression},
-        record::RecordBuilder,
+        record::RecordMut,
         schema::Schema,
         types::Value,
     },
@@ -77,7 +77,7 @@ impl<'tx, Tx: WriteTx> Operator for Update<'tx, Tx> {
             };
 
             if matches {
-                let mut record_builder = RecordBuilder::from_record(&row);
+                let mut record_builder = RecordMut::from_record(&row);
 
                 for (i, assaign) in self.assignments.iter() {
                     let _ = record_builder.set(*i, assaign.clone());
