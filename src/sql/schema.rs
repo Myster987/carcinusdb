@@ -111,11 +111,13 @@ impl Catalog {
                 .ok_or(storage::Error::Corrupted)?;
 
             let column = table.schema.columns[index].clone();
+            let column_index = table.index_of(&column.name).unwrap();
 
             let index = IndexMetadata::new(
                 pending.root,
                 pending.name,
                 column,
+                column_index,
                 table.schema.clone(),
                 pending.unique,
             );
@@ -140,6 +142,7 @@ pub struct IndexMetadata {
     pub root: PageNumber,
     pub name: String,
     pub column: Column,
+    pub column_index: usize,
     pub schema: Schema,
     pub unique: bool,
 }
@@ -149,6 +152,7 @@ impl IndexMetadata {
         root: PageNumber,
         name: String,
         column: Column,
+        column_index: usize,
         schema: Schema,
         unique: bool,
     ) -> Self {
@@ -156,6 +160,7 @@ impl IndexMetadata {
             root,
             name,
             column,
+            column_index,
             schema,
             unique,
         }
