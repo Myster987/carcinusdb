@@ -15,62 +15,60 @@ use crate::{
     },
 };
 
-pub struct Select<'tx> {
-    operator: Box<dyn Operator + 'tx>,
+pub fn plan_select<'tx, DbTx: ReadDbTx + 'tx>(
+    tx: &'tx DbTx,
+    columns: Vec<Expression>,
+    from: String,
+    r#where: Option<Expression>,
+    order_by: Vec<Expression>,
+) -> vm::Result<Box<dyn Operator + 'tx>> {
+    let table = tx.catalog().get_table(&from)?;
+
+    let (scan, residual): (Box<dyn Operator + 'tx>, Option<Expression>) =
+        match find_index(&r#where, &table) {
+            Some((index, ScanKind::Eq(val), residual)) => {
+                let op = Box::new(IndexScan::eq(
+                    Rc::new(RefCell::new(tx.read_cursor(index.root))),
+                    Rc::new(RefCell::new(tx.read_cursor(table.root))),
+                    val,
+                    table.schema.clone(),
+                ));
+                (op, residual)
+            }
+            Some((index, ScanKind::Range(lo, hi), residual)) => {
+                let op = Box::new(IndexScan::range(
+                    Rc::new(RefCell::new(tx.read_cursor(index.root))),
+                    Rc::new(RefCell::new(tx.read_cursor(table.root))),
+                    lo,
+                    hi,
+                    table.schema.clone(),
+                ));
+                (op, residual)
+            }
+            None => {
+                let op = Box::new(SeqScan::new(
+                    Rc::new(RefCell::new(tx.read_cursor(table.root))),
+                    table.schema.clone(),
+                ));
+                (op, r#where) // full where goes to filter
+            }
+        };
+
+    let mut plan: Box<dyn Operator + 'tx> = scan;
+
+    if let Some(expr) = residual {
+        plan = Box::new(Filter::new(plan, expr));
+    }
+
+    if !columns.is_empty() {
+        plan = Box::new(Projection::new(plan, columns)?);
+    }
+
+    Ok(Box::new(Select { operator: plan }))
 }
 
-impl<'tx> Select<'tx> {
-    pub fn new<DbTx: ReadDbTx>(
-        tx: &'tx DbTx,
-        columns: Vec<Expression>,
-        from: String,
-        r#where: Option<Expression>,
-        order_by: Vec<Expression>,
-    ) -> vm::Result<Self> {
-        let table = tx.catalog().get_table(&from)?;
-
-        let (scan, residual): (Box<dyn Operator + 'tx>, Option<Expression>) =
-            match find_index(&r#where, &table) {
-                Some((index, ScanKind::Eq(val), residual)) => {
-                    let op = Box::new(IndexScan::eq(
-                        Rc::new(RefCell::new(tx.read_cursor(index.root))),
-                        Rc::new(RefCell::new(tx.read_cursor(table.root))),
-                        val,
-                        table.schema.clone(),
-                    ));
-                    (op, residual)
-                }
-                Some((index, ScanKind::Range(lo, hi), residual)) => {
-                    let op = Box::new(IndexScan::range(
-                        Rc::new(RefCell::new(tx.read_cursor(index.root))),
-                        Rc::new(RefCell::new(tx.read_cursor(table.root))),
-                        lo,
-                        hi,
-                        table.schema.clone(),
-                    ));
-                    (op, residual)
-                }
-                None => {
-                    let op = Box::new(SeqScan::new(
-                        Rc::new(RefCell::new(tx.read_cursor(table.root))),
-                        table.schema.clone(),
-                    ));
-                    (op, r#where) // full where goes to filter
-                }
-            };
-
-        let mut plan: Box<dyn Operator + 'tx> = scan;
-
-        if let Some(expr) = residual {
-            plan = Box::new(Filter::new(plan, expr));
-        }
-
-        if !columns.is_empty() {
-            plan = Box::new(Projection::new(plan, columns)?);
-        }
-
-        Ok(Self { operator: plan })
-    }
+pub struct Select<'tx> {
+    operator: Box<dyn Operator + 'tx>,
 }
 
 impl<'tx> Operator for Select<'tx> {

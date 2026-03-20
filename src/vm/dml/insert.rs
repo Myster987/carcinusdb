@@ -3,12 +3,8 @@ use std::mem;
 use hashbrown::HashSet;
 
 use crate::{
-    sql::{
-        parser::statement::Expression,
-        record::{RecordBuilder, RecordMut},
-        schema::Schema,
-        types::Value,
-    },
+    database::WriteDbTx,
+    sql::{parser::statement::Expression, record::RecordMut, schema::Schema, types::Value},
     storage::{
         btree::{BTreeCursor, BTreeKey, InsertOptions},
         wal::transaction::WriteTx,
@@ -18,6 +14,22 @@ use crate::{
         operator::{Operator, Row},
     },
 };
+
+pub fn plan_insert<'tx, DbTx: WriteDbTx + 'tx>(
+    tx: &'tx DbTx,
+    into: String,
+    columns: Vec<String>,
+    values: Vec<Vec<Expression>>,
+) -> vm::Result<Box<dyn Operator + 'tx>> {
+    let table = tx.catalog().get_table(&into)?;
+
+    Ok(Box::new(Insert::new(
+        tx.write_cursor(table.root),
+        table.schema,
+        columns,
+        values,
+    )))
+}
 
 pub struct Insert<'tx, Tx: WriteTx> {
     cursor: BTreeCursor<'tx, Tx>,

@@ -32,8 +32,8 @@ pub fn plan_read<'tx, Tx: ReadDbTx>(
             r#where,
             order_by,
         } => {
-            let select = dml::select::Select::new(tx, columns, from, r#where, order_by)?;
-            Ok(ExecutionPlan::Query(Box::new(select)))
+            let select = dml::select::plan_select(tx, columns, from, r#where, order_by)?;
+            Ok(ExecutionPlan::Query(select))
         }
 
         Statement::Explain(inner) => Ok(ExecutionPlan::Explain(Box::new(plan_read(*inner, tx)?))),
@@ -53,36 +53,24 @@ pub fn plan_write<'tx>(
             r#where,
             order_by,
         } => {
-            let select = dml::select::Select::new(tx, columns, from, r#where, order_by)?;
-            Ok(ExecutionPlan::Query(Box::new(select)))
+            let select = dml::select::plan_select(tx, columns, from, r#where, order_by)?;
+            Ok(ExecutionPlan::Query(select))
         }
         Statement::Insert {
             into,
             columns,
             values,
         } => {
-            let table = tx.catalog().get_table(&into)?;
-            let insert = dml::insert::Insert::new(
-                tx.write_cursor(table.root),
-                table.schema,
-                columns,
-                values,
-            );
-            Ok(ExecutionPlan::Query(Box::new(insert)))
+            let insert = dml::insert::plan_insert(tx, into, columns, values)?;
+            Ok(ExecutionPlan::Query(insert))
         }
         Statement::Update {
             table,
             columns,
             r#where,
         } => {
-            let table = tx.catalog().get_table(&table)?;
-            let update = dml::update::Update::new(
-                tx.write_cursor(table.root),
-                table.schema,
-                columns,
-                r#where,
-            )?;
-            Ok(ExecutionPlan::Query(Box::new(update)))
+            let update = dml::update::plan_update(tx, table, columns, r#where)?;
+            Ok(ExecutionPlan::Query(update))
         }
         Statement::Delete { from, r#where } => {
             let delete = dml::delete::plan_delete(tx, from, r#where)?;

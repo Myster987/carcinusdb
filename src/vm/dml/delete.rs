@@ -8,7 +8,7 @@ use crate::{
     sql::{
         parser::statement::Expression,
         record::RecordBuilder,
-        schema::{IndexMetadata, Schema, TableMetadata},
+        schema::{IndexMetadata, Schema},
         types::Value,
     },
     storage::{
