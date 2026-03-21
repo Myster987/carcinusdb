@@ -133,6 +133,7 @@ impl<'tx, Tx: WriteTx> Operator for Delete<'tx, Tx> {
         self.cursor
             .borrow_mut()
             .delete_current(DeleteOptions::default())?;
+
         self.skip_advance.set(true);
 
         for (index_metadata, index_cursor) in self.index_cursors.iter_mut() {

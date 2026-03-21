@@ -113,7 +113,7 @@ impl<'tx, IndexTx: ReadTx + 'tx, TableTx: ReadTx + 'tx> Operator
             let found = match &self.low {
                 ScanBound::Unbounded => index.seek_first()?,
                 ScanBound::Inclusive(val) | ScanBound::Exclusive(val) => {
-                    let mut record = RecordBuilder::new().add(val.clone()).build();
+                    let record = RecordBuilder::new().add(val.clone()).build();
 
                     let key = BTreeKey::new_index_key(record);
                     let found = index.seek(&key)?;

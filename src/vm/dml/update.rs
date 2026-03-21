@@ -4,12 +4,12 @@ use crate::{
     database::WriteDbTx,
     sql::{
         parser::statement::{Assignment, Expression},
-        record::RecordMut,
+        record::{RecordBuilder, RecordMut},
         schema::{IndexMetadata, Schema},
         types::Value,
     },
     storage::{
-        btree::{BTreeCursor, BTreeKey, InsertOptions},
+        btree::{BTreeCursor, BTreeKey, DatabaseCursor, InsertOptions},
         wal::transaction::WriteTx,
     },
     vm::{
@@ -87,31 +87,6 @@ pub struct Update<'tx, Tx: WriteTx> {
 }
 
 impl<'tx, Tx: WriteTx + 'tx> Update<'tx, Tx> {
-    // pub fn new(
-    //     cursor: BTreeCursor<'tx, Tx>,
-    //     schema: Schema,
-    //     assignments: Vec<Assignment>,
-    //     predicate: Option<Expression>,
-    // ) -> Self {
-    //     let mut assignment_map = HashMap::with_capacity(assignments.len());
-
-    //     for Assignment { identifier, value } in assignments {
-    //         let index = schema.index_of(&identifier).unwrap();
-    //         let Expression::Value(value) = value else {
-    //             panic!()
-    //         };
-    //         assignment_map.insert(index, value);
-    //     }
-
-    //     Self {
-    //         cursor,
-    //         schema,
-    //         assignments: assignment_map,
-    //         predicate,
-    //         started: false,
-    //     }
-    // }
-
     pub fn sequential_scan(
         cursor: BTreeCursor<'tx, Tx>,
         schema: Schema,
@@ -173,52 +148,6 @@ impl<'tx, Tx: WriteTx + 'tx> Update<'tx, Tx> {
 }
 
 impl<'tx, Tx: WriteTx> Operator for Update<'tx, Tx> {
-    // fn next(&mut self) -> vm::Result<Option<Row>> {
-    //     if !self.started {
-    //         self.started = true;
-    //         if !self.cursor.seek_first()? {
-    //             return Ok(None);
-    //         }
-    //     }
-
-    //     loop {
-    //         let row = match self.cursor.try_record() {
-    //             Ok(row) => row,
-    //             Err(_) => return Ok(None),
-    //         };
-
-    //         let matches = match &self.predicate {
-    //             None => true,
-    //             Some(expr) => matches!(
-    //                 resolve_expression_to_value(&row, &self.schema, expr)?,
-    //                 Value::Bool(true)
-    //             ),
-    //         };
-
-    //         if matches {
-    //             let mut record_builder = RecordMut::from_record(&row);
-
-    //             for (i, assaign) in self.assignments.iter() {
-    //                 let _ = record_builder.set(*i, assaign.clone());
-    //             }
-
-    //             let row_id = row.get_value(0).to_int();
-    //             let new_record = record_builder.serialize_to_record();
-
-    //             let inserted_record = self.cursor.update_current(
-    //                 BTreeKey::new_table_key(row_id, Some(new_record)),
-    //                 InsertOptions::default(),
-    //             )?;
-
-    //             return Ok(inserted_record);
-    //         } else {
-    //             if !self.cursor.next()? {
-    //                 return Ok(None);
-    //             }
-    //         }
-    //     }
-    // }
-
     fn next(&mut self) -> vm::Result<Option<Row>> {
         let Some(row) = self.source.next()? else {
             return Ok(None);
@@ -234,9 +163,25 @@ impl<'tx, Tx: WriteTx> Operator for Update<'tx, Tx> {
         let new_record = record_builder.serialize_to_record();
 
         let inserted_record = self.cursor.borrow_mut().update_current(
-            BTreeKey::new_table_key(row_id, Some(new_record)),
+            BTreeKey::new_table_key(row_id, Some(new_record.to_owned())),
             InsertOptions::default(),
         )?;
+
+        for (index_metadata, index_cursor) in self.index_cursors.iter_mut() {
+            let col_idx = index_metadata.column_index;
+            let col_value = new_record.get_value(col_idx).to_owned();
+            let row_id = new_record.get_value(0).to_int();
+
+            let record = RecordBuilder::new()
+                .add(col_value)
+                .add(Value::Int(row_id))
+                .build();
+
+            let key = BTreeKey::new_index_key(record);
+            if index_cursor.seek(&key)?.is_found() {
+                index_cursor.update_current(key, InsertOptions::default())?;
+            }
+        }
 
         return Ok(inserted_record);
     }

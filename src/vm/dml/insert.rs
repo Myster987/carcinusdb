@@ -4,7 +4,12 @@ use hashbrown::HashSet;
 
 use crate::{
     database::WriteDbTx,
-    sql::{parser::statement::Expression, record::RecordMut, schema::Schema, types::Value},
+    sql::{
+        parser::statement::Expression,
+        record::{RecordBuilder, RecordMut},
+        schema::{IndexMetadata, Schema},
+        types::Value,
+    },
     storage::{
         btree::{BTreeCursor, BTreeKey, InsertOptions},
         wal::transaction::WriteTx,
@@ -23,11 +28,18 @@ pub fn plan_insert<'tx, DbTx: WriteDbTx + 'tx>(
 ) -> vm::Result<Box<dyn Operator + 'tx>> {
     let table = tx.catalog().get_table(&into)?;
 
+    let index_cursors = table
+        .indexes
+        .iter()
+        .map(|idx| (idx.clone(), tx.write_cursor(idx.root)))
+        .collect();
+
     Ok(Box::new(Insert::new(
         tx.write_cursor(table.root),
         table.schema,
         columns,
         values,
+        index_cursors,
     )))
 }
 
@@ -38,6 +50,7 @@ pub struct Insert<'tx, Tx: WriteTx> {
     values: Vec<Vec<Expression>>,
     current: usize,
     temp_record: RecordMut,
+    index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx, Tx>)>,
 }
 
 impl<'tx, Tx: WriteTx> Insert<'tx, Tx> {
@@ -46,6 +59,7 @@ impl<'tx, Tx: WriteTx> Insert<'tx, Tx> {
         schema: Schema,
         columns: Vec<String>,
         values: Vec<Vec<Expression>>,
+        index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx, Tx>)>,
     ) -> Self {
         let indices = columns
             .iter()
@@ -59,6 +73,7 @@ impl<'tx, Tx: WriteTx> Insert<'tx, Tx> {
             values,
             current: 0,
             temp_record: RecordMut::new(),
+            index_cursors,
         }
     }
 }
@@ -97,12 +112,26 @@ impl<'tx, Tx: WriteTx> Operator for Insert<'tx, Tx> {
         let record = self.temp_record.serialize_to_record();
         self.temp_record.clear();
 
-        self.cursor
-            .insert(
-                BTreeKey::new_table_key(row_id, Some(record)),
-                InsertOptions::default(),
-            )
-            .map_err(Into::into)
+        let inserted_record = self.cursor.insert(
+            BTreeKey::new_table_key(row_id, Some(record.to_owned())),
+            InsertOptions::default(),
+        )?;
+
+        for (index_metadata, index_cursor) in self.index_cursors.iter_mut() {
+            let col_idx = index_metadata.column_index;
+            let col_value = record.get_value(col_idx).to_owned();
+            let row_id = record.get_value(0).to_int();
+
+            let record = RecordBuilder::new()
+                .add(col_value)
+                .add(Value::Int(row_id))
+                .build();
+
+            let key = BTreeKey::new_index_key(record);
+            index_cursor.insert(key, InsertOptions::default())?;
+        }
+
+        Ok(inserted_record)
     }
 
     fn schema(&self) -> &Schema {
