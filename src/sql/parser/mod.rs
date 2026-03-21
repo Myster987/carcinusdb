@@ -522,7 +522,11 @@ impl<'a> StatementParser for Parser<'a> {
 
                 let table = self.parse_identifier()?;
 
+                self.expect_token(Token::LeftParen)?;
+
                 let column = self.parse_identifier()?;
+
+                self.expect_token(Token::RightParen)?;
 
                 Ok(Statement::Create(Create::Index {
                     name,
@@ -538,7 +542,11 @@ impl<'a> StatementParser for Parser<'a> {
 
                 let table = self.parse_identifier()?;
 
+                self.expect_token(Token::LeftParen)?;
+
                 let column = self.parse_identifier()?;
+
+                self.expect_token(Token::RightParen)?;
 
                 Ok(Statement::Create(Create::Index {
                     name,

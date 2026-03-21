@@ -45,6 +45,17 @@ impl Catalog {
         self.tables.insert(name, table);
     }
 
+    pub fn insert_index(&self, table_name: &str, index: IndexMetadata) -> Result<()> {
+        let mut table = self
+            .tables
+            .get_mut(table_name)
+            .ok_or(Error::TableNotFound(table_name.to_string()))?;
+
+        table.value_mut().indexes.push(index);
+
+        Ok(())
+    }
+
     pub fn from_cursor<Tx: ReadTx>(mut master_cursor: BTreeCursor<Tx>) -> storage::Result<Self> {
         let tables = DashMap::new();
         let mut pending_indexes = Vec::new();
@@ -118,7 +129,7 @@ impl Catalog {
                 pending.name,
                 column,
                 column_index,
-                table.schema.clone(),
+                // table.schema.clone(),
                 pending.unique,
             );
 
@@ -143,7 +154,7 @@ pub struct IndexMetadata {
     pub name: String,
     pub column: Column,
     pub column_index: usize,
-    pub schema: Schema,
+    // pub schema: Schema,
     pub unique: bool,
 }
 
@@ -153,7 +164,7 @@ impl IndexMetadata {
         name: String,
         column: Column,
         column_index: usize,
-        schema: Schema,
+        // schema: Schema,
         unique: bool,
     ) -> Self {
         Self {
@@ -161,14 +172,14 @@ impl IndexMetadata {
             name,
             column,
             column_index,
-            schema,
+            // schema,
             unique,
         }
     }
 
-    pub fn index_of(&self, column: &str) -> Option<usize> {
-        self.schema.index_of(column)
-    }
+    // pub fn index_of(&self, column: &str) -> Option<usize> {
+    //     self.schema.index_of(column)
+    // }
 }
 
 #[derive(Debug, Clone)]

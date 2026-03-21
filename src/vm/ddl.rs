@@ -5,11 +5,11 @@ use crate::{
             self,
             statement::{Constrains, Create},
         },
-        record::RecordMut,
-        schema::{Schema, TableMetadata},
+        record::{RecordBuilder, RecordMut},
+        schema::{IndexMetadata, Schema, TableMetadata},
         types::{Value, text::Text},
     },
-    storage::btree::{BTreeKey, BTreeType, InsertOptions},
+    storage::btree::{BTreeKey, BTreeType, DatabaseCursor, InsertOptions},
     vm::{self, query_result::QueryResult},
 };
 
@@ -21,7 +21,7 @@ pub fn create<'tx, Tx: WriteDbTx>(tx: &'tx Tx, statement: Create) -> vm::Result<
             table,
             column,
             unique,
-        } => todo!(),
+        } => create_index(tx, name, table, column, unique),
         _ => todo!(),
     }
 }
@@ -39,7 +39,7 @@ fn create_table<'tx, Tx: WriteDbTx>(
 
     record.add(Value::Text(Text::new("table".into()))); // type
     record.add(Value::Text(Text::new(name.clone()))); // name
-    record.add(Value::Text(Text::new(name.clone()))); // tbl_name
+    record.add(Value::Text(Text::new(name.clone()))); // table_name
     record.add(Value::Int(root_page as i64)); // root_page
     record.add(Value::Text(Text::new(sql))); // sql
 
@@ -64,6 +64,62 @@ fn create_table<'tx, Tx: WriteDbTx>(
     Ok(QueryResult::RowsAffected(1))
 }
 
+fn create_index<'tx, Tx: WriteDbTx>(
+    tx: &'tx Tx,
+    name: String,
+    table: String,
+    column: String,
+    unique: bool,
+) -> vm::Result<QueryResult<'tx>> {
+    let root_page = tx.create_btree(BTreeType::Index)?;
+
+    let sql = reconstruct_create_index_sql(&name, &table, &column, unique);
+
+    let mut record = RecordMut::new();
+
+    record.add(Value::Text(Text::new("index".into()))); // type
+    record.add(Value::Text(Text::new(name.clone()))); // name
+    record.add(Value::Text(Text::new(table.clone()))); // table_name
+    record.add(Value::Int(root_page as i64)); // root_page
+    record.add(Value::Text(Text::new(sql))); // sql
+
+    let record = record.serialize_to_record();
+
+    let mut cursor = tx.write_cursor(CARCINUSDB_MASTER_TABLE_ROOT);
+
+    let row_id = cursor.next_row_id()?;
+
+    cursor.insert(
+        BTreeKey::new_table_key(row_id, Some(record)),
+        InsertOptions::default(),
+    )?;
+
+    let column_index = tx.catalog().get_table(&table)?.index_of(&column).unwrap();
+    let column = tx.catalog().get_table(&table)?.schema.columns[column_index].clone();
+    let index_metadata = IndexMetadata::new(root_page, name, column, column_index, unique);
+
+    tx.catalog().insert_index(&table, index_metadata)?;
+
+    {
+        let source_table_root = tx.catalog().get_table(&table)?.root;
+        let mut source_cursor = tx.read_cursor(source_table_root);
+        let mut index_cursor = tx.write_cursor(root_page);
+
+        while source_cursor.next()? {
+            let record = source_cursor.try_record()?;
+            let row_id = record.get_value(0).to_owned();
+            let value = record.get_value(column_index).to_owned();
+
+            let insert_record = RecordBuilder::new().add(row_id).add(value).build();
+            let entry = BTreeKey::new_index_key(insert_record);
+
+            index_cursor.insert(entry, InsertOptions::default())?;
+        }
+    }
+
+    Ok(QueryResult::RowsAffected(1))
+}
+
 // Reconstructs "CREATE TABLE name (col1 TYPE, col2 TYPE NOT NULL, ...)" SQL.
 fn reconstruct_create_table_sql(name: &str, columns: &[parser::statement::Column]) -> String {
     let cols = columns
@@ -83,4 +139,10 @@ fn reconstruct_create_table_sql(name: &str, columns: &[parser::statement::Column
         .join(", ");
 
     format!("CREATE TABLE {name} ({cols});")
+}
+
+// Reconstructs "CREATE INDEX name ON table (column)" SQL.
+fn reconstruct_create_index_sql(name: &str, table: &str, column: &str, unique: bool) -> String {
+    let unique = if unique { " UNIQUE" } else { "" };
+    format!("CREATE{unique} INDEX {name} ON {table} ({column});")
 }
