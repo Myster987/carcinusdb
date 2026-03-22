@@ -355,6 +355,7 @@ impl Page {
         self.set_free_fragments(0);
         self.set_right_sibling(0);
         self.set_right_child(0);
+        self.overflow_map().clear();
     }
 
     /// Returns reference to whole page buffer.
@@ -441,8 +442,9 @@ impl Page {
 
     /// Free space between slot array and last cell.
     pub fn free_space(&self) -> u16 {
+        let physical_slots = self.read_u16(Self::LENGTH_OFFSET);
         self.last_used_offset()
-            .saturating_sub((self.header_size()) as u16 + self.len() * SLOT_SIZE as SlotNumber)
+            .saturating_sub((self.header_size()) as u16 + physical_slots * SLOT_SIZE as u16)
     }
 
     pub fn first_data_offset(&self) -> SlotNumber {
@@ -714,6 +716,8 @@ impl Page {
             Bound::Included(i) => i + 1,
         };
 
+        let is_full_drain = start == 0 && end == self.len();
+
         log::trace!(
             "Drain page with len {} from {} to {}",
             self.len(),
@@ -738,9 +742,16 @@ impl Page {
             } else {
                 let offsets = self.slot_array().drain(start..slot_index);
 
-                for offset in offsets {
-                    let size = self.get_cell_at_offset(offset).unwrap().local_size() as u16;
-                    self.freeblock_list().push_freeblock(offset, size);
+                if is_full_drain {
+                    self.set_last_used_offset(self.as_ptr().len() as u16);
+                    self.set_first_freeblock(0);
+                    self.set_free_fragments(0);
+                    self.overflow_map().clear();
+                } else {
+                    for offset in offsets {
+                        let size = self.get_cell_at_offset(offset).unwrap().local_size() as u16;
+                        self.freeblock_list().push_freeblock(offset, size);
+                    }
                 }
 
                 None
