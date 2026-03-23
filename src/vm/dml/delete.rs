@@ -1,7 +1,4 @@
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-};
+use std::{cell::RefCell, rc::Rc};
 
 use crate::{
     database::WriteDbTx,
@@ -81,7 +78,6 @@ pub fn plan_delete<'tx, DbTx: WriteDbTx + 'tx>(
 pub struct Delete<'tx, Tx: WriteTx + 'tx> {
     cursor: Rc<RefCell<BTreeCursor<'tx, Tx>>>,
     source: Box<dyn Operator + 'tx>,
-    skip_advance: Rc<Cell<bool>>,
     index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx, Tx>)>,
 }
 
@@ -94,7 +90,6 @@ impl<'tx, Tx: WriteTx + 'tx> Delete<'tx, Tx> {
     ) -> vm::Result<Self> {
         let cursor = Rc::new(RefCell::new(cursor));
         let scan = SeqScan::new(cursor.clone(), schema);
-        let skip_advance = scan.skip_advance.clone();
 
         let mut source: Box<dyn Operator + 'tx> = Box::new(scan);
 
@@ -105,7 +100,6 @@ impl<'tx, Tx: WriteTx + 'tx> Delete<'tx, Tx> {
         Ok(Self {
             cursor,
             source,
-            skip_advance,
             index_cursors,
         })
     }
@@ -118,7 +112,6 @@ impl<'tx, Tx: WriteTx + 'tx> Delete<'tx, Tx> {
         Self {
             cursor,
             source,
-            skip_advance: Rc::new(Cell::new(false)),
             index_cursors,
         }
     }
@@ -134,8 +127,6 @@ impl<'tx, Tx: WriteTx> Operator for Delete<'tx, Tx> {
             .borrow_mut()
             .delete_current(DeleteOptions::default())?;
 
-        self.skip_advance.set(true);
-
         for (index_metadata, index_cursor) in self.index_cursors.iter_mut() {
             let col_idx = index_metadata.column_index;
             let col_value = row.get_value(col_idx).to_owned();
@@ -147,9 +138,10 @@ impl<'tx, Tx: WriteTx> Operator for Delete<'tx, Tx> {
                 .build();
 
             let key = BTreeKey::new_index_key(record);
-            if index_cursor.seek(&key)?.is_found() {
-                index_cursor.delete_current(DeleteOptions::default())?;
-            }
+            index_cursor.delete(&key, DeleteOptions::default())?;
+            // if index_cursor.seek(&key)?.is_found() {
+            //     index_cursor.delete_current(DeleteOptions::default())?;
+            // }
         }
 
         Ok(Some(row))

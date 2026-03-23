@@ -1,7 +1,4 @@
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-};
+use std::{cell::RefCell, rc::Rc};
 
 use crate::{
     sql::schema::Schema,
@@ -19,7 +16,6 @@ pub struct SeqScan<'tx, Tx: ReadTx> {
     cursor: Rc<RefCell<BTreeCursor<'tx, Tx>>>,
     schema: Schema,
     started: bool,
-    pub skip_advance: Rc<Cell<bool>>,
 }
 
 impl<'tx, Tx: ReadTx> SeqScan<'tx, Tx> {
@@ -28,7 +24,6 @@ impl<'tx, Tx: ReadTx> SeqScan<'tx, Tx> {
             cursor,
             schema,
             started: false,
-            skip_advance: Rc::new(Cell::new(false)),
         }
     }
 }
@@ -41,19 +36,16 @@ impl<'tx, Tx: ReadTx> Operator for SeqScan<'tx, Tx> {
             if !cursor.seek_first()? {
                 return Ok(None);
             }
-        } else if self.skip_advance.get() {
-            // cursor already advanced by delete/update — just read current
-            self.skip_advance.set(false);
         } else {
             if !cursor.next()? {
                 return Ok(None);
             }
         }
 
-        let Ok(record) = cursor.try_record() else {
-            return Ok(None);
-        };
-        Ok(Some(record.to_owned()))
+        match cursor.try_record() {
+            Ok(record) => Ok(Some(record)),
+            _ => Ok(None),
+        }
     }
 
     fn schema(&self) -> &Schema {
