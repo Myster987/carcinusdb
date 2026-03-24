@@ -545,10 +545,20 @@ mod tests {
         let tx = db.begin_write()?;
 
         {
+            let select_all = || {
+                let query = tx.execute("SELECT * FROM test;").unwrap();
+
+                println!("{}", query.to_string().unwrap());
+            };
+
             let query =
-                tx.execute("CREATE TABLE test (id INT PRIMARY KEY, name TEXT, age INT);")?;
+                tx.execute("CREATE TABLE test (id INT PRIMARY KEY, name TEXT, age INT NOT NULL);")?;
 
             log::debug!("Query: {:?}", query);
+
+            let query = tx.execute("CREATE UNIQUE INDEX age_test_idx ON test (age);")?;
+
+            println!("{}", query.to_string()?);
 
             println!(
                 "{}",
@@ -556,7 +566,7 @@ mod tests {
                     .to_string()?
             );
 
-            for i in 1..=10 {
+            for i in 1..=1_000 {
                 let sql = format!("INSERT INTO test VALUES ({i}, 'test_{i}', {});", i + 20);
                 let query = tx.execute(&sql)?;
                 println!("{}", query.to_string()?);
@@ -565,17 +575,19 @@ mod tests {
             let query = tx.execute("UPDATE test SET name = 'macie' WHERE id = 1;")?;
             println!("{}", query.to_string()?);
 
-            let query = tx.execute("SELECT * FROM test;")?;
-
-            println!("{}", query.to_string()?);
+            select_all();
 
             let query = tx.execute("DELETE FROM test WHERE id >= 5;")?;
 
             println!("{}", query.to_string()?);
 
-            let query = tx.execute("SELECT * FROM test;")?;
+            select_all();
 
-            println!("{}", query.to_string()?);
+            println!(
+                "{}",
+                tx.execute(&format!("SELECT * FROM {CARCINUSDB_MASTER_TABLE};"))?
+                    .to_string()?
+            );
         }
 
         tx.commit()?;
