@@ -543,13 +543,17 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
 
     fn min(&mut self) -> storage::Result<Option<Record<'static>>> {
         self.go_to_root();
-        self.seek_first()?;
+        if !self.seek_first()? {
+            return Ok(None);
+        }
         self.try_record().map(Some)
     }
 
     fn max(&mut self) -> storage::Result<Option<Record<'static>>> {
         self.go_to_root();
-        self.seek_last()?;
+        if !self.seek_last()? {
+            return Ok(None);
+        }
         self.try_record().map(Some)
     }
 
@@ -1020,7 +1024,9 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 return self.split_root();
             }
 
-            let (parent_page, _) = self.path_stack.pop().unwrap();
+            let Some((parent_page, _)) = self.path_stack.pop() else {
+                return Ok(());
+            };
             let parent_mem_page = self
                 .pager
                 .read_page(self.tx.borrow().deref(), parent_page)?;
@@ -1431,7 +1437,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             BTreeKey::TableKey(_) => BTreeCell::TableLeaf(TableLeafCell::new(
                 entry.row_id(),
                 payload_size as VarInt,
-                payload,
+                local_payload,
                 first_overflow,
             )),
         };

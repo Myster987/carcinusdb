@@ -198,6 +198,7 @@ impl RecordCursor {
     }
 }
 
+/// Mutable record format that can be parsed into `Record`.
 pub struct RecordMut {
     values: Vec<Value>,
 }
@@ -211,10 +212,12 @@ impl RecordMut {
         self.values.clear();
     }
 
+    /// Add new value at the end of record.
     pub fn add(&mut self, value: Value) {
         self.values.push(value);
     }
 
+    /// Change value at specific `index`.
     pub fn set(&mut self, index: usize, new_value: Value) -> Value {
         std::mem::replace(&mut self.values[index], new_value)
     }

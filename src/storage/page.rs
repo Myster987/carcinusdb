@@ -575,7 +575,7 @@ impl Page {
     /// Attempts to insert cell at given index. If cell doesn't fit, it is returned
     /// as a error value. Otherwise slot number of this cell is returned.
     fn try_insert_cell(&self, index: SlotNumber, cell: BTreeCell) -> Result<SlotNumber, BTreeCell> {
-        assert!(
+        debug_assert!(
             index <= self.len(),
             "Index out of range. Len: {}, index: {}",
             self.len(),
@@ -594,15 +594,8 @@ impl Page {
         let mut slot_array = self.slot_array();
         let mut freeblocks = self.freeblock_list();
 
-        let (_, local_payload_size) = cell_overflows(
-            cell_size,
-            self.min_cell_size(),
-            self.max_cell_size(),
-            self.usable_space(),
-        );
-
         // look for free space between pages before allocating new one.
-        if let Some(offset) = freeblocks.take_freeblock(local_payload_size as u16)
+        if let Some(offset) = freeblocks.take_freeblock(cell_size as u16)
             && self.free_space() >= SLOT_SIZE as u16
         {
             write_btree_cell(self.as_ptr(), offset, &cell).expect("writting cell failed");
@@ -613,11 +606,11 @@ impl Page {
         }
 
         // defragment if needed
-        if local_payload_size + SLOT_SIZE > self.free_space() as usize {
+        if storage_cell_size > self.free_space() as usize {
             self.defragment();
         }
 
-        let offset = self.last_used_offset() - local_payload_size as u16;
+        let offset = self.last_used_offset() - cell_size as u16;
 
         write_btree_cell(self.as_ptr(), offset, &cell).expect("writting cell failed");
 
@@ -2355,8 +2348,9 @@ pub fn write_btree_cell<T: CellOps>(
     cell: &T,
 ) -> storage::Result<()> {
     let position = offset as usize;
+    let cell_size = cell.local_size();
 
-    cell.write_to_buffer(&mut page_buffer[position..]);
+    cell.write_to_buffer(&mut page_buffer[position..position + cell_size]);
 
     Ok(())
 }
