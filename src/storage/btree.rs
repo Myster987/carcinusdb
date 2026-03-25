@@ -153,6 +153,9 @@ pub trait DatabaseCursor {
     /// end of btree.
     fn next(&mut self) -> storage::Result<bool>;
 
+    /// Returns next key in B-tree if exists, but doesn't change cursor position.
+    fn peek(&mut self) -> storage::Result<Option<BTreeKey<'static>>>;
+
     /// Returns smallest record in B-tree.
     fn min(&mut self) -> storage::Result<Option<Record<'static>>>;
 
@@ -166,6 +169,14 @@ pub trait DatabaseCursor {
     fn position(&self) -> (PageNumber, SlotNumber);
 }
 
+#[derive(Debug)]
+enum CursorState {
+    Valid,
+    Done,
+    Uninitialized,
+    RequireSeek(BTreeKey<'static>),
+}
+
 /// Cursor that allows traversing, inserting and deleteing (not yet) entries
 /// in B-link tree. It can be used in multiple readers and single writer
 /// scenario.
@@ -177,8 +188,7 @@ pub struct BTreeCursor<'tx, Tx> {
     current_slot: SlotNumber,
     path_stack: Vec<(PageNumber, SlotNumber)>,
     balance_pages_per_side: SlotNumber,
-    init: bool,
-    done: bool,
+    state: CursorState,
 }
 
 impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
@@ -197,9 +207,13 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
             current_slot: 0,
             path_stack: Vec::new(),
             balance_pages_per_side,
-            init: false,
-            done: false,
+            state: CursorState::Uninitialized,
         }
+    }
+
+    #[inline]
+    fn is_done(&self) -> bool {
+        matches!(self.state, CursorState::Done)
     }
 
     /// Performs binary search on this page looking for given key. When exact
@@ -377,7 +391,6 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
     fn go_to_root(&mut self) {
         self.current_page = self.root;
         self.path_stack.clear();
-        self.done = false;
     }
 
     pub fn row_id(&self) -> storage::Result<RowId> {
@@ -399,13 +412,34 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
 
         Ok(self.row_id()? + 1)
     }
+
+    // fn restore(&mut self) -> storage::Result<bool> {
+    //     match std::mem::replace(&mut self.state, CursorState::Valid) {
+    //         CursorState::RequireSeek(key) => {
+    //             let seek_result = self.seek(&key)?;
+    //         }
+    //         CursorState::Done => {
+    //             self.state = CursorState::Done;
+    //             Ok(false)
+    //         }
+    //         CursorState::Uninitialized => {
+    //             let found = self.seek_first()?;
+    //             Ok(found)
+    //         }
+    //         CursorState::Valid => Ok(true),
+    //     }
+    // }
+
+    fn invalidate(&mut self, key: BTreeKey<'static>) {
+        self.state = CursorState::RequireSeek(key);
+    }
 }
 
 impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
     fn seek(&mut self, key: &BTreeKey) -> storage::Result<SearchResult> {
         // start at root
         self.go_to_root();
-        self.init = true;
+        // self.init = true;
 
         loop {
             let page = self
@@ -420,6 +454,8 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
                     .expect("page was split and should contain sibling");
                 continue;
             }
+
+            log::debug!("{:?}", *guard);
 
             let search_result = self.binary_search(&guard, key)?;
 
@@ -459,8 +495,14 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
 
             if guard.is_leaf() {
                 self.current_slot = guard.first_data_offset();
-                self.done = guard.is_empty();
-                self.init = true;
+                // self.done = guard.is_empty();
+                // self.init = true;
+
+                self.state = if guard.is_empty() {
+                    CursorState::Done
+                } else {
+                    CursorState::Valid
+                };
 
                 break;
             }
@@ -468,7 +510,7 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
             self.current_page = guard.child(guard.first_data_offset());
         }
 
-        Ok(!self.done)
+        Ok(!self.is_done())
     }
 
     fn seek_last(&mut self) -> storage::Result<bool> {
@@ -480,8 +522,14 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
 
             if guard.is_leaf() {
                 self.current_slot = guard.len().saturating_sub(1);
-                self.done = guard.is_empty();
-                self.init = true;
+                // self.done = guard.is_empty();
+                // self.init = true;
+
+                self.state = if guard.is_empty() {
+                    CursorState::Done
+                } else {
+                    CursorState::Valid
+                };
 
                 break;
             }
@@ -491,54 +539,97 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
                 .expect("Only leaf doesn't have right child");
         }
 
-        Ok(!self.done)
+        Ok(!self.is_done())
     }
 
     fn next(&mut self) -> storage::Result<bool> {
-        if self.done {
-            return Ok(false);
-        }
-
-        // cursor needs to position itself.
-        if !self.init {
-            return self.seek_first();
-        }
-
-        if let Ok(current_page) = self
-            .pager
-            .read_page(self.tx.borrow().deref(), self.current_page)
-        {
-            let page = current_page.lock_shared();
-
-            if page.is_empty() {
-                self.done = true;
+        match std::mem::replace(&mut self.state, CursorState::Valid) {
+            CursorState::Done => {
+                self.state = CursorState::Done;
                 return Ok(false);
             }
-
-            // check if there are still cells that haven't been visited. we must
-            // use page.len(), because current_slot often starts at 1.
-            if self.current_slot + 1 < page.len() {
-                self.current_slot += 1;
-                return Ok(true);
-            }
-
-            if let Some(rigth_sibling) = page.try_right_sibling() {
-                let next_page = self
+            CursorState::Uninitialized => self.seek_first(),
+            CursorState::Valid => {
+                let page = self
                     .pager
-                    .read_page(self.tx.borrow().deref(), rigth_sibling)?;
-                let guard = next_page.lock_shared();
+                    .read_page(self.tx.borrow().deref(), self.current_page)?;
+                let guard = page.lock_shared();
 
-                self.current_page = rigth_sibling;
-                self.current_slot = guard.first_data_offset();
+                if guard.is_empty() {
+                    // self.done = true;
+                    self.state = CursorState::Done;
+                    return Ok(false);
+                }
 
-                return Ok(true);
+                // check if there are still cells that haven't been visited. we must
+                // use guard.len(), because current_slot often starts at 1.
+                if self.current_slot + 1 < guard.len() {
+                    self.current_slot += 1;
+                    return Ok(true);
+                }
+
+                if let Some(rigth_sibling) = guard.try_right_sibling() {
+                    let next_page = self
+                        .pager
+                        .read_page(self.tx.borrow().deref(), rigth_sibling)?;
+                    let guard = next_page.lock_shared();
+
+                    self.current_page = rigth_sibling;
+                    self.current_slot = guard.first_data_offset();
+
+                    return Ok(true);
+                }
+
+                self.state = CursorState::Done;
+                return Ok(false);
+            }
+            CursorState::RequireSeek(key) => {
+                let found = self.seek(&key)?.is_found();
+                self.state = if found {
+                    CursorState::Valid
+                } else {
+                    CursorState::Done
+                };
+                Ok(found)
             }
         }
+    }
 
-        self.done = true;
+    fn peek(&mut self) -> storage::Result<Option<BTreeKey<'static>>> {
+        if self.is_done() {
+            return Ok(None);
+        }
 
-        // end of iteration
-        Ok(false)
+        let page = self
+            .pager
+            .read_page(self.tx.borrow().deref(), self.current_page)?;
+        let guard = page.lock_shared();
+
+        if guard.is_empty() {
+            return Ok(None);
+        }
+
+        // check if there are still cells that haven't been visited. we must
+        // use guard.len(), because current_slot often starts at 1.
+        if self.current_slot + 1 < guard.len() {
+            let key = self.extracty_key(&guard, self.current_slot + 1)?.to_owned();
+            return Ok(Some(key));
+        }
+
+        if let Some(rigth_sibling) = guard.try_right_sibling() {
+            let next_page = self
+                .pager
+                .read_page(self.tx.borrow().deref(), rigth_sibling)?;
+            let guard = next_page.lock_shared();
+
+            let peek_slot = guard.first_data_offset();
+
+            let key = self.extracty_key(&guard, peek_slot)?.to_owned();
+
+            return Ok(Some(key));
+        }
+
+        return Ok(None);
     }
 
     fn min(&mut self) -> storage::Result<Option<Record<'static>>> {
@@ -822,6 +913,8 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     }
 
     fn try_delete_from_leaf(&mut self, slot_number: SlotNumber) -> storage::Result<BTreeCell> {
+        let next_key = self.peek()?;
+
         let page = self
             .pager
             .read_page(self.tx.borrow().deref(), self.current_page)?;
@@ -836,6 +929,10 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             if guard.is_underflow() {
                 drop(guard);
                 self.balance()?;
+            }
+
+            if let Some(key) = next_key {
+                self.state = CursorState::RequireSeek(key);
             }
 
             removed_cell
