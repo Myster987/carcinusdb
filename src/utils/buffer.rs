@@ -8,23 +8,33 @@ use std::{
 use crate::storage::page::{MAX_PAGE_SIZE, MIN_PAGE_SIZE};
 
 pub type BufferData = NonNull<u8>;
+/// Custom drop function handler that returns pointer to buffer memory.
 pub type DropFn = Rc<dyn Fn(BufferData)>;
 
+/// Buffer is aligned to single byte.
 pub const BUFFER_ALIGNMENT: usize = align_of::<u8>();
 
+/// Simple buffer of const size with custom drop function support.
 pub struct Buffer {
+    /// Size of buffer in `bytes`.
     size: usize,
+    /// Pointer the beginning of buffer memory.
     ptr: BufferData,
+    /// Optional custom drop function. If it's `None`, then it will
+    /// simply get deallocated.
     drop: Option<DropFn>,
 }
 
 impl Buffer {
+    /// Allocates new buffer of given `size`. If present, drop function will
+    /// be called on deallocation.
     pub fn alloc(size: usize, drop: Option<DropFn>) -> Self {
         let ptr = unsafe { alloc_heap(size, BUFFER_ALIGNMENT) };
         Self { size, ptr, drop }
     }
 
-    /// Allocates buffer on heap
+    /// Same as [Buffer::alloc], but also checks if given `size` fits in page
+    /// size boundaries.
     pub fn alloc_page(size: usize, drop: Option<DropFn>) -> Self {
         assert!(
             (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&size),
@@ -35,10 +45,12 @@ impl Buffer {
         Self::alloc(size, drop)
     }
 
+    /// Creates `Buffer` from raw components.
     pub fn from_ptr(ptr: NonNull<u8>, size: usize, drop: Option<DropFn>) -> Self {
         Self { size, ptr, drop }
     }
 
+    /// Returns size of buffer in `bytes`.
     pub fn size(&self) -> usize {
         self.size
     }
@@ -47,26 +59,32 @@ impl Buffer {
     //     self.data.is_empty()
     // }
 
+    /// Returns const pointer to buffer memory.
     pub fn as_ptr(&self) -> *const u8 {
         self.ptr.as_ptr().cast_const()
     }
 
+    /// Returns mutable pointer to buffer memory.
     pub fn as_mut_ptr(&self) -> *mut u8 {
         self.ptr.as_ptr()
     }
 
+    /// Returns non-null pointer to buffer memory.
     pub fn as_non_null(&self) -> NonNull<u8> {
         self.ptr.clone()
     }
 
+    /// Returns buffer content as slice of bytes.
     pub fn as_slice(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.as_ptr(), self.size) }
     }
 
+    /// Returns buffer content as mutable slice of bytes.
     pub fn as_mut_slice(&self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr(), self.size) }
     }
 
+    /// Zeroes whole buffer content.
     pub fn reset(&mut self) {
         unsafe { std::ptr::write_bytes(self.ptr.as_ptr(), 0, self.size()) };
     }
@@ -122,11 +140,13 @@ impl Drop for Buffer {
     }
 }
 
+/// Return pointer to chunk of memory on heap of given `size` and `align`ment.
 pub unsafe fn alloc_heap(size: usize, align: usize) -> NonNull<u8> {
     let layout = Layout::from_size_align(size, align).unwrap();
     unsafe { NonNull::new(alloc_zeroed(layout)).unwrap() }
 }
 
+/// Deallocates given pointer of `size` and `align`ment.
 pub unsafe fn dealloc_heap(ptr: NonNull<u8>, size: usize, align: usize) {
     let layout = Layout::from_size_align(size, align).unwrap();
     unsafe { dealloc(ptr.as_ptr(), layout) };
@@ -147,27 +167,6 @@ mod tests {
         println!("{:?}", buffer);
 
         assert!(buffer.as_ref() == vec![0; 20]);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_drop_fn() -> anyhow::Result<()> {
-        // let pool = Rc::new(RefCell::new(vec![]));
-
-        // assert!(pool.borrow().len() == 0);
-
-        // let buffer = Buffer::alloc(
-        //     20,
-        //     Some(Rc::new(|ptr| {
-        //         let pool_cp = pool.clone();
-        //         pool_cp.borrow_mut().push(ptr);
-        //     })),
-        // );
-
-        // drop(buffer);
-
-        // assert!(pool.borrow().len() == 1);
 
         Ok(())
     }
