@@ -1,5 +1,6 @@
 use std::fmt::{Debug, Display};
 
+/// Helper to print table-like data.
 pub struct DebugTable {
     column_names: Vec<String>,
     rows: Vec<Vec<String>>,

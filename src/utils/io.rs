@@ -90,9 +90,16 @@ impl FileOps for File {
 }
 
 pub trait IO {
+    /// Atomic read to given `buf` of bytes at `offset` in file.
     fn pread(&self, offset: usize, buf: &mut [u8]) -> io::Result<usize>;
+
+    /// Atomic write of `buf` at given `offset` in file.
     fn pwrite(&self, offset: usize, buf: &[u8]) -> io::Result<usize>;
+
+    /// Atomic write of many given `buf` at `offset`.
     fn pwrite_vec(&self, offset: usize, buf: &mut [IoSlice<'_>]) -> io::Result<usize>;
+
+    /// Truncates file to given `lenght` in bytes.
     fn truncate(&self, length: usize) -> io::Result<()>;
 
     /// Truncates beginning of a file (skips header). `bytes_to_remove` is deleted and rest is
@@ -274,6 +281,7 @@ pub struct BlockIO<I> {
     io: UnsafeCell<I>,
     /// Size of single block in **bytes**.
     block_size: usize,
+    /// Size of header at the beginning of a file in **bytes**.
     header_size: usize,
 }
 

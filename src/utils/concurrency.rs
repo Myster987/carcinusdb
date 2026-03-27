@@ -58,6 +58,8 @@ impl Drop for SemaphoreGuard {
     }
 }
 
+/// Highly concurrent array of u32 integers with versioning to prevent `ABA`
+/// problem.
 pub struct AtomicArray<const SIZE: usize> {
     slots: [CachePadded<AtomicU64>; SIZE],
     backoff: Backoff,
@@ -81,6 +83,8 @@ impl<const SIZE: usize> AtomicArray<SIZE> {
         }
     }
 
+    /// Acquires access to first free slot in array and returns guard that
+    /// protects it.
     pub fn acquire(self: &Arc<Self>, min_visible: FrameNumber) -> SlotGuard<SIZE> {
         loop {
             for (i, slot) in self.slots.iter().enumerate() {
@@ -117,6 +121,8 @@ impl<const SIZE: usize> AtomicArray<SIZE> {
         self.slots[index].store_packed(Self::FREE_SLOT, tag.wrapping_add(1), Ordering::Release);
     }
 
+    /// Returns smallest **in use** value in array. In this case used to return
+    /// smallest visible frame for WAL.
     pub fn min_visible_frame(&self) -> Option<FrameNumber> {
         loop {
             let before: Vec<(u32, u32)> = self

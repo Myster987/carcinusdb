@@ -530,29 +530,18 @@ mod tests {
 
     #[test]
     fn test_crc() -> anyhow::Result<()> {
-        let n: u32 = 0;
+        let sample_data = "123456789";
 
-        println!("{:X}", checksum_crc32("123456789".as_bytes()));
+        let checksum = checksum_crc32(sample_data.as_bytes());
 
-        // println!("{}", crc32(&0x0_u32.to_be_bytes()));
+        let bad_sample = "12345678#";
 
-        // for i in 0..4 {
-        //     let mask = (n >> i) & 1;
-        //     println!("Bit {i}: {}", mask);
-        // }
+        let bad_checksum = checksum_crc32(bad_sample.as_bytes());
 
-        // let num: u8 = 10;
-
-        // let mut b = 0b_10;
-        // for i in 0..size_of_val(&num) * 8 {
-        //     let bit = (num >> i) & 1;
-        //     b = (b << 1) + bit;
-        //     println!("bit: {bit}");
-        //     println!("{b:08b}");
-        // }
-
-        // println!("{:08b}", 10);
-        // println!("{:08b}", 10);
+        assert!(
+            checksum != bad_checksum,
+            "CRC should catch difference between two checksums"
+        );
 
         Ok(())
     }

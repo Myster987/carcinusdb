@@ -55,10 +55,6 @@ impl Buffer {
         self.size
     }
 
-    // pub fn is_empty(&self) -> bool {
-    //     self.data.is_empty()
-    // }
-
     /// Returns const pointer to buffer memory.
     pub fn as_ptr(&self) -> *const u8 {
         self.ptr.as_ptr().cast_const()
