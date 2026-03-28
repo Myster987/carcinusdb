@@ -117,8 +117,11 @@ impl MemDatabaseHeader {
     }
 }
 
+/// Constains all the necessary logic to run database.
 pub struct Database {
+    /// Catalog of all table in db.
     catalog: Arc<Catalog>,
+    /// Manages b-trees, pages and free space retrival.
     pager: Arc<Pager>,
 }
 
