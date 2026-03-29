@@ -163,7 +163,7 @@ impl<'tx, Tx: WriteTx> Operator for Update<'tx, Tx> {
         let old_key = BTreeKey::new_table_key(row_id, Some(row.to_borrowed()));
 
         let new_record = record_builder.serialize_to_record();
-        let new_key = BTreeKey::new_table_key(row_id, Some(new_record.to_borrowed())));
+        let new_key = BTreeKey::new_table_key(row_id, Some(new_record.to_borrowed()));
 
         let inserted_record =
             self.cursor
