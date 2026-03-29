@@ -231,6 +231,15 @@ impl PageType {
             Self::TableLeaf => Self::TableInternal,
         }
     }
+
+    pub fn into_leaf(self) -> PageType {
+        match self {
+            Self::IndexInternal => Self::IndexLeaf,
+            Self::IndexLeaf => self,
+            Self::TableInternal => Self::TableLeaf,
+            Self::TableLeaf => self,
+        }
+    }
 }
 
 impl TryFrom<u8> for PageType {
@@ -2349,6 +2358,13 @@ pub fn write_btree_cell<T: CellOps>(
 ) -> storage::Result<()> {
     let position = offset as usize;
     let cell_size = cell.local_size();
+
+    debug_assert!(
+        position + cell_size <= page_buffer.len(),
+        "Cell overflows page: {} > {}",
+        position + cell_size,
+        page_buffer.len()
+    );
 
     cell.write_to_buffer(&mut page_buffer[position..position + cell_size]);
 

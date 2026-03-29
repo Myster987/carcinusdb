@@ -9,7 +9,7 @@ use crate::{
         types::Value,
     },
     storage::{
-        btree::{BTreeCursor, BTreeKey, DatabaseCursor, DeleteOptions},
+        btree::{BTreeCursor, BTreeKey, DeleteOptions},
         wal::transaction::WriteTx,
     },
     vm::{
@@ -123,9 +123,10 @@ impl<'tx, Tx: WriteTx> Operator for Delete<'tx, Tx> {
             return Ok(None);
         };
 
-        self.cursor
-            .borrow_mut()
-            .delete_current(DeleteOptions::default())?;
+        self.cursor.borrow_mut().delete(
+            &BTreeKey::new_table_key(row.get_value(0).to_int(), Some(row.to_borrowed())),
+            DeleteOptions::default(),
+        )?;
 
         for (index_metadata, index_cursor) in self.index_cursors.iter_mut() {
             let col_idx = index_metadata.column_index;
@@ -139,9 +140,6 @@ impl<'tx, Tx: WriteTx> Operator for Delete<'tx, Tx> {
 
             let key = BTreeKey::new_index_key(record);
             index_cursor.delete(&key, DeleteOptions::default())?;
-            // if index_cursor.seek(&key)?.is_found() {
-            //     index_cursor.delete_current(DeleteOptions::default())?;
-            // }
         }
 
         Ok(Some(row))

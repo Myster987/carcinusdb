@@ -80,6 +80,13 @@ impl<'a> Record<'a> {
         }
     }
 
+    pub fn to_borrowed(&'a self) -> Record<'a> {
+        Record {
+            payload: Cow::Borrowed(&self.payload),
+            cursor: Rc::new(RefCell::new(self.cursor.borrow().clone())),
+        }
+    }
+
     pub fn project(&self, indices: &[usize]) -> sql::Result<Record<'static>> {
         let mut projected_record = RecordMut::new();
 

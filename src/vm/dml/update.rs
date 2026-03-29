@@ -9,7 +9,7 @@ use crate::{
         types::Value,
     },
     storage::{
-        btree::{BTreeCursor, BTreeKey, DatabaseCursor, InsertOptions},
+        btree::{BTreeCursor, BTreeKey, InsertOptions},
         wal::transaction::WriteTx,
     },
     vm::{
@@ -160,27 +160,36 @@ impl<'tx, Tx: WriteTx> Operator for Update<'tx, Tx> {
         }
 
         let row_id = row.get_value(0).to_int();
-        let new_record = record_builder.serialize_to_record();
+        let old_key = BTreeKey::new_table_key(row_id, Some(row.to_borrowed()));
 
-        let inserted_record = self.cursor.borrow_mut().update_current(
-            BTreeKey::new_table_key(row_id, Some(new_record.to_owned())),
-            InsertOptions::default(),
-        )?;
+        let new_record = record_builder.serialize_to_record();
+        let new_key = BTreeKey::new_table_key(row_id, Some(new_record.to_borrowed())));
+
+        let inserted_record =
+            self.cursor
+                .borrow_mut()
+                .update(&old_key, new_key, InsertOptions::default())?;
 
         for (index_metadata, index_cursor) in self.index_cursors.iter_mut() {
             let col_idx = index_metadata.column_index;
-            let col_value = new_record.get_value(col_idx).to_owned();
+            let old_col_value = old_key.get_record().unwrap().get_value(col_idx).to_owned();
+            let new_col_value = new_record.get_value(col_idx).to_owned();
             let row_id = new_record.get_value(0).to_int();
 
-            let record = RecordBuilder::new()
-                .add(col_value)
+            let old_idx_record = RecordBuilder::new()
+                .add(old_col_value)
                 .add(Value::Int(row_id))
                 .build();
 
-            let key = BTreeKey::new_index_key(record);
-            if index_cursor.seek(&key)?.is_found() {
-                index_cursor.update_current(key, InsertOptions::default())?;
-            }
+            let new_idx_record = RecordBuilder::new()
+                .add(new_col_value)
+                .add(Value::Int(row_id))
+                .build();
+
+            let old_key = BTreeKey::new_index_key(old_idx_record);
+            let new_key = BTreeKey::new_index_key(new_idx_record);
+
+            index_cursor.update(&old_key, new_key, InsertOptions::default())?;
         }
 
         return Ok(inserted_record);
