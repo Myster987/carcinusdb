@@ -455,8 +455,6 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
                 continue;
             }
 
-            log::debug!("{:?}", *guard);
-
             let search_result = self.binary_search(&guard, key)?;
 
             if let Ok(slot) = search_result {
@@ -821,20 +819,28 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         }
     }
 
-    pub fn update_current(
+    pub fn update(
         &mut self,
-        entry: BTreeKey<'_>,
+        old_key: &BTreeKey<'_>,
+        new_entry: BTreeKey<'_>,
         options: InsertOptions,
     ) -> storage::Result<Option<Record<'static>>> {
-        let record = if options.is_returning() {
-            entry.get_record().map(|r| r.to_owned())
-        } else {
-            None
-        };
+        let search_result = self.seek(old_key)?;
 
-        self.try_insert_into_leaf(self.current_slot, entry, true)?;
+        match search_result {
+            SearchResult::Found { page: _, slot } => {
+                let record = if options.is_returning() {
+                    new_entry.get_record().map(|r| r.to_owned())
+                } else {
+                    None
+                };
 
-        Ok(record)
+                self.try_insert_into_leaf(slot, new_entry, true)?;
+
+                Ok(record)
+            }
+            SearchResult::NotFound { .. } => Err(storage::Error::KeyNotFound),
+        }
     }
 
     /// Attempts to insert entry into leaf page at given slot number. This
@@ -895,21 +901,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             }
             SearchResult::NotFound { page: _, slot: _ } => Err(storage::Error::KeyNotFound),
         }
-    }
-
-    pub fn delete_current(
-        &mut self,
-        options: DeleteOptions,
-    ) -> storage::Result<Option<Record<'static>>> {
-        let removed_cell = self.try_delete_from_leaf(self.current_slot)?;
-
-        let record = if options.is_returning() {
-            Some(self.owned_record_from_cell(&removed_cell)?)
-        } else {
-            None
-        };
-
-        Ok(record)
     }
 
     fn try_delete_from_leaf(&mut self, slot_number: SlotNumber) -> storage::Result<BTreeCell> {
@@ -1053,13 +1044,19 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     }
 
     fn balance(&mut self) -> storage::Result<()> {
-        log::trace!("Begin balance at page: {}", self.current_page);
+        log::trace!("Begin balance B-tree of root: {}", self.root);
 
         loop {
             let current_page = self
                 .pager
                 .read_page(self.tx.borrow().deref(), self.current_page)?;
             let current_page_guard = current_page.lock_exclusive();
+
+            log::debug!(
+                "Balancing page: {} of type {:?}",
+                self.current_page,
+                current_page_guard.page_type()
+            );
 
             let is_root = self.current_page == self.root;
             let is_overflow = current_page_guard.is_overflow();
@@ -1109,8 +1106,15 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 self.pager
                     .free_page(self.tx.borrow_mut().deref_mut(), child_page)?;
 
+                if grandchild == 0 {
+                    root_guard.set_page_type(root_guard.page_type().into_leaf());
+                }
+
                 cells.into_iter().for_each(|cell| root_guard.push(cell));
-                root_guard.set_right_child(grandchild);
+
+                if grandchild != 0 {
+                    root_guard.set_right_child(grandchild);
+                }
 
                 self.pager.mark_dirty(&root);
 
@@ -1356,9 +1360,10 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 }
 
                 while siblings.len() > distribution.len() {
-                    let freed = siblings.pop().unwrap();
-                    self.pager
-                        .free_page(self.tx.borrow_mut().deref_mut(), freed.page)?;
+                    self.pager.free_page(
+                        self.tx.borrow_mut().deref_mut(),
+                        siblings.pop().unwrap().page,
+                    )?;
                 }
 
                 let last_sibling = siblings.last().unwrap();
