@@ -280,7 +280,7 @@ impl TryFrom<u8> for PageType {
 /// | Field Name        | Size  | Offset    | Description |
 /// | ----------------- | ----- | --------- | ----------- |
 /// | page_type         | 1     | 0         | represent PageType.
-/// | first_freeblock   | 2     | 1         |  points to start of first freeblock, if set to 0, then there are no freeblocks.
+/// | first_freeblock   | 2     | 1         | points to start of first freeblock, if set to 0, then there are no freeblocks.
 /// | length            | 2     | 3         | number of slots in slot array.
 /// | last_used_offset  | 2     | 5         | offset to last used space. Used to calculate if new data can fit in Page.
 /// | free_fragments    | 1     | 7         | number of free fragments. Tiny gaps between cells, to small to fit new data.
