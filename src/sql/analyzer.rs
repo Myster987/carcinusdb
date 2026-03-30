@@ -42,6 +42,8 @@ pub enum Error {
     ColumnNotFound(String),
     #[error("attempted to modify hidden \"row_id\" column.")]
     RowIdAssignment,
+    #[error("attempted to access hidden \"row_id\" column.")]
+    RowIdAccess,
 
     // schema
     #[error(transparent)]
@@ -138,6 +140,7 @@ pub fn analyze(statement: &Statement, catalog: &Catalog) -> Result<()> {
             into,
             columns,
             values,
+            returning,
         } => {
             let table_metadata = catalog.get_table(into)?;
 
@@ -201,6 +204,8 @@ pub fn analyze(statement: &Statement, catalog: &Catalog) -> Result<()> {
                     analyze_assignment(&table_metadata, col, expr, false)?;
                 }
             }
+
+            analyze_returning(&table_metadata.schema, returning)?;
         }
 
         Statement::Select {
@@ -224,7 +229,11 @@ pub fn analyze(statement: &Statement, catalog: &Catalog) -> Result<()> {
             }
         }
 
-        Statement::Delete { from, r#where } => {
+        Statement::Delete {
+            from,
+            r#where,
+            returning,
+        } => {
             let table_metadata = catalog.get_table(from)?;
 
             if from == CARCINUSDB_MASTER_TABLE {
@@ -232,12 +241,15 @@ pub fn analyze(statement: &Statement, catalog: &Catalog) -> Result<()> {
             }
 
             analyze_where(&table_metadata.schema, r#where)?;
+
+            analyze_returning(&table_metadata.schema, returning)?;
         }
 
         Statement::Update {
             table,
             columns,
             r#where,
+            returning,
         } => {
             let table_metadata = catalog.get_table(table)?;
 
@@ -250,6 +262,8 @@ pub fn analyze(statement: &Statement, catalog: &Catalog) -> Result<()> {
             }
 
             analyze_where(&table_metadata.schema, r#where)?;
+
+            analyze_returning(&table_metadata.schema, returning)?;
         }
 
         Statement::Explain(inner) => {
@@ -264,6 +278,20 @@ pub fn analyze(statement: &Statement, catalog: &Catalog) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn analyze_returning(schema: &Schema, returning: &Option<Vec<Expression>>) -> Result<()> {
+    if let Some(returning_columns) = returning {
+        for expr in returning_columns {
+            if expr != &Expression::Wildcard {
+                analyze_expression(&schema, expr)?;
+            }
+        }
+
+        Ok(())
+    } else {
+        Ok(())
+    }
 }
 
 fn analyze_where(schema: &Schema, r#where: &Option<Expression>) -> Result<()> {

@@ -120,6 +120,7 @@ impl<'a> Tokenizer<'a> {
             "DROP" => Keyword::Drop,
             "FROM" => Keyword::From,
             "WHERE" => Keyword::Where,
+            "RETURNING" => Keyword::Returning,
             "AND" => Keyword::And,
             "OR" => Keyword::Or,
             "PRIMARY" => Keyword::Primary,

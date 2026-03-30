@@ -570,21 +570,29 @@ mod tests {
             );
 
             for i in 1..=1_000 {
-                let sql = format!("INSERT INTO test VALUES ({i}, 'test_{i}', {});", i + 20);
+                let sql = format!(
+                    "INSERT INTO test VALUES ({i}, 'test_{i}', {}) RETURNING id, name;",
+                    i + 20
+                );
                 let query = tx.execute(&sql)?;
                 println!("{}", query.to_string()?);
             }
 
-            let query = tx.execute("UPDATE test SET name = 'macie' WHERE id = 1;")?;
+            let query =
+                tx.execute("UPDATE test SET name = 'macie' WHERE id = 1 RETURNING id, age;")?;
             println!("{}", query.to_string()?);
 
             select_all();
 
-            let query = tx.execute("DELETE FROM test WHERE id >= 5;")?;
+            let query = tx.execute("DELETE FROM test WHERE id >= 5 RETURNING id;")?;
 
             println!("{}", query.to_string()?);
 
             select_all();
+
+            let query = tx.execute("INSERT INTO test VALUES (100, 'test_6', 26), (9, 'test_7', 27), (50, 'test_8', 28) RETURNING *;")?;
+
+            println!("{}", query.to_string()?);
 
             println!(
                 "{}",

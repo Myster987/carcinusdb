@@ -664,6 +664,8 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
     }
 }
 
+pub type UpdateOptions = InsertOptions;
+
 /// Options that can be applied durring insert:
 /// - REPLACE - if duplicate entry is present it will get replace with new one.
 /// - RETURNING - if set returns inserted record.
@@ -1110,6 +1112,10 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     root_guard.set_page_type(root_guard.page_type().into_leaf());
                 }
 
+                log::debug!("Root page type: {:?}", root_guard.page_type());
+
+                log::debug!("Children page type: {:?}", cells);
+
                 cells.into_iter().for_each(|cell| root_guard.push(cell));
 
                 if grandchild != 0 {
@@ -1155,6 +1161,12 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                         .pager
                         .read_page(self.tx.borrow().deref(), sibling.page)?;
                     let page_guard = page.lock_exclusive();
+
+                    if page_guard.len() == 0 {
+                        log::debug!("Empty page: {}", sibling.page);
+                        println!("{:?}", page_guard.as_ptr());
+                    }
+
                     let mut page_cells = page_guard.drain(..);
 
                     usable_page_space = page_guard.usable_space();
@@ -1365,9 +1377,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                         siblings.pop().unwrap().page,
                     )?;
                 }
-
-                let last_sibling = siblings.last().unwrap();
-                parent_guard.set_child(divider_index, last_sibling.page);
 
                 for (i, sibling) in siblings.iter().enumerate() {
                     let page = self

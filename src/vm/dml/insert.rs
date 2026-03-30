@@ -16,7 +16,7 @@ use crate::{
     },
     vm::{
         self,
-        operator::{Operator, Row},
+        operator::{Operator, Row, projection::Projection},
     },
 };
 
@@ -25,6 +25,7 @@ pub fn plan_insert<'tx, DbTx: WriteDbTx + 'tx>(
     into: String,
     columns: Vec<String>,
     values: Vec<Vec<Expression>>,
+    returning: Option<Vec<Expression>>,
 ) -> vm::Result<Box<dyn Operator + 'tx>> {
     let table = tx.catalog().get_table(&into)?;
 
@@ -34,13 +35,20 @@ pub fn plan_insert<'tx, DbTx: WriteDbTx + 'tx>(
         .map(|idx| (idx.clone(), tx.write_cursor(idx.root)))
         .collect();
 
-    Ok(Box::new(Insert::new(
+    let mut plan: Box<dyn Operator + 'tx> = Box::new(Insert::new(
         tx.write_cursor(table.root),
         table.schema,
         columns,
         values,
         index_cursors,
-    )))
+        returning.is_some(),
+    ));
+
+    if let Some(returning) = returning {
+        plan = Box::new(Projection::new(plan, returning)?);
+    };
+
+    Ok(plan)
 }
 
 pub struct Insert<'tx, Tx: WriteTx> {
@@ -51,6 +59,7 @@ pub struct Insert<'tx, Tx: WriteTx> {
     current: usize,
     temp_record: RecordMut,
     index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx, Tx>)>,
+    insert_options: InsertOptions,
 }
 
 impl<'tx, Tx: WriteTx> Insert<'tx, Tx> {
@@ -60,11 +69,18 @@ impl<'tx, Tx: WriteTx> Insert<'tx, Tx> {
         columns: Vec<String>,
         values: Vec<Vec<Expression>>,
         index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx, Tx>)>,
+        is_returning: bool,
     ) -> Self {
         let indices = columns
             .iter()
             .map(|col| schema.index_of(col).unwrap())
             .collect();
+
+        let mut insert_options = InsertOptions::default();
+
+        if is_returning {
+            insert_options.set_returning();
+        }
 
         Self {
             cursor,
@@ -74,6 +90,7 @@ impl<'tx, Tx: WriteTx> Insert<'tx, Tx> {
             current: 0,
             temp_record: RecordMut::new(),
             index_cursors,
+            insert_options,
         }
     }
 }
@@ -114,7 +131,7 @@ impl<'tx, Tx: WriteTx> Operator for Insert<'tx, Tx> {
 
         let inserted_record = self.cursor.insert(
             BTreeKey::new_table_key(row_id, Some(record.to_owned())),
-            InsertOptions::default(),
+            self.insert_options,
         )?;
 
         for (index_metadata, index_cursor) in self.index_cursors.iter_mut() {

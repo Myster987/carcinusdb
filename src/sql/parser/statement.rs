@@ -15,15 +15,18 @@ pub enum Statement {
         into: String,
         columns: Vec<String>,
         values: Vec<Vec<Expression>>,
+        returning: Option<Vec<Expression>>,
     },
     Update {
         table: String,
         columns: Vec<Assignment>,
         r#where: Option<Expression>,
+        returning: Option<Vec<Expression>>,
     },
     Delete {
         from: String,
         r#where: Option<Expression>,
+        returning: Option<Vec<Expression>>,
     },
     Create(Create),
 
@@ -62,6 +65,7 @@ impl Display for Statement {
                 into,
                 columns,
                 values,
+                returning,
             } => {
                 write!(f, "INSERT INTO {into}")?;
                 if columns.len() > 0 {
@@ -75,12 +79,20 @@ impl Display for Statement {
 
                 write!(f, " VALUES {}", &fmt_values.join(", "))?;
 
+                if let Some(ret) = returning {
+                    write!(f, " RETURNING")?;
+                    if ret.len() > 0 {
+                        write!(f, " {}", fmt_join(ret, ", "))?;
+                    }
+                }
+
                 Ok(())
             }
             Self::Update {
                 table,
                 columns,
                 r#where,
+                returning,
             } => {
                 write!(f, "UPDATE {table} SET {}", fmt_join(columns, ", "))?;
 
@@ -88,13 +100,31 @@ impl Display for Statement {
                     write!(f, " WHERE {where_expression}")?;
                 }
 
+                if let Some(ret) = returning {
+                    write!(f, " RETURNING")?;
+                    if ret.len() > 0 {
+                        write!(f, " {}", fmt_join(ret, ", "))?;
+                    }
+                }
+
                 Ok(())
             }
-            Self::Delete { from, r#where } => {
+            Self::Delete {
+                from,
+                r#where,
+                returning,
+            } => {
                 write!(f, "DELETE FROM {from}")?;
 
                 if let Some(where_expression) = r#where {
                     write!(f, " WHERE {where_expression}")?;
+                }
+
+                if let Some(ret) = returning {
+                    write!(f, " RETURNING")?;
+                    if ret.len() > 0 {
+                        write!(f, " {}", fmt_join(ret, ", "))?;
+                    }
                 }
 
                 Ok(())

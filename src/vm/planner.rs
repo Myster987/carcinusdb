@@ -60,20 +60,26 @@ pub fn plan_write<'tx>(
             into,
             columns,
             values,
+            returning,
         } => {
-            let insert = dml::insert::plan_insert(tx, into, columns, values)?;
+            let insert = dml::insert::plan_insert(tx, into, columns, values, returning)?;
             Ok(ExecutionPlan::Query(insert))
         }
         Statement::Update {
             table,
             columns,
             r#where,
+            returning,
         } => {
-            let update = dml::update::plan_update(tx, table, columns, r#where)?;
+            let update = dml::update::plan_update(tx, table, columns, r#where, returning)?;
             Ok(ExecutionPlan::Query(update))
         }
-        Statement::Delete { from, r#where } => {
-            let delete = dml::delete::plan_delete(tx, from, r#where)?;
+        Statement::Delete {
+            from,
+            r#where,
+            returning,
+        } => {
+            let delete = dml::delete::plan_delete(tx, from, r#where, returning)?;
             Ok(ExecutionPlan::Query(delete))
         }
 

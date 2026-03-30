@@ -439,6 +439,14 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_returning(&mut self) -> sql::Result<Option<Vec<Expression>>> {
+        if self.consume_optional_keyword(Keyword::Returning) {
+            Ok(Some(self.parse_comma_separeted_values()?))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn parse_order_by(&mut self) -> sql::Result<Vec<Expression>> {
         if self.consume_optional_keyword(Keyword::Order) {
             self.expect_keyword(Keyword::By)?;
@@ -600,7 +608,13 @@ impl<'a> StatementParser for Parser<'a> {
 
         let r#where = self.parse_where()?;
 
-        Ok(Statement::Delete { from, r#where })
+        let returning = self.parse_returning()?;
+
+        Ok(Statement::Delete {
+            from,
+            r#where,
+            returning,
+        })
     }
     fn parse_insert(&mut self) -> sql::Result<Statement> {
         self.expect_keyword(Keyword::Insert)?;
@@ -619,10 +633,13 @@ impl<'a> StatementParser for Parser<'a> {
             values.push(self.parse_comma_separeted(Self::parse_expression, true)?);
         }
 
+        let returning = self.parse_returning()?;
+
         Ok(Statement::Insert {
             into,
             columns,
             values,
+            returning,
         })
     }
     fn parse_select(&mut self) -> sql::Result<Statement> {
@@ -656,10 +673,13 @@ impl<'a> StatementParser for Parser<'a> {
 
         let r#where = self.parse_where()?;
 
+        let returning = self.parse_returning()?;
+
         Ok(Statement::Update {
             table,
             columns,
             r#where,
+            returning,
         })
     }
 }

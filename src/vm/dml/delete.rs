@@ -18,6 +18,7 @@ use crate::{
             Operator, Row,
             filter::Filter,
             index_scan::{IndexScan, find_index},
+            projection::Projection,
             seq_scan::SeqScan,
         },
     },
@@ -27,10 +28,11 @@ pub fn plan_delete<'tx, DbTx: WriteDbTx + 'tx>(
     tx: &'tx DbTx,
     from: String,
     r#where: Option<Expression>,
+    returning: Option<Vec<Expression>>,
 ) -> vm::Result<Box<dyn Operator + 'tx>> {
     let table = tx.catalog().get_table(&from)?;
 
-    match find_index(&r#where, &table) {
+    let mut plan: Box<dyn Operator + 'tx> = match find_index(&r#where, &table) {
         Some((index, kind, filter)) => {
             let table_cursor = Rc::new(RefCell::new(tx.write_cursor(table.root)));
             let index_scan = IndexScan::new(
@@ -50,11 +52,11 @@ pub fn plan_delete<'tx, DbTx: WriteDbTx + 'tx>(
                 .map(|idx| (idx.clone(), tx.write_cursor(idx.root)))
                 .collect();
 
-            Ok(Box::new(Delete::with_index_source(
+            Box::new(Delete::with_index_source(
                 table_cursor,
                 source,
                 index_cursors,
-            )))
+            ))
         }
         // no matching index found. fallback to sequential scan. still corect,
         // just slower.
@@ -65,14 +67,20 @@ pub fn plan_delete<'tx, DbTx: WriteDbTx + 'tx>(
                 .map(|idx| (idx.clone(), tx.write_cursor(idx.root)))
                 .collect();
 
-            Ok(Box::new(Delete::sequential_scan(
+            Box::new(Delete::sequential_scan(
                 tx.write_cursor(table.root),
                 table.schema.clone(),
                 r#where,
                 index_cursors,
-            )?))
+            )?)
         }
+    };
+
+    if let Some(returning) = returning {
+        plan = Box::new(Projection::new(plan, returning)?);
     }
+
+    Ok(plan)
 }
 
 pub struct Delete<'tx, Tx: WriteTx + 'tx> {

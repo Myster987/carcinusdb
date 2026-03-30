@@ -3,7 +3,7 @@ use crate::{
     sql::{
         self,
         parser::statement::{Expression, Statement},
-        schema::ROW_ID_COLUMN,
+        schema::{ROW_ID_COLUMN, Schema},
         types::Value,
     },
 };
@@ -16,32 +16,14 @@ pub fn prepare<Tx: ReadDbTx>(tx: &Tx, statement: &mut Statement) -> sql::Result<
         {
             let metadata = catalog.get_table(from)?;
 
-            let identifiers = metadata
-                .schema
-                .columns
-                .iter()
-                .filter(|&col| col.name != ROW_ID_COLUMN)
-                .cloned()
-                .map(|col| Expression::Identifier(col.name))
-                .collect::<Vec<Expression>>();
-
-            let mut resolved_wildcards = Vec::new();
-
-            for expr in columns.drain(..) {
-                if expr == Expression::Wildcard {
-                    resolved_wildcards.extend(identifiers.iter().cloned());
-                } else {
-                    resolved_wildcards.push(expr);
-                }
-            }
-
-            *columns = resolved_wildcards;
+            expand_wildcards(&metadata.schema, columns);
         }
 
         Statement::Insert {
             into,
             columns,
             values,
+            returning,
         } => {
             let metadata = catalog.get_table(into)?;
 
@@ -102,6 +84,35 @@ pub fn prepare<Tx: ReadDbTx>(tx: &Tx, statement: &mut Statement) -> sql::Result<
                     }
                 }
             }
+
+            if let Some(returning) = returning.as_mut() {
+                expand_wildcards(&metadata.schema, returning);
+            }
+        }
+
+        Statement::Delete {
+            from,
+            r#where: _,
+            returning,
+        } => {
+            let metadata = catalog.get_table(from)?;
+
+            if let Some(returning) = returning.as_mut() {
+                expand_wildcards(&metadata.schema, returning);
+            }
+        }
+
+        Statement::Update {
+            table,
+            columns: _,
+            r#where: _,
+            returning,
+        } => {
+            let metadata = catalog.get_table(table)?;
+
+            if let Some(returning) = returning.as_mut() {
+                expand_wildcards(&metadata.schema, returning);
+            }
         }
 
         Statement::Explain(inner) => {
@@ -112,4 +123,26 @@ pub fn prepare<Tx: ReadDbTx>(tx: &Tx, statement: &mut Statement) -> sql::Result<
     };
 
     Ok(())
+}
+
+fn expand_wildcards(schema: &Schema, expressions: &mut Vec<Expression>) {
+    let identifiers = schema
+        .columns
+        .iter()
+        .filter(|&col| col.name != ROW_ID_COLUMN)
+        .cloned()
+        .map(|col| Expression::Identifier(col.name))
+        .collect::<Vec<Expression>>();
+
+    let mut resolved_wildcards = Vec::new();
+
+    for expr in expressions.drain(..) {
+        if expr == Expression::Wildcard {
+            resolved_wildcards.extend(identifiers.iter().cloned());
+        } else {
+            resolved_wildcards.push(expr);
+        }
+    }
+
+    *expressions = resolved_wildcards;
 }

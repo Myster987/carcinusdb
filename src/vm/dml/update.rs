@@ -9,7 +9,7 @@ use crate::{
         types::Value,
     },
     storage::{
-        btree::{BTreeCursor, BTreeKey, InsertOptions},
+        btree::{BTreeCursor, BTreeKey, InsertOptions, UpdateOptions},
         wal::transaction::WriteTx,
     },
     vm::{
@@ -18,6 +18,7 @@ use crate::{
             Operator, Row,
             filter::Filter,
             index_scan::{IndexScan, find_index},
+            projection::Projection,
             seq_scan::SeqScan,
         },
     },
@@ -28,10 +29,11 @@ pub fn plan_update<'tx, DbTx: WriteDbTx + 'tx>(
     table: String,
     columns: Vec<Assignment>,
     r#where: Option<Expression>,
+    returning: Option<Vec<Expression>>,
 ) -> vm::Result<Box<dyn Operator + 'tx>> {
     let table = tx.catalog().get_table(&table)?;
 
-    match find_index(&r#where, &table) {
+    let mut plan: Box<dyn Operator + 'tx> = match find_index(&r#where, &table) {
         Some((index, kind, filter)) => {
             let table_cursor = Rc::new(RefCell::new(tx.write_cursor(table.root)));
             let index_scan = IndexScan::new(
@@ -51,13 +53,14 @@ pub fn plan_update<'tx, DbTx: WriteDbTx + 'tx>(
                 .map(|idx| (idx.clone(), tx.write_cursor(idx.root)))
                 .collect();
 
-            Ok(Box::new(Update::with_index_source(
+            Box::new(Update::with_index_source(
                 table_cursor,
                 source,
                 table.schema,
                 columns,
                 index_cursors,
-            )))
+                returning.is_some(),
+            ))
         }
         // no matching index found. fallback to sequential scan. still corect,
         // just slower.
@@ -68,15 +71,22 @@ pub fn plan_update<'tx, DbTx: WriteDbTx + 'tx>(
                 .map(|idx| (idx.clone(), tx.write_cursor(idx.root)))
                 .collect();
 
-            Ok(Box::new(Update::sequential_scan(
+            Box::new(Update::sequential_scan(
                 tx.write_cursor(table.root),
                 table.schema.clone(),
                 columns,
                 r#where,
                 index_cursors,
-            )?))
+                returning.is_some(),
+            )?)
         }
-    }
+    };
+
+    if let Some(returning) = returning {
+        plan = Box::new(Projection::new(plan, returning)?);
+    };
+
+    Ok(plan)
 }
 
 pub struct Update<'tx, Tx: WriteTx> {
@@ -84,6 +94,7 @@ pub struct Update<'tx, Tx: WriteTx> {
     source: Box<dyn Operator + 'tx>,
     assignments: HashMap<usize, Value>,
     index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx, Tx>)>,
+    update_options: UpdateOptions,
 }
 
 impl<'tx, Tx: WriteTx + 'tx> Update<'tx, Tx> {
@@ -93,6 +104,7 @@ impl<'tx, Tx: WriteTx + 'tx> Update<'tx, Tx> {
         assignments: Vec<Assignment>,
         r#where: Option<Expression>,
         index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx, Tx>)>,
+        is_returning: bool,
     ) -> vm::Result<Self> {
         let mut assignment_map = HashMap::with_capacity(assignments.len());
 
@@ -113,11 +125,18 @@ impl<'tx, Tx: WriteTx + 'tx> Update<'tx, Tx> {
             source = Box::new(Filter::new(source, expr));
         }
 
+        let mut update_options = UpdateOptions::default();
+
+        if is_returning {
+            update_options.set_returning();
+        }
+
         Ok(Self {
             cursor,
             source,
             assignments: assignment_map,
             index_cursors,
+            update_options,
         })
     }
 
@@ -127,6 +146,7 @@ impl<'tx, Tx: WriteTx + 'tx> Update<'tx, Tx> {
         schema: Schema,
         assignments: Vec<Assignment>,
         index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx, Tx>)>,
+        is_returning: bool,
     ) -> Self {
         let mut assignment_map = HashMap::with_capacity(assignments.len());
 
@@ -138,11 +158,18 @@ impl<'tx, Tx: WriteTx + 'tx> Update<'tx, Tx> {
             assignment_map.insert(index, value);
         }
 
+        let mut update_options = UpdateOptions::default();
+
+        if is_returning {
+            update_options.set_returning();
+        }
+
         Self {
             cursor,
             source,
             assignments: assignment_map,
             index_cursors,
+            update_options,
         }
     }
 }
@@ -168,7 +195,7 @@ impl<'tx, Tx: WriteTx> Operator for Update<'tx, Tx> {
         let inserted_record =
             self.cursor
                 .borrow_mut()
-                .update(&old_key, new_key, InsertOptions::default())?;
+                .update(&old_key, new_key, self.update_options)?;
 
         for (index_metadata, index_cursor) in self.index_cursors.iter_mut() {
             let col_idx = index_metadata.column_index;
