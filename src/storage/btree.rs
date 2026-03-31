@@ -1162,11 +1162,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                         .read_page(self.tx.borrow().deref(), sibling.page)?;
                     let page_guard = page.lock_exclusive();
 
-                    if page_guard.len() == 0 {
-                        log::debug!("Empty page: {}", sibling.page);
-                        println!("{:?}", page_guard.as_ptr());
-                    }
-
                     let mut page_cells = page_guard.drain(..);
 
                     usable_page_space = page_guard.usable_space();
