@@ -1141,6 +1141,9 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
             let mut siblings = self.load_siblings(self.current_page, &*parent_guard)?;
 
+            log::debug!("Loaded siblings: {:?}", siblings);
+            println!("Parent: {:?}", *parent_guard);
+
             debug_assert_eq!(
                 std::collections::HashSet::<PageNumber>::from_iter(
                     siblings.iter().map(|sibling| sibling.page)
@@ -1173,7 +1176,12 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     if i < siblings.len() - 1 {
                         // for leaf pages simply delete internal cell from parent.
                         // we have original version in leaf, so it's not needed.
-                        let _ = parent_guard.remove(divider_index);
+                        let removed_cell = parent_guard.remove(divider_index);
+
+                        log::debug!(
+                            "Removed cell from parent at index {divider_index}: {:?}",
+                            removed_cell
+                        );
                     }
                 }
 
@@ -1236,6 +1244,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 }
 
                 while siblings.len() > distribution.len() {
+                    log::debug!("Removing sibling: {:?}", siblings.last().unwrap());
                     self.pager.free_page(
                         self.tx.borrow_mut().deref_mut(),
                         siblings.pop().unwrap().page,
@@ -1299,6 +1308,11 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                         let divider = self.convert_to_internal_cell(
                             divider,
                             page_guard.try_right_child().unwrap_or(0),
+                        );
+
+                        log::debug!(
+                            "Removed cell from parent at index {divider_index}: {:?}",
+                            divider
                         );
 
                         cells.push(divider);
@@ -1367,6 +1381,8 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 }
 
                 while siblings.len() > distribution.len() {
+                    log::debug!("Removing sibling: {:?}", siblings.last().unwrap());
+
                     self.pager.free_page(
                         self.tx.borrow_mut().deref_mut(),
                         siblings.pop().unwrap().page,
