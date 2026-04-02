@@ -569,11 +569,8 @@ mod tests {
                     .to_string()?
             );
 
-            for i in 1..=1_000 {
-                let sql = format!(
-                    "INSERT INTO test VALUES ({i}, 'test_{i}', {}) RETURNING id, name;",
-                    i + 20
-                );
+            for i in 1..=10_000 {
+                let sql = format!("INSERT INTO test VALUES ({i}, 'test_{i}', {});", i + 20);
                 let query = tx.execute(&sql)?;
                 println!("{}", query.to_string()?);
             }

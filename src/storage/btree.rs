@@ -1112,10 +1112,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     root_guard.set_page_type(root_guard.page_type().into_leaf());
                 }
 
-                log::debug!("Root page type: {:?}", root_guard.page_type());
-
-                log::debug!("Children page type: {:?}", cells);
-
                 cells.into_iter().for_each(|cell| root_guard.push(cell));
 
                 if grandchild != 0 {
@@ -1141,9 +1137,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
             let mut siblings = self.load_siblings(self.current_page, &*parent_guard)?;
 
-            log::debug!("Loaded siblings: {:?}", siblings);
-            println!("Parent: {:?}", *parent_guard);
-
             debug_assert_eq!(
                 std::collections::HashSet::<PageNumber>::from_iter(
                     siblings.iter().map(|sibling| sibling.page)
@@ -1152,6 +1145,9 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 siblings.len(),
                 "siblings array contains duplicated pages: {siblings:?}"
             );
+
+            let original_right_child = parent_guard.try_right_child().unwrap_or(0);
+            let last_sibling_is_cell_child = siblings.last().unwrap().page != original_right_child;
 
             let mut cells = Vec::new();
             let divider_index = siblings[0].index_in_parent;
@@ -1173,15 +1169,10 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                         let _ = page_cells.next();
                     }
                     cells.extend(page_cells);
-                    if i < siblings.len() - 1 {
+                    if i < siblings.len() - 1 || last_sibling_is_cell_child {
                         // for leaf pages simply delete internal cell from parent.
                         // we have original version in leaf, so it's not needed.
-                        let removed_cell = parent_guard.remove(divider_index);
-
-                        log::debug!(
-                            "Removed cell from parent at index {divider_index}: {:?}",
-                            removed_cell
-                        );
+                        let _ = parent_guard.remove(divider_index);
                     }
                 }
 
@@ -1244,7 +1235,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 }
 
                 while siblings.len() > distribution.len() {
-                    log::debug!("Removing sibling: {:?}", siblings.last().unwrap());
                     self.pager.free_page(
                         self.tx.borrow_mut().deref_mut(),
                         siblings.pop().unwrap().page,
@@ -1310,12 +1300,9 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                             page_guard.try_right_child().unwrap_or(0),
                         );
 
-                        log::debug!(
-                            "Removed cell from parent at index {divider_index}: {:?}",
-                            divider
-                        );
-
                         cells.push(divider);
+                    } else if last_sibling_is_cell_child {
+                        let _ = parent_guard.remove(divider_index);
                     }
                 }
 
@@ -1381,8 +1368,6 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 }
 
                 while siblings.len() > distribution.len() {
-                    log::debug!("Removing sibling: {:?}", siblings.last().unwrap());
-
                     self.pager.free_page(
                         self.tx.borrow_mut().deref_mut(),
                         siblings.pop().unwrap().page,
