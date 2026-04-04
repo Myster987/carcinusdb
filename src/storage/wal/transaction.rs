@@ -24,6 +24,44 @@ impl<'a> Transaction<'a> {
         }
     }
 
+    #[inline]
+    pub fn max_frame(&self) -> FrameNumber {
+        self.max_frame
+    }
+
+    #[inline]
+    pub fn set_max_frame(&mut self, value: FrameNumber) {
+        self.max_frame = value;
+    }
+
+    pub fn local_db_header(&self) -> &DatabaseHeader {
+        match &self.lock_level {
+            LockLevel::Write {
+                guard: _,
+                local_db_header,
+            } => local_db_header,
+            LockLevel::Exclusive {
+                guard: _,
+                local_db_header,
+            } => local_db_header,
+            _ => panic!("Called on wrong transaction type."),
+        }
+    }
+
+    pub fn local_db_header_mut(&mut self) -> &mut DatabaseHeader {
+        match &mut self.lock_level {
+            LockLevel::Write {
+                guard: _,
+                local_db_header,
+            } => local_db_header,
+            LockLevel::Exclusive {
+                guard: _,
+                local_db_header,
+            } => local_db_header,
+            _ => panic!("Called on wrong transaction type."),
+        }
+    }
+
     pub fn acquire_read(&mut self, wal: &WriteAheadLog) -> storage::Result<()> {
         if self.lock_level.is_at_least_read() {
             return Ok(());
