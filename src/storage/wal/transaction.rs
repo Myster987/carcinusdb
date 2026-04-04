@@ -9,18 +9,108 @@ use crate::{
     utils::concurrency::SlotGuard,
 };
 
+pub struct Transaction<'a> {
+    min_frame: FrameNumber,
+    max_frame: FrameNumber,
+    lock_level: LockLevel<'a>,
+}
+
+impl<'a> Transaction<'a> {
+    pub fn new(min_frame: FrameNumber, max_frame: FrameNumber) -> Self {
+        Self {
+            min_frame,
+            max_frame,
+            lock_level: LockLevel::None,
+        }
+    }
+
+    pub fn acquire_read(&mut self, wal: &WriteAheadLog) -> storage::Result<()> {
+        if self.lock_level.is_at_least_read() {
+            return Ok(());
+        }
+
+        let guard = wal.readers.acquire(self.min_frame);
+        self.lock_level = LockLevel::Read(guard);
+
+        Ok(())
+    }
+
+    pub fn acquire_write(&mut self, wal: &'a WriteAheadLog) -> storage::Result<()> {
+        if self.lock_level.is_at_least_write() {
+            return Ok(());
+        }
+
+        let guard = wal.writer.lock();
+        let local_db_header = *wal.db_header.load_full();
+        self.lock_level = LockLevel::Write {
+            guard,
+            local_db_header,
+        };
+
+        Ok(())
+    }
+
+    pub fn acquire_exclusive(&mut self, wal: &'a WriteAheadLog) -> storage::Result<()> {
+        if self.lock_level.is_exclusive() {
+            return Ok(());
+        }
+
+        let guard = wal.writer.lock();
+        let local_db_header = *wal.db_header.load_full();
+        self.lock_level = LockLevel::Exclusive {
+            guard,
+            local_db_header,
+        };
+
+        Ok(())
+    }
+}
+
+pub enum LockLevel<'a> {
+    None,
+    Read(SlotGuard<READERS_NUM>),
+    Write {
+        guard: MutexGuard<'a, ()>,
+        local_db_header: DatabaseHeader,
+    },
+    /// Commit only.
+    Exclusive {
+        guard: MutexGuard<'a, ()>,
+        local_db_header: DatabaseHeader,
+    },
+}
+
+impl<'a> LockLevel<'a> {
+    fn rank(&self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Read(_) => 1,
+            Self::Write { .. } => 2,
+            Self::Exclusive { .. } => 3,
+        }
+    }
+
+    pub fn is_at_least_read(&self) -> bool {
+        self.rank() >= 1
+    }
+
+    pub fn is_at_least_write(&self) -> bool {
+        self.rank() >= 2
+    }
+
+    pub fn is_exclusive(&self) -> bool {
+        self.rank() >= 3
+    }
+}
+
 /// Generic trait for both read and write transactions.
 pub trait ReadTx {
-    /// Returns min_frame stored by transaction locally.
-    fn tx_min_frame(&self) -> FrameNumber;
     /// Returns max_frame stored by transaction locally.
     fn tx_max_frame(&self) -> FrameNumber;
 }
 
 /// Trait for write transaction. Write transaction must allow both read and write.
 pub trait WriteTx: ReadTx {
-    // /// Returns last_checksum stored by transaction locally.
-    // fn tx_last_checksum(&self) -> Checksum;
     /// Sets new local max_frame for transaction.
     fn tx_set_max_frame(&mut self, new_max_frame: FrameNumber);
     // /// Sets new local last_checksum for transaction.
@@ -31,8 +121,6 @@ pub trait WriteTx: ReadTx {
 
 /// Read transaction that holds all the necessary guards and local variables.
 pub struct ReadTransaction {
-    // /// Protects this transaction, so that checkpoint allows it to finish.
-    // checkpoint_guard: RwLockReadGuard<'a, ()>,
     /// There can by only limited number of transactions running at the same
     /// time, so we have to acquire lock to even do something.
     read_guard: SlotGuard<READERS_NUM>,
@@ -58,7 +146,6 @@ impl ReadTransaction {
         }
 
         Ok(Self {
-            // checkpoint_guard,
             read_guard,
             min_frame,
             max_frame,
@@ -68,11 +155,6 @@ impl ReadTransaction {
 
 impl ReadTx for ReadTransaction {
     #[inline]
-    fn tx_min_frame(&self) -> FrameNumber {
-        self.min_frame
-    }
-
-    #[inline]
     fn tx_max_frame(&self) -> FrameNumber {
         self.max_frame
     }
@@ -81,7 +163,6 @@ impl ReadTx for ReadTransaction {
 /// Write transaction - must be ended with wal.commit().
 pub struct WriteTransaction<'a> {
     pub write_guard: MutexGuard<'a, ()>,
-    pub min_frame: FrameNumber,
     pub max_frame: FrameNumber,
     pub local_db_header: DatabaseHeader,
 }
@@ -91,7 +172,6 @@ impl<'a> WriteTransaction<'a> {
         // let checkpoint_guard = wal.checkpoint_lock.read();
         let write_guard = wal.writer.lock();
 
-        let min_frame = wal.get_min_frame();
         let max_frame = wal.get_max_frame();
         let local_db_header = *wal.db_header.load_full();
 
@@ -107,9 +187,7 @@ impl<'a> WriteTransaction<'a> {
         // }
 
         Ok(Self {
-            // checkpoint_guard,
             write_guard,
-            min_frame,
             max_frame,
             local_db_header,
         })
@@ -117,11 +195,6 @@ impl<'a> WriteTransaction<'a> {
 }
 
 impl ReadTx for WriteTransaction<'_> {
-    #[inline]
-    fn tx_min_frame(&self) -> FrameNumber {
-        self.min_frame
-    }
-
     #[inline]
     fn tx_max_frame(&self) -> FrameNumber {
         self.max_frame
