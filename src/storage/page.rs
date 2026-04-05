@@ -45,6 +45,7 @@ pub fn max_cell_size(usable_space: usize) -> usize {
     ((usable_space - 12) * 64 / 255) - 23
 }
 
+/// On disk representation of db header.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct DatabaseHeader {
@@ -69,6 +70,7 @@ pub struct DatabaseHeader {
 }
 
 impl DatabaseHeader {
+    /// Returns size of pages that is used in bytes.
     pub fn get_page_size(&self) -> usize {
         if self.page_size == 1 {
             MAX_PAGE_SIZE
@@ -77,6 +79,12 @@ impl DatabaseHeader {
         }
     }
 
+    /// Constructs `DatabaseHeader` from slice of bytes.
+    ///
+    /// # Note
+    ///
+    /// This function starts reading from beginning of a buffer (index 0), so
+    /// keep this in mind when using.
     pub fn from_bytes(buffer: &[u8]) -> Self {
         let version = u32::from_le_bytes(buffer[0..4].try_into().unwrap());
         let page_size = u32::from_le_bytes(buffer[4..8].try_into().unwrap());
@@ -101,6 +109,7 @@ impl DatabaseHeader {
         }
     }
 
+    /// Returns owned bytes of header, that are ready to be writen to disk.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buffer = vec![0; DATABASE_HEADER_SIZE];
         self.write_to_buffer(&mut buffer);
@@ -179,6 +188,7 @@ impl DatabaseHeader {
         self.version_valid_for = value;
     }
 
+    /// Returns if db is in state that doesn't need checkpointing.
     #[inline]
     pub fn is_consistent(&self) -> bool {
         self.get_change_counter() == self.get_valid_version_for()
