@@ -233,6 +233,8 @@ impl PageType {
         !self.is_leaf()
     }
 
+    /// Converts current type into internal. If called on internal type it
+    /// returns the same type.
     pub fn into_internal(self) -> PageType {
         match self {
             Self::IndexInternal => self,
@@ -242,6 +244,8 @@ impl PageType {
         }
     }
 
+    /// Converts current type into leaf. If called on leaf type it returns the
+    /// same type.
     pub fn into_leaf(self) -> PageType {
         match self {
             Self::IndexInternal => Self::IndexLeaf,
@@ -265,7 +269,7 @@ impl TryFrom<u8> for PageType {
     }
 }
 
-/// *Page is B-Tree node representation on disk (Page = Node).* \
+/// *Page is B-link tree node representation on disk (Page = Node).* \
 /// Page contains `Buffer`, which by defaul contains drop function that deallocates `Page`. \
 /// If this behavior is unwanted, then pass custom drop function as parameter in `Page::alloc`
 /// # Layout:
@@ -324,15 +328,24 @@ pub struct Page {
 }
 
 impl Page {
+    /// Byte offset of `PageType` in header.
     const PAGE_TYPE_OFFSET: usize = 0;
+    /// Byte offset of first freeblock (freelist) in header.
     const FIRST_FREEBLOCK_OFFSET: usize = Self::PAGE_TYPE_OFFSET + size_of::<PageType>();
+    /// Byte offset of phisical number of slots in page.
     const LENGTH_OFFSET: usize = Self::FIRST_FREEBLOCK_OFFSET + size_of::<SlotNumber>();
+    /// Byte offset of last used offset.
     const LAST_USED_OFFSET: usize = Self::LENGTH_OFFSET + size_of::<SlotNumber>();
+    /// Byte offset to number of free fragments that are < 4 bytes in header.
     const FREE_FRAGMENTS_OFFSET: usize = Self::LAST_USED_OFFSET + size_of::<SlotNumber>();
+    /// Byte offset to right sibling in page header.
     const RIGHT_SIBLING_OFFSET: usize = Self::FREE_FRAGMENTS_OFFSET + size_of::<u8>();
+    /// Byte offset to right child in page header (only present in internal nodes).
     const RIGHT_CHILD_OFFSET: usize = Self::RIGHT_SIBLING_OFFSET + size_of::<PageNumber>();
 
+    /// Position at which slot high key is stored, if present.
     pub const HIGH_KEY_SLOT: SlotNumber = 0;
+    /// Position where data cells begin, if high key is present.
     const FIRST_DATA_KEY: SlotNumber = Self::HIGH_KEY_SLOT + 1;
 
     // overflow page
