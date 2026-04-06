@@ -7,10 +7,7 @@ use crate::{
         schema::{IndexMetadata, Schema, TableMetadata},
         types::Value,
     },
-    storage::{
-        btree::{BTreeCursor, BTreeKey, DatabaseCursor},
-        wal::transaction::ReadTx,
-    },
+    storage::btree::{BTreeCursor, BTreeKey, DatabaseCursor},
     vm::{
         self,
         operator::{Operator, Row},
@@ -23,11 +20,11 @@ pub enum ScanBound {
     Exclusive(Value),
 }
 
-pub struct IndexScan<'tx, IndexTx: ReadTx + 'tx, TableTx: ReadTx + 'tx> {
+pub struct IndexScan<'tx> {
     /// walks the index b-tree.
-    index_cursor: Rc<RefCell<BTreeCursor<'tx, IndexTx>>>,
+    index_cursor: Rc<RefCell<BTreeCursor<'tx>>>,
     /// fetches actual row by row_id.
-    table_cursor: Rc<RefCell<BTreeCursor<'tx, TableTx>>>,
+    table_cursor: Rc<RefCell<BTreeCursor<'tx>>>,
     /// low bound of scan.
     low: ScanBound,
     /// high bound of scan (for exact scans it's the same as `low`).
@@ -37,10 +34,10 @@ pub struct IndexScan<'tx, IndexTx: ReadTx + 'tx, TableTx: ReadTx + 'tx> {
     done: bool,
 }
 
-impl<'tx, IndexTx: ReadTx + 'tx, TableTx: ReadTx + 'tx> IndexScan<'tx, IndexTx, TableTx> {
+impl<'tx> IndexScan<'tx> {
     pub fn new(
-        index_cursor: Rc<RefCell<BTreeCursor<'tx, IndexTx>>>,
-        table_cursor: Rc<RefCell<BTreeCursor<'tx, TableTx>>>,
+        index_cursor: Rc<RefCell<BTreeCursor<'tx>>>,
+        table_cursor: Rc<RefCell<BTreeCursor<'tx>>>,
         kind: ScanKind,
         schema: Schema,
     ) -> Self {
@@ -61,8 +58,8 @@ impl<'tx, IndexTx: ReadTx + 'tx, TableTx: ReadTx + 'tx> IndexScan<'tx, IndexTx, 
 
     // point lookup — WHERE col = value
     pub fn eq(
-        index_cursor: Rc<RefCell<BTreeCursor<'tx, IndexTx>>>,
-        table_cursor: Rc<RefCell<BTreeCursor<'tx, TableTx>>>,
+        index_cursor: Rc<RefCell<BTreeCursor<'tx>>>,
+        table_cursor: Rc<RefCell<BTreeCursor<'tx>>>,
         key: Value,
         schema: Schema,
     ) -> Self {
@@ -79,8 +76,8 @@ impl<'tx, IndexTx: ReadTx + 'tx, TableTx: ReadTx + 'tx> IndexScan<'tx, IndexTx, 
 
     // range scan — WHERE col BETWEEN low AND high
     pub fn range(
-        index_cursor: Rc<RefCell<BTreeCursor<'tx, IndexTx>>>,
-        table_cursor: Rc<RefCell<BTreeCursor<'tx, TableTx>>>,
+        index_cursor: Rc<RefCell<BTreeCursor<'tx>>>,
+        table_cursor: Rc<RefCell<BTreeCursor<'tx>>>,
         low: ScanBound,
         high: ScanBound,
         schema: Schema,
@@ -97,9 +94,7 @@ impl<'tx, IndexTx: ReadTx + 'tx, TableTx: ReadTx + 'tx> IndexScan<'tx, IndexTx, 
     }
 }
 
-impl<'tx, IndexTx: ReadTx + 'tx, TableTx: ReadTx + 'tx> Operator
-    for IndexScan<'tx, IndexTx, TableTx>
-{
+impl<'tx> Operator for IndexScan<'tx> {
     fn next(&mut self) -> vm::Result<Option<Row>> {
         if self.done {
             return Ok(None);

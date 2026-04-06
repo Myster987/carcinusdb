@@ -1,7 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use crate::{
-    database::ReadDbTx,
+    database::DatabaseTransaction,
     sql::{parser::statement::Expression, schema::Schema},
     vm::{
         self,
@@ -15,8 +15,8 @@ use crate::{
     },
 };
 
-pub fn plan_select<'tx, DbTx: ReadDbTx + 'tx>(
-    tx: &'tx DbTx,
+pub fn plan_select<'tx>(
+    tx: &DatabaseTransaction<'tx>,
     columns: Vec<Expression>,
     from: String,
     r#where: Option<Expression>,
@@ -28,8 +28,8 @@ pub fn plan_select<'tx, DbTx: ReadDbTx + 'tx>(
         match find_index(&r#where, &table) {
             Some((index, ScanKind::Eq(val), residual)) => {
                 let op = Box::new(IndexScan::eq(
-                    Rc::new(RefCell::new(tx.read_cursor(index.root))),
-                    Rc::new(RefCell::new(tx.read_cursor(table.root))),
+                    Rc::new(RefCell::new(tx.cursor(index.root))),
+                    Rc::new(RefCell::new(tx.cursor(table.root))),
                     val,
                     table.schema.clone(),
                 ));
@@ -37,8 +37,8 @@ pub fn plan_select<'tx, DbTx: ReadDbTx + 'tx>(
             }
             Some((index, ScanKind::Range(lo, hi), residual)) => {
                 let op = Box::new(IndexScan::range(
-                    Rc::new(RefCell::new(tx.read_cursor(index.root))),
-                    Rc::new(RefCell::new(tx.read_cursor(table.root))),
+                    Rc::new(RefCell::new(tx.cursor(index.root))),
+                    Rc::new(RefCell::new(tx.cursor(table.root))),
                     lo,
                     hi,
                     table.schema.clone(),
@@ -47,7 +47,7 @@ pub fn plan_select<'tx, DbTx: ReadDbTx + 'tx>(
             }
             None => {
                 let op = Box::new(SeqScan::new(
-                    Rc::new(RefCell::new(tx.read_cursor(table.root))),
+                    Rc::new(RefCell::new(tx.cursor(table.root))),
                     table.schema.clone(),
                 ));
                 (op, r#where) // full where goes to filter

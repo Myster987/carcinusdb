@@ -3,25 +3,22 @@ use std::mem;
 use hashbrown::HashSet;
 
 use crate::{
-    database::WriteDbTx,
+    database::DatabaseTransaction,
     sql::{
         parser::statement::Expression,
         record::{RecordBuilder, RecordMut},
         schema::{IndexMetadata, Schema},
         types::Value,
     },
-    storage::{
-        btree::{BTreeCursor, BTreeKey, InsertOptions},
-        wal::transaction::WriteTx,
-    },
+    storage::btree::{BTreeCursor, BTreeKey, InsertOptions},
     vm::{
         self,
         operator::{Operator, Row, projection::Projection},
     },
 };
 
-pub fn plan_insert<'tx, DbTx: WriteDbTx + 'tx>(
-    tx: &'tx DbTx,
+pub fn plan_insert<'tx>(
+    tx: &DatabaseTransaction<'tx>,
     into: String,
     columns: Vec<String>,
     values: Vec<Vec<Expression>>,
@@ -32,11 +29,11 @@ pub fn plan_insert<'tx, DbTx: WriteDbTx + 'tx>(
     let index_cursors = table
         .indexes
         .iter()
-        .map(|idx| (idx.clone(), tx.write_cursor(idx.root)))
+        .map(|idx| (idx.clone(), tx.cursor(idx.root)))
         .collect();
 
     let mut plan: Box<dyn Operator + 'tx> = Box::new(Insert::new(
-        tx.write_cursor(table.root),
+        tx.cursor(table.root),
         table.schema,
         columns,
         values,
@@ -51,24 +48,24 @@ pub fn plan_insert<'tx, DbTx: WriteDbTx + 'tx>(
     Ok(plan)
 }
 
-pub struct Insert<'tx, Tx: WriteTx> {
-    cursor: BTreeCursor<'tx, Tx>,
+pub struct Insert<'tx> {
+    cursor: BTreeCursor<'tx>,
     schema: Schema,
     indices: HashSet<usize>,
     values: Vec<Vec<Expression>>,
     current: usize,
     temp_record: RecordMut,
-    index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx, Tx>)>,
+    index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx>)>,
     insert_options: InsertOptions,
 }
 
-impl<'tx, Tx: WriteTx> Insert<'tx, Tx> {
+impl<'tx> Insert<'tx> {
     pub fn new(
-        cursor: BTreeCursor<'tx, Tx>,
+        cursor: BTreeCursor<'tx>,
         schema: Schema,
         columns: Vec<String>,
         values: Vec<Vec<Expression>>,
-        index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx, Tx>)>,
+        index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx>)>,
         is_returning: bool,
     ) -> Self {
         let indices = columns
@@ -95,7 +92,7 @@ impl<'tx, Tx: WriteTx> Insert<'tx, Tx> {
     }
 }
 
-impl<'tx, Tx: WriteTx> Operator for Insert<'tx, Tx> {
+impl<'tx> Operator for Insert<'tx> {
     fn next(&mut self) -> vm::Result<Option<Row>> {
         if self.current >= self.values.len() {
             return Ok(None);

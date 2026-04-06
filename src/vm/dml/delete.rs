@@ -1,17 +1,14 @@
 use std::{cell::RefCell, rc::Rc};
 
 use crate::{
-    database::WriteDbTx,
+    database::DatabaseTransaction,
     sql::{
         parser::statement::Expression,
         record::RecordBuilder,
         schema::{IndexMetadata, Schema},
         types::Value,
     },
-    storage::{
-        btree::{BTreeCursor, BTreeKey, DeleteOptions},
-        wal::transaction::WriteTx,
-    },
+    storage::btree::{BTreeCursor, BTreeKey, DeleteOptions},
     vm::{
         self,
         operator::{
@@ -24,8 +21,8 @@ use crate::{
     },
 };
 
-pub fn plan_delete<'tx, DbTx: WriteDbTx + 'tx>(
-    tx: &'tx DbTx,
+pub fn plan_delete<'tx>(
+    tx: &DatabaseTransaction<'tx>,
     from: String,
     r#where: Option<Expression>,
     returning: Option<Vec<Expression>>,
@@ -34,9 +31,9 @@ pub fn plan_delete<'tx, DbTx: WriteDbTx + 'tx>(
 
     let mut plan: Box<dyn Operator + 'tx> = match find_index(&r#where, &table) {
         Some((index, kind, filter)) => {
-            let table_cursor = Rc::new(RefCell::new(tx.write_cursor(table.root)));
+            let table_cursor = Rc::new(RefCell::new(tx.cursor(table.root)));
             let index_scan = IndexScan::new(
-                Rc::new(RefCell::new(tx.read_cursor(index.root))),
+                Rc::new(RefCell::new(tx.cursor(index.root))),
                 table_cursor.clone(),
                 kind,
                 table.schema.clone(),
@@ -49,7 +46,7 @@ pub fn plan_delete<'tx, DbTx: WriteDbTx + 'tx>(
             let index_cursors = table
                 .indexes
                 .iter()
-                .map(|idx| (idx.clone(), tx.write_cursor(idx.root)))
+                .map(|idx| (idx.clone(), tx.cursor(idx.root)))
                 .collect();
 
             Box::new(Delete::with_index_source(
@@ -64,11 +61,11 @@ pub fn plan_delete<'tx, DbTx: WriteDbTx + 'tx>(
             let index_cursors = table
                 .indexes
                 .iter()
-                .map(|idx| (idx.clone(), tx.write_cursor(idx.root)))
+                .map(|idx| (idx.clone(), tx.cursor(idx.root)))
                 .collect();
 
             Box::new(Delete::sequential_scan(
-                tx.write_cursor(table.root),
+                tx.cursor(table.root),
                 table.schema.clone(),
                 r#where,
                 index_cursors,
@@ -83,18 +80,18 @@ pub fn plan_delete<'tx, DbTx: WriteDbTx + 'tx>(
     Ok(plan)
 }
 
-pub struct Delete<'tx, Tx: WriteTx + 'tx> {
-    cursor: Rc<RefCell<BTreeCursor<'tx, Tx>>>,
+pub struct Delete<'tx> {
+    cursor: Rc<RefCell<BTreeCursor<'tx>>>,
     source: Box<dyn Operator + 'tx>,
-    index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx, Tx>)>,
+    index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx>)>,
 }
 
-impl<'tx, Tx: WriteTx + 'tx> Delete<'tx, Tx> {
+impl<'tx> Delete<'tx> {
     pub fn sequential_scan(
-        cursor: BTreeCursor<'tx, Tx>,
+        cursor: BTreeCursor<'tx>,
         schema: Schema,
         r#where: Option<Expression>,
-        index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx, Tx>)>,
+        index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx>)>,
     ) -> vm::Result<Self> {
         let cursor = Rc::new(RefCell::new(cursor));
         let scan = SeqScan::new(cursor.clone(), schema);
@@ -113,9 +110,9 @@ impl<'tx, Tx: WriteTx + 'tx> Delete<'tx, Tx> {
     }
 
     pub fn with_index_source(
-        cursor: Rc<RefCell<BTreeCursor<'tx, Tx>>>,
+        cursor: Rc<RefCell<BTreeCursor<'tx>>>,
         source: Box<dyn Operator + 'tx>,
-        index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx, Tx>)>,
+        index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx>)>,
     ) -> Self {
         Self {
             cursor,
@@ -125,7 +122,7 @@ impl<'tx, Tx: WriteTx + 'tx> Delete<'tx, Tx> {
     }
 }
 
-impl<'tx, Tx: WriteTx> Operator for Delete<'tx, Tx> {
+impl<'tx> Operator for Delete<'tx> {
     fn next(&mut self) -> vm::Result<Option<Row>> {
         let Some(row) = self.source.next()? else {
             return Ok(None);

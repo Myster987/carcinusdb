@@ -21,7 +21,7 @@ use crate::{
         cache::ShardedClockCache,
         page::{DATABASE_HEADER_PAGE_NUMBER, DATABASE_HEADER_SIZE, Page},
         pager::{self, ExclusivePageGuard},
-        wal::transaction::{ReadTransaction, ReadTx, WriteTransaction, WriteTx},
+        wal::transaction::Transaction,
     },
     utils::{
         self,
@@ -369,7 +369,7 @@ impl WriteAheadLog {
         };
 
         if replay_wal {
-            let mut tx = wal.begin_write_tx()?;
+            let mut tx = wal.begin_transaction()?;
             wal.replay(&mut tx)?;
             // wal.commit(&mut tx)?;
         }
@@ -379,8 +379,10 @@ impl WriteAheadLog {
 
     /// Reconstructs all the changes registered in WAL and if needed performs
     /// checkpoint.
-    pub fn replay<Tx: WriteTx>(&self, tx: &mut Tx) -> storage::Result<()> {
+    pub fn replay<'a>(&'a self, tx: &mut Transaction<'a>) -> storage::Result<()> {
         log::info!("Replaying WAL.");
+
+        tx.acquire_exclusive(self)?;
 
         // let writer_guard = self.writer.lock();
 
@@ -452,22 +454,24 @@ impl WriteAheadLog {
 }
 
 impl WriteAheadLog {
-    pub fn begin_read_tx<'a>(&'a self) -> storage::Result<ReadTransaction> {
-        ReadTransaction::begin(self)
+    pub fn begin_transaction<'a>(&'a self) -> storage::Result<Transaction<'a>> {
+        let min_frame = self.get_min_frame();
+        let max_frame = self.get_max_frame();
+
+        if min_frame != self.get_min_frame() || max_frame != self.get_max_frame() {
+            return Err(storage::Error::RetryTransaction);
+        }
+
+        Ok(Transaction::new(min_frame, max_frame))
     }
 
-    pub fn begin_write_tx<'a>(&'a self) -> storage::Result<WriteTransaction<'a>> {
-        WriteTransaction::begin(self)
-    }
-
-    pub fn commit<Tx: WriteTx>(&self, tx: &mut Tx) -> storage::Result<()> {
-        // let inner = unsafe { ManuallyDrop::take(&mut tx.inner) };
-        // std::mem::forget(tx);
+    pub fn commit<'a>(&'a self, tx: &mut Transaction<'a>) -> storage::Result<()> {
+        tx.acquire_write(self)?;
 
         self.wal_file.persist()?;
-        self.set_max_frame(tx.tx_max_frame());
+        self.set_max_frame(tx.max_frame());
 
-        let local_tx_db_header = tx.tx_local_db_header_mut();
+        let local_tx_db_header = tx.local_db_header_mut();
 
         // increment db change counter.
         local_tx_db_header.increment_change_counter();
@@ -504,12 +508,14 @@ impl WriteAheadLog {
 
     /// Reads given `page_number` from WAL. This operation doesn't interrupt
     /// other readers, because each reader is bounded to it's min and max frame.
-    pub fn read_frame<Tx: ReadTx>(
+    pub fn read_frame(
         &self,
-        transaction: &Tx,
+        transaction: &mut Transaction,
         page_number: PageNumber,
         buffer_pool: &Arc<BufferPool>,
     ) -> storage::Result<Option<Page>> {
+        transaction.acquire_read(self)?;
+
         // if given page number is not present in WAL we can simply return OK(None)
         if !self.is_in_wal(&page_number) {
             return Ok(None);
@@ -517,7 +523,7 @@ impl WriteAheadLog {
 
         let visible_frame_number = self
             .index
-            .get(&page_number, transaction.tx_max_frame())
+            .get(&page_number, transaction.max_frame())
             .ok_or(Error::PageNotFoundInWal(page_number))?;
 
         log::trace!("Reading frame: {}", visible_frame_number);
@@ -547,21 +553,23 @@ impl WriteAheadLog {
         }
     }
 
-    pub fn append_frame<Tx: WriteTx>(
-        &self,
-        transaction: &mut Tx,
+    pub fn append_frame<'a>(
+        &'a self,
+        transaction: &mut Transaction<'a>,
         page: ExclusivePageGuard,
         db_size: u32,
     ) -> storage::Result<()> {
         self.append_vectored(transaction, &mut [page], db_size)
     }
 
-    pub fn append_vectored<Tx: WriteTx>(
-        &self,
-        transaction: &mut Tx,
+    pub fn append_vectored<'a>(
+        &'a self,
+        transaction: &mut Transaction<'a>,
         pages: &mut [ExclusivePageGuard],
         db_size: u32,
     ) -> storage::Result<()> {
+        transaction.acquire_write(self)?;
+
         let pages_number = pages.len();
 
         let mut io_buffers = Vec::with_capacity(pages.len() * 2);
@@ -590,7 +598,7 @@ impl WriteAheadLog {
             io_buffers.push(page.as_io_slice());
         }
 
-        let frame_number = transaction.tx_max_frame() + 1;
+        let frame_number = transaction.max_frame() + 1;
 
         let write_result =
             self.wal_file
@@ -600,7 +608,7 @@ impl WriteAheadLog {
             pager::complete_write_page(&write_result, page, false);
         }
 
-        transaction.tx_set_max_frame(transaction.tx_max_frame() + pages_number as FrameNumber);
+        transaction.set_max_frame(transaction.max_frame() + pages_number as FrameNumber);
 
         for (i, page) in pages.iter_mut().enumerate() {
             let current_frame_number = frame_number + i as FrameNumber;
@@ -651,7 +659,7 @@ impl WriteAheadLog {
         max_frame > self.trigger_checkpoint + self.header.get_backfilled_number()
     }
 
-    pub fn checkpoint<Tx: WriteTx>(&self, transaction: &mut Tx) -> storage::Result<()> {
+    pub fn checkpoint<'a>(&'a self, transaction: &mut Transaction<'a>) -> storage::Result<()> {
         if !self.should_checkpoint() {
             return Ok(());
         }
@@ -659,11 +667,16 @@ impl WriteAheadLog {
         self._checkpoint(transaction)
     }
 
-    pub fn force_checkpoint<Tx: WriteTx>(&self, transaction: &mut Tx) -> storage::Result<()> {
+    pub fn force_checkpoint<'a>(
+        &'a self,
+        transaction: &mut Transaction<'a>,
+    ) -> storage::Result<()> {
         self._checkpoint(transaction)
     }
 
-    fn _checkpoint<Tx: WriteTx>(&self, transaction: &mut Tx) -> storage::Result<()> {
+    fn _checkpoint<'a>(&'a self, transaction: &mut Transaction<'a>) -> storage::Result<()> {
+        transaction.acquire_exclusive(self)?;
+
         let max_frame = self.get_max_frame();
         let min_visible_frame = self.readers.min_visible_frame();
 
@@ -701,7 +714,7 @@ impl WriteAheadLog {
         let is_full_checkpoint = to_backfill == successfully_backfilled;
 
         if is_full_checkpoint {
-            let tx_db_header = transaction.tx_local_db_header_mut();
+            let tx_db_header = transaction.local_db_header_mut();
 
             // increment db change counter and mark it as consistent.
             tx_db_header.increment_change_counter();
@@ -728,7 +741,7 @@ impl WriteAheadLog {
             self.index.clear();
             self.wal_file.truncate(0)?;
         } else {
-            let tx_db_header = transaction.tx_local_db_header_mut();
+            let tx_db_header = transaction.local_db_header_mut();
 
             // increment db change counter.
             tx_db_header.increment_change_counter();

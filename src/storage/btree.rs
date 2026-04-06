@@ -3,7 +3,7 @@ use std::{
     cell::RefCell,
     cmp::{Ordering, min},
     collections::VecDeque,
-    ops::{Deref, DerefMut},
+    ops::DerefMut,
     rc::Rc,
     sync::Arc,
 };
@@ -17,7 +17,7 @@ use crate::{
             TableInternalCell, TableLeafCell, cell_overflows,
         },
         pager::Pager,
-        wal::transaction::{ReadTx, WriteTx},
+        wal::transaction::Transaction,
     },
     utils::bytes::VarInt,
 };
@@ -180,9 +180,9 @@ enum CursorState {
 /// Cursor that allows traversing, inserting and deleteing (not yet) entries
 /// in B-link tree. It can be used in multiple readers and single writer
 /// scenario.
-pub struct BTreeCursor<'tx, Tx> {
-    tx: Rc<RefCell<Tx>>,
-    pager: &'tx Arc<Pager>,
+pub struct BTreeCursor<'tx> {
+    tx: Rc<RefCell<Transaction<'tx>>>,
+    pager: Arc<Pager>,
     root: PageNumber,
     current_page: PageNumber,
     current_slot: SlotNumber,
@@ -191,11 +191,11 @@ pub struct BTreeCursor<'tx, Tx> {
     state: CursorState,
 }
 
-impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
+impl<'tx> BTreeCursor<'tx> {
     /// Creates new cursor starting at root of B-tree.
     pub fn new(
-        tx: Rc<RefCell<Tx>>,
-        pager: &'tx Arc<Pager>,
+        tx: Rc<RefCell<Transaction<'tx>>>,
+        pager: Arc<Pager>,
         root: PageNumber,
         balance_pages_per_side: SlotNumber,
     ) -> Self {
@@ -316,7 +316,7 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
         while result.len() < total_size {
             let overflow_page = self
                 .pager
-                .read_page(self.tx.borrow().deref(), current_overflow)?;
+                .read_page(self.tx.borrow_mut().deref_mut(), current_overflow)?;
             let guard = overflow_page.lock_shared();
 
             result.extend_from_slice(guard.overflow_payload());
@@ -367,7 +367,7 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
         while result.len() < total_size {
             let overflow_page = self
                 .pager
-                .read_page(self.tx.borrow().deref(), current_overflow)?;
+                .read_page(self.tx.borrow_mut().deref_mut(), current_overflow)?;
             let guard = overflow_page.lock_shared();
 
             result.extend_from_slice(guard.overflow_payload());
@@ -396,7 +396,7 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
     pub fn row_id(&self) -> storage::Result<RowId> {
         let page = self
             .pager
-            .read_page(self.tx.borrow().deref(), self.current_page)?;
+            .read_page(self.tx.borrow_mut().deref_mut(), self.current_page)?;
         let guard = page.lock_shared();
         let key = self.extracty_key(&guard, self.current_slot)?;
         Ok(key.row_id())
@@ -435,7 +435,7 @@ impl<'tx, Tx: ReadTx> BTreeCursor<'tx, Tx> {
     }
 }
 
-impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
+impl<'tx> DatabaseCursor for BTreeCursor<'tx> {
     fn seek(&mut self, key: &BTreeKey) -> storage::Result<SearchResult> {
         // start at root
         self.go_to_root();
@@ -444,7 +444,7 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
         loop {
             let page = self
                 .pager
-                .read_page(self.tx.borrow().deref(), self.current_page)?;
+                .read_page(self.tx.borrow_mut().deref_mut(), self.current_page)?;
             let guard = page.lock_shared();
 
             // we need to move to rigth node
@@ -488,7 +488,7 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
         loop {
             let page = self
                 .pager
-                .read_page(self.tx.borrow().deref(), self.current_page)?;
+                .read_page(self.tx.borrow_mut().deref_mut(), self.current_page)?;
             let guard = page.lock_shared();
 
             if guard.is_leaf() {
@@ -515,7 +515,7 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
         loop {
             let page = self
                 .pager
-                .read_page(self.tx.borrow().deref(), self.current_page)?;
+                .read_page(self.tx.borrow_mut().deref_mut(), self.current_page)?;
             let guard = page.lock_shared();
 
             if guard.is_leaf() {
@@ -550,7 +550,7 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
             CursorState::Valid => {
                 let page = self
                     .pager
-                    .read_page(self.tx.borrow().deref(), self.current_page)?;
+                    .read_page(self.tx.borrow_mut().deref_mut(), self.current_page)?;
                 let guard = page.lock_shared();
 
                 if guard.is_empty() {
@@ -569,7 +569,7 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
                 if let Some(rigth_sibling) = guard.try_right_sibling() {
                     let next_page = self
                         .pager
-                        .read_page(self.tx.borrow().deref(), rigth_sibling)?;
+                        .read_page(self.tx.borrow_mut().deref_mut(), rigth_sibling)?;
                     let guard = next_page.lock_shared();
 
                     self.current_page = rigth_sibling;
@@ -600,7 +600,7 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
 
         let page = self
             .pager
-            .read_page(self.tx.borrow().deref(), self.current_page)?;
+            .read_page(self.tx.borrow_mut().deref_mut(), self.current_page)?;
         let guard = page.lock_shared();
 
         if guard.is_empty() {
@@ -617,7 +617,7 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
         if let Some(rigth_sibling) = guard.try_right_sibling() {
             let next_page = self
                 .pager
-                .read_page(self.tx.borrow().deref(), rigth_sibling)?;
+                .read_page(self.tx.borrow_mut().deref_mut(), rigth_sibling)?;
             let guard = next_page.lock_shared();
 
             let peek_slot = guard.first_data_offset();
@@ -649,7 +649,7 @@ impl<'tx, Tx: ReadTx> DatabaseCursor for BTreeCursor<'tx, Tx> {
     fn try_record(&self) -> storage::Result<Record<'static>> {
         let page = self
             .pager
-            .read_page(self.tx.borrow().deref(), self.current_page)?;
+            .read_page(self.tx.borrow_mut().deref_mut(), self.current_page)?;
         let guard = page.lock_shared();
 
         let key = self.extracty_key(&guard, self.current_slot)?;
@@ -786,12 +786,12 @@ impl DeleteOptionsBuilder {
     }
 }
 
-impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
+impl<'tx> BTreeCursor<'tx> {
     // Inserts new entry into B-tree. If entries exists, it returns error.
     // For now it does dumb spliting of pages without rebalancing and key
     // redistribution, but it's work in progress.
     pub fn insert(
-        &mut self,
+        &'tx mut self,
         entry: BTreeKey<'_>,
         options: InsertOptions,
     ) -> storage::Result<Option<Record<'static>>> {
@@ -822,7 +822,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     }
 
     pub fn update(
-        &mut self,
+        &'tx mut self,
         old_key: &BTreeKey<'_>,
         new_entry: BTreeKey<'_>,
         options: InsertOptions,
@@ -849,14 +849,14 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     /// function may cause page split and automatic flush of dirty pages,
     /// after write operation is completed.
     fn try_insert_into_leaf(
-        &mut self,
+        &'tx mut self,
         slot_number: SlotNumber,
         entry: BTreeKey<'_>,
         replace: bool,
     ) -> storage::Result<()> {
         let page = self
             .pager
-            .read_page(self.tx.borrow().deref(), self.current_page)?;
+            .read_page(self.tx.borrow_mut().deref_mut(), self.current_page)?;
 
         {
             let guard = page.lock_exclusive();
@@ -883,7 +883,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     }
 
     pub fn delete(
-        &mut self,
+        &'tx mut self,
         entry: &BTreeKey<'_>,
         options: DeleteOptions,
     ) -> storage::Result<Option<Record<'static>>> {
@@ -905,12 +905,12 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         }
     }
 
-    fn try_delete_from_leaf(&mut self, slot_number: SlotNumber) -> storage::Result<BTreeCell> {
+    fn try_delete_from_leaf(&'tx mut self, slot_number: SlotNumber) -> storage::Result<BTreeCell> {
         let next_key = self.peek()?;
 
         let page = self
             .pager
-            .read_page(self.tx.borrow().deref(), self.current_page)?;
+            .read_page(self.tx.borrow_mut().deref_mut(), self.current_page)?;
 
         let removed_cell = {
             let guard = page.lock_exclusive();
@@ -940,10 +940,12 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
     /// Splits root by preserving it's position in db. For example: if root is
     /// at page 1, after split it will stay the page number. This enables easy
     /// creation of tables and indexes, because we can simply point them at root.
-    fn split_root(&mut self) -> storage::Result<()> {
+    fn split_root(&'tx mut self) -> storage::Result<()> {
         log::trace!("Spliting root");
 
-        let root_page = self.pager.read_page(self.tx.borrow().deref(), self.root)?;
+        let root_page = self
+            .pager
+            .read_page(self.tx.borrow_mut().deref_mut(), self.root)?;
         let root_page_type = root_page.lock_shared().page_type();
 
         // alloc before locking root to avoid deadlock in case of master.
@@ -981,7 +983,9 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         };
 
         {
-            let left_child = self.pager.read_page(self.tx.borrow().deref(), left_child)?;
+            let left_child = self
+                .pager
+                .read_page(self.tx.borrow_mut().deref_mut(), left_child)?;
             let left_child_guard = left_child.lock_exclusive();
 
             left_child_guard.insert_cell(0, left_high_key.unwrap());
@@ -1003,13 +1007,14 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 left_child_guard.set_right_child(value);
             }
 
-            self.pager.mark_dirty(&left_child);
+            self.pager
+                .mark_dirty(self.tx.borrow_mut().deref_mut(), &left_child);
         }
 
         {
             let right_child = self
                 .pager
-                .read_page(self.tx.borrow().deref(), right_child)?;
+                .read_page(self.tx.borrow_mut().deref_mut(), right_child)?;
             let right_child_guard = right_child.lock_exclusive();
 
             let mut current_index = 0;
@@ -1030,7 +1035,8 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 right_child_guard.set_right_child(root_guard.try_right_child().unwrap_or(0));
             }
 
-            self.pager.mark_dirty(&right_child);
+            self.pager
+                .mark_dirty(self.tx.borrow_mut().deref_mut(), &right_child);
         }
 
         let separator_cell = self.convert_to_internal_cell(separator_cell, left_child);
@@ -1040,18 +1046,19 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
         root_guard.insert_cell(0, separator_cell);
 
-        self.pager.mark_dirty(&root_page);
+        self.pager
+            .mark_dirty(self.tx.borrow_mut().deref_mut(), &root_page);
 
         Ok(())
     }
 
-    fn balance(&mut self) -> storage::Result<()> {
+    fn balance(&'tx mut self) -> storage::Result<()> {
         log::trace!("Begin balance B-tree of root: {}", self.root);
 
         loop {
             let current_page = self
                 .pager
-                .read_page(self.tx.borrow().deref(), self.current_page)?;
+                .read_page(self.tx.borrow_mut().deref_mut(), self.current_page)?;
             let current_page_guard = current_page.lock_exclusive();
 
             log::debug!(
@@ -1076,7 +1083,9 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
 
             // root is empty.
             if is_root && is_underflow {
-                let root = self.pager.read_page(self.tx.borrow().deref(), self.root)?;
+                let root = self
+                    .pager
+                    .read_page(self.tx.borrow_mut().deref_mut(), self.root)?;
                 let root_guard = root.lock_exclusive();
 
                 // root is the only page, so we can't do anything.
@@ -1088,7 +1097,9 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     return Ok(());
                 };
 
-                let child = self.pager.read_page(self.tx.borrow().deref(), child_page)?;
+                let child = self
+                    .pager
+                    .read_page(self.tx.borrow_mut().deref_mut(), child_page)?;
                 let child_guard = child.lock_shared();
 
                 let needs_space = child_guard.used_space();
@@ -1118,7 +1129,8 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                     root_guard.set_right_child(grandchild);
                 }
 
-                self.pager.mark_dirty(&root);
+                self.pager
+                    .mark_dirty(self.tx.borrow_mut().deref_mut(), &root);
 
                 return Ok(());
             }
@@ -1132,7 +1144,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             };
             let parent_mem_page = self
                 .pager
-                .read_page(self.tx.borrow().deref(), parent_page)?;
+                .read_page(self.tx.borrow_mut().deref_mut(), parent_page)?;
             let parent_guard = parent_mem_page.lock_exclusive();
 
             let mut siblings = self.load_siblings(self.current_page, &*parent_guard)?;
@@ -1158,7 +1170,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 for (i, sibling) in siblings.iter().enumerate() {
                     let page = self
                         .pager
-                        .read_page(self.tx.borrow().deref(), sibling.page)?;
+                        .read_page(self.tx.borrow_mut().deref_mut(), sibling.page)?;
                     let page_guard = page.lock_exclusive();
 
                     let mut page_cells = page_guard.drain(..);
@@ -1218,9 +1230,10 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 }
 
                 let old_right_sibling = {
-                    let last_sibling = self
-                        .pager
-                        .read_page(self.tx.borrow().deref(), siblings.last().unwrap().page)?;
+                    let last_sibling = self.pager.read_page(
+                        self.tx.borrow_mut().deref_mut(),
+                        siblings.last().unwrap().page,
+                    )?;
                     let last_sibling_guard = last_sibling.lock_shared();
 
                     last_sibling_guard.try_right_sibling()
@@ -1244,7 +1257,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 for (i, sibling) in siblings.iter().enumerate() {
                     let page = self
                         .pager
-                        .read_page(self.tx.borrow().deref(), sibling.page)?;
+                        .read_page(self.tx.borrow_mut().deref_mut(), sibling.page)?;
                     let page_guard = page.lock_exclusive();
 
                     let cells_to_insert: Vec<_> = cells.drain(..distribution[i]).collect();
@@ -1270,7 +1283,8 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                         page_guard.push(cell);
                     }
 
-                    self.pager.mark_dirty(&page);
+                    self.pager
+                        .mark_dirty(self.tx.borrow_mut().deref_mut(), &page);
                 }
 
                 if old_right_sibling.is_none() {
@@ -1282,7 +1296,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 for (i, sibling) in siblings.iter().enumerate() {
                     let page = self
                         .pager
-                        .read_page(self.tx.borrow().deref(), sibling.page)?;
+                        .read_page(self.tx.borrow_mut().deref_mut(), sibling.page)?;
                     let page_guard = page.lock_exclusive();
                     let mut page_cells = page_guard.drain(..);
 
@@ -1348,9 +1362,10 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 }
 
                 let (old_right_sibling, old_right_child) = {
-                    let last_sibling = self
-                        .pager
-                        .read_page(self.tx.borrow().deref(), siblings.last().unwrap().page)?;
+                    let last_sibling = self.pager.read_page(
+                        self.tx.borrow_mut().deref_mut(),
+                        siblings.last().unwrap().page,
+                    )?;
                     let last_sibling_guard = last_sibling.lock_shared();
 
                     (
@@ -1377,7 +1392,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 for (i, sibling) in siblings.iter().enumerate() {
                     let page = self
                         .pager
-                        .read_page(self.tx.borrow().deref(), sibling.page)?;
+                        .read_page(self.tx.borrow_mut().deref_mut(), sibling.page)?;
                     let page_guard = page.lock_exclusive();
 
                     let mut cells_to_insert: Vec<_> = cells.drain(..distribution[i]).collect();
@@ -1404,7 +1419,8 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                         page_guard.push(cell);
                     }
 
-                    self.pager.mark_dirty(&page);
+                    self.pager
+                        .mark_dirty(self.tx.borrow_mut().deref_mut(), &page);
                 }
 
                 if old_right_sibling.is_none() {
@@ -1412,7 +1428,8 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 }
             }
 
-            self.pager.mark_dirty(&parent_mem_page);
+            self.pager
+                .mark_dirty(self.tx.borrow_mut().deref_mut(), &parent_mem_page);
             self.current_page = parent_page;
         }
     }
@@ -1455,7 +1472,11 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
             .collect())
     }
 
-    fn build_high_key(&mut self, page: &Page, entry: &BTreeKey<'_>) -> storage::Result<BTreeCell> {
+    fn build_high_key(
+        &'tx mut self,
+        page: &Page,
+        entry: &BTreeKey<'_>,
+    ) -> storage::Result<BTreeCell> {
         let page_type = page.page_type();
 
         if matches!(page_type, PageType::TableInternal | PageType::TableLeaf) {
@@ -1575,7 +1596,7 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
                 .alloc_empty_page(self.tx.borrow_mut().deref_mut())?;
             let overflow_page = self
                 .pager
-                .read_page(self.tx.borrow().deref(), overflow_page_number)?;
+                .read_page(self.tx.borrow_mut().deref_mut(), overflow_page_number)?;
             let overflow_page_guard = overflow_page.lock_exclusive();
 
             overflow_page_guard.set_next_overflow(prev_overflow_page);
@@ -1614,13 +1635,13 @@ impl<'tx, Tx: WriteTx> BTreeCursor<'tx, Tx> {
         }
     }
 
-    fn free_cell(&mut self, cell: &BTreeCell) -> storage::Result<()> {
+    fn free_cell(&'tx mut self, cell: &BTreeCell) -> storage::Result<()> {
         let mut current_overflow = cell.first_overflow();
 
         while let Some(overflow_page) = current_overflow {
             let next_overflow = self
                 .pager
-                .read_page(self.tx.borrow().deref(), overflow_page)?
+                .read_page(self.tx.borrow_mut().deref_mut(), overflow_page)?
                 .lock_shared()
                 .next_overflow();
 

@@ -1,17 +1,14 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use crate::{
-    database::WriteDbTx,
+    database::DatabaseTransaction,
     sql::{
         parser::statement::{Assignment, Expression},
         record::{RecordBuilder, RecordMut},
         schema::{IndexMetadata, Schema},
         types::Value,
     },
-    storage::{
-        btree::{BTreeCursor, BTreeKey, InsertOptions, UpdateOptions},
-        wal::transaction::WriteTx,
-    },
+    storage::btree::{BTreeCursor, BTreeKey, InsertOptions, UpdateOptions},
     vm::{
         self,
         operator::{
@@ -24,8 +21,8 @@ use crate::{
     },
 };
 
-pub fn plan_update<'tx, DbTx: WriteDbTx + 'tx>(
-    tx: &'tx DbTx,
+pub fn plan_update<'tx>(
+    tx: &DatabaseTransaction<'tx>,
     table: String,
     columns: Vec<Assignment>,
     r#where: Option<Expression>,
@@ -35,9 +32,9 @@ pub fn plan_update<'tx, DbTx: WriteDbTx + 'tx>(
 
     let mut plan: Box<dyn Operator + 'tx> = match find_index(&r#where, &table) {
         Some((index, kind, filter)) => {
-            let table_cursor = Rc::new(RefCell::new(tx.write_cursor(table.root)));
+            let table_cursor = Rc::new(RefCell::new(tx.cursor(table.root)));
             let index_scan = IndexScan::new(
-                Rc::new(RefCell::new(tx.read_cursor(index.root))),
+                Rc::new(RefCell::new(tx.cursor(index.root))),
                 table_cursor.clone(),
                 kind,
                 table.schema.clone(),
@@ -50,7 +47,7 @@ pub fn plan_update<'tx, DbTx: WriteDbTx + 'tx>(
             let index_cursors = table
                 .indexes
                 .iter()
-                .map(|idx| (idx.clone(), tx.write_cursor(idx.root)))
+                .map(|idx| (idx.clone(), tx.cursor(idx.root)))
                 .collect();
 
             Box::new(Update::with_index_source(
@@ -68,11 +65,11 @@ pub fn plan_update<'tx, DbTx: WriteDbTx + 'tx>(
             let index_cursors = table
                 .indexes
                 .iter()
-                .map(|idx| (idx.clone(), tx.write_cursor(idx.root)))
+                .map(|idx| (idx.clone(), tx.cursor(idx.root)))
                 .collect();
 
             Box::new(Update::sequential_scan(
-                tx.write_cursor(table.root),
+                tx.cursor(table.root),
                 table.schema.clone(),
                 columns,
                 r#where,
@@ -89,21 +86,21 @@ pub fn plan_update<'tx, DbTx: WriteDbTx + 'tx>(
     Ok(plan)
 }
 
-pub struct Update<'tx, Tx: WriteTx> {
-    cursor: Rc<RefCell<BTreeCursor<'tx, Tx>>>,
+pub struct Update<'tx> {
+    cursor: Rc<RefCell<BTreeCursor<'tx>>>,
     source: Box<dyn Operator + 'tx>,
     assignments: HashMap<usize, Value>,
-    index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx, Tx>)>,
+    index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx>)>,
     update_options: UpdateOptions,
 }
 
-impl<'tx, Tx: WriteTx + 'tx> Update<'tx, Tx> {
+impl<'tx> Update<'tx> {
     pub fn sequential_scan(
-        cursor: BTreeCursor<'tx, Tx>,
+        cursor: BTreeCursor<'tx>,
         schema: Schema,
         assignments: Vec<Assignment>,
         r#where: Option<Expression>,
-        index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx, Tx>)>,
+        index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx>)>,
         is_returning: bool,
     ) -> vm::Result<Self> {
         let mut assignment_map = HashMap::with_capacity(assignments.len());
@@ -141,11 +138,11 @@ impl<'tx, Tx: WriteTx + 'tx> Update<'tx, Tx> {
     }
 
     pub fn with_index_source(
-        cursor: Rc<RefCell<BTreeCursor<'tx, Tx>>>,
+        cursor: Rc<RefCell<BTreeCursor<'tx>>>,
         source: Box<dyn Operator + 'tx>,
         schema: Schema,
         assignments: Vec<Assignment>,
-        index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx, Tx>)>,
+        index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx>)>,
         is_returning: bool,
     ) -> Self {
         let mut assignment_map = HashMap::with_capacity(assignments.len());
@@ -174,7 +171,7 @@ impl<'tx, Tx: WriteTx + 'tx> Update<'tx, Tx> {
     }
 }
 
-impl<'tx, Tx: WriteTx> Operator for Update<'tx, Tx> {
+impl<'tx> Operator for Update<'tx> {
     fn next(&mut self) -> vm::Result<Option<Row>> {
         let Some(row) = self.source.next()? else {
             return Ok(None);

@@ -1,5 +1,5 @@
 use crate::{
-    database::{ReadDbTx, WriteDbTx},
+    database::DatabaseTransaction,
     sql::parser::statement::{Create, Drop, Statement},
     vm::{self, dml, operator::Operator},
 };
@@ -21,30 +21,9 @@ pub enum ExecutionPlan<'tx> {
     Explain(Box<ExecutionPlan<'tx>>),
 }
 
-pub fn plan_read<'tx, Tx: ReadDbTx>(
+pub fn plan<'tx>(
     statement: Statement,
-    tx: &'tx Tx,
-) -> vm::Result<ExecutionPlan<'tx>> {
-    match statement {
-        Statement::Select {
-            columns,
-            from,
-            r#where,
-            order_by,
-        } => {
-            let select = dml::select::plan_select(tx, columns, from, r#where, order_by)?;
-            Ok(ExecutionPlan::Query(select))
-        }
-
-        Statement::Explain(inner) => Ok(ExecutionPlan::Explain(Box::new(plan_read(*inner, tx)?))),
-
-        _ => Err(vm::Error::ReadOnly),
-    }
-}
-
-pub fn plan_write<'tx>(
-    statement: Statement,
-    tx: &'tx impl WriteDbTx,
+    tx: &DatabaseTransaction<'tx>,
 ) -> vm::Result<ExecutionPlan<'tx>> {
     match statement {
         Statement::Select {
@@ -90,6 +69,6 @@ pub fn plan_write<'tx>(
         Statement::Rollback => Ok(ExecutionPlan::Rollback),
         Statement::Commit => Ok(ExecutionPlan::Commit),
 
-        Statement::Explain(inner) => Ok(ExecutionPlan::Explain(Box::new(plan_write(*inner, tx)?))),
+        Statement::Explain(inner) => Ok(ExecutionPlan::Explain(Box::new(plan(*inner, tx)?))),
     }
 }

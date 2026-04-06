@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use crate::{
-    database::ReadDbTx,
+    database::DatabaseTransaction,
     sql::{
         analyzer::analyze,
         optimizer::optimize,
@@ -18,7 +18,7 @@ pub mod record;
 pub mod schema;
 pub mod types;
 
-pub fn pipeline<Tx: ReadDbTx>(tx: &Tx, input: &str) -> Result<Statement> {
+pub fn pipeline<'tx>(tx: &DatabaseTransaction<'tx>, input: &str) -> Result<Statement> {
     let mut statement = parse(input)?;
 
     analyze(&statement, tx.catalog())?;

@@ -14,7 +14,6 @@ use crate::{
     storage::{
         self, PageNumber,
         btree::{BTreeCursor, DatabaseCursor},
-        wal::transaction::ReadTx,
     },
 };
 
@@ -56,7 +55,7 @@ impl Catalog {
         Ok(())
     }
 
-    pub fn from_cursor<Tx: ReadTx>(mut master_cursor: BTreeCursor<Tx>) -> storage::Result<Self> {
+    pub fn from_cursor(mut master_cursor: BTreeCursor) -> storage::Result<Self> {
         let tables = DashMap::new();
         let mut pending_indexes = Vec::new();
 

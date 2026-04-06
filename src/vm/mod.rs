@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 use crate::{
-    database::WriteDbTx,
+    database::DatabaseTransaction,
     sql::parser::statement::Expression,
     vm::{
         planner::ExecutionPlan,
@@ -44,15 +44,8 @@ pub enum Error {
     SchemaError(#[from] crate::sql::schema::Error),
 }
 
-pub fn execute_read<'tx>(plan: ExecutionPlan<'tx>) -> Result<QueryResult<'tx>> {
-    match plan {
-        ExecutionPlan::Query(operator) => Ok(QueryResult::Rows(RowIterator::new(operator))),
-        _ => Err(Error::ReadOnly),
-    }
-}
-
-pub fn execute_write<'tx, Tx: WriteDbTx>(
-    tx: &'tx Tx,
+pub fn execute<'tx>(
+    tx: &DatabaseTransaction<'tx>,
     plan: ExecutionPlan<'tx>,
 ) -> Result<QueryResult<'tx>> {
     match plan {
