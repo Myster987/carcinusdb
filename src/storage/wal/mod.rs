@@ -262,25 +262,12 @@ pub struct WriteAheadLog {
     index: Arc<WalIndex>,
     /// Reference to page cache used durring checkpointing to dump dirty pages.
     page_cache: Arc<ShardedClockCache>,
-    // /// Last checkpointed entry in WAL.
-    // min_frame: AtomicU32,
     /// Last commited frame in transaction.
     max_frame: AtomicU32,
-    // /// Checksum of last frame in WAL. It is cumulative checksum of all pages. Stored as two u32 packed in single atomic.
-    // last_checksum: AtomicU32,
-
-    // /// Number of frames transfered to DB from WAL.
-    // backfilled_number: AtomicU32,
-    // /// Counter of checkpoints
-    // checkpoint_seq_num: AtomicU32,
     /// Array of read locks. Each locks is atomic u32 which represents minimal frame number this transaction can see.
     readers: Arc<AtomicArray<READERS_NUM>>,
     /// Lock for single writer.
     writer: Mutex<()>,
-    // /// All transactions read or write must acquire this lock before they can do anything.
-    // /// When we want to run checkpoint we get write lock instead to block other transactions.
-    // /// While this can couse latency spikes, it prevents WAL from growing indefinitely.
-    // checkpoint_lock: RwLock<()>,
 }
 
 impl WriteAheadLog {
@@ -365,13 +352,11 @@ impl WriteAheadLog {
             max_frame: AtomicU32::new(0),
             readers: Arc::new(AtomicArray::new()),
             writer: Mutex::new(()),
-            // checkpoint_lock: RwLock::new(()),
         };
 
         if replay_wal {
             let mut tx = wal.begin_transaction()?;
             wal.replay(&mut tx)?;
-            // wal.commit(&mut tx)?;
         }
 
         Ok(wal)
@@ -383,11 +368,6 @@ impl WriteAheadLog {
         log::info!("Replaying WAL.");
 
         tx.acquire_exclusive(self)?;
-
-        // let writer_guard = self.writer.lock();
-
-        // block all other operations. needs exclusive access.
-        // let checkpoint_guard = self.checkpoint_lock.write();
 
         // increases after each valid checkpoint.
         let mut max_frame = self.header.get_last_checkpointed();
@@ -420,9 +400,6 @@ impl WriteAheadLog {
         }
 
         self.set_max_frame(max_frame);
-
-        // drop(writer_guard);
-
         self.checkpoint(tx)?;
 
         Ok(())
@@ -466,8 +443,6 @@ impl WriteAheadLog {
     }
 
     pub fn commit(&self, tx: &mut Transaction) -> storage::Result<()> {
-        // log::trace!("Commit transaction");
-
         tx.acquire_write(self)?;
 
         self.wal_file.persist()?;
@@ -480,8 +455,6 @@ impl WriteAheadLog {
         self.db_file.write_header(&local_tx_db_header.to_bytes())?;
 
         self.db_header.swap(*local_tx_db_header);
-
-        // drop(inner.write_guard);
 
         tx.release_lock();
 
@@ -709,7 +682,6 @@ impl WriteAheadLog {
             self.db_file.write_header(&tx_db_header.to_bytes())?;
             self.db_file.persist()?;
 
-            // TODO: swap tx db header into mem db header
             self.db_header.swap(*tx_db_header);
 
             // change wal header params, because it will be truncated
