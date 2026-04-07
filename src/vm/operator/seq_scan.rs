@@ -2,24 +2,21 @@ use std::{cell::RefCell, rc::Rc};
 
 use crate::{
     sql::schema::Schema,
-    storage::{
-        btree::{BTreeCursor, DatabaseCursor},
-        wal::transaction::ReadTx,
-    },
+    storage::btree::{BTreeCursor, DatabaseCursor},
     vm::{
         self,
         operator::{Operator, Row},
     },
 };
 
-pub struct SeqScan<'tx, Tx: ReadTx> {
-    cursor: Rc<RefCell<BTreeCursor<'tx, Tx>>>,
+pub struct SeqScan<'tx> {
+    cursor: Rc<RefCell<BTreeCursor<'tx>>>,
     schema: Schema,
     started: bool,
 }
 
-impl<'tx, Tx: ReadTx> SeqScan<'tx, Tx> {
-    pub fn new(cursor: Rc<RefCell<BTreeCursor<'tx, Tx>>>, schema: Schema) -> Self {
+impl<'tx> SeqScan<'tx> {
+    pub fn new(cursor: Rc<RefCell<BTreeCursor<'tx>>>, schema: Schema) -> Self {
         Self {
             cursor,
             schema,
@@ -28,7 +25,7 @@ impl<'tx, Tx: ReadTx> SeqScan<'tx, Tx> {
     }
 }
 
-impl<'tx, Tx: ReadTx> Operator for SeqScan<'tx, Tx> {
+impl<'tx> Operator for SeqScan<'tx> {
     fn next(&mut self) -> vm::Result<Option<Row>> {
         let mut cursor = self.cursor.borrow_mut();
         if !self.started {

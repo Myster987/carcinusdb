@@ -17,10 +17,7 @@ use crate::{
         cache::ShardedClockCache,
         page::{DATABASE_HEADER_SIZE, DatabaseHeader},
         pager::Pager,
-        wal::{
-            WriteAheadLog,
-            transaction::{ReadTransaction, ReadTx, WriteTransaction, WriteTx},
-        },
+        wal::{WriteAheadLog, transaction::Transaction},
     },
     tcp::server::{TcpServer, connection::Connection},
     utils::io::{BlockIO, IO},
@@ -208,7 +205,7 @@ impl Database {
         )?);
 
         let catalog = {
-            let tx = pager.wal.begin_read_tx()?;
+            let tx = pager.wal.begin_transaction()?;
             let cursor = BTreeCursor::new(
                 Rc::new(RefCell::new(tx)),
                 &pager,
@@ -267,20 +264,10 @@ impl Database {
         Ok(Self { pager, catalog })
     }
 
-    pub fn begin_read<'a>(&'a self) -> Result<DatabaseReadTransaction> {
-        let wal_tx = self.pager.wal.begin_read_tx()?;
+    pub fn begin_transaction(&self) -> Result<DatabaseTransaction> {
+        let wal_tx = self.pager.wal.begin_transaction()?;
 
-        Ok(DatabaseReadTransaction {
-            wal_tx: Rc::new(RefCell::new(wal_tx)),
-            pager: self.pager.clone(),
-            catalog: self.catalog.clone(),
-        })
-    }
-
-    pub fn begin_write<'a>(&'a self) -> Result<DatabaseWriteTransaction<'a>> {
-        let wal_tx = self.pager.wal.begin_write_tx()?;
-
-        Ok(DatabaseWriteTransaction {
+        Ok(DatabaseTransaction {
             wal_tx: Rc::new(RefCell::new(wal_tx)),
             pager: self.pager.clone(),
             catalog: self.catalog.clone(),
@@ -288,115 +275,43 @@ impl Database {
     }
 }
 
-pub trait ReadDbTx {
-    fn pager(&self) -> &Arc<Pager>;
-    fn catalog(&self) -> &Arc<Catalog>;
-    fn read_cursor<'tx>(&'tx self, root: PageNumber) -> BTreeCursor<'tx, impl ReadTx>;
-}
-
-pub trait WriteDbTx: ReadDbTx {
-    fn write_cursor<'tx>(&'tx self, root: PageNumber) -> BTreeCursor<'tx, impl WriteTx>;
-    fn create_btree(&self, btree_type: BTreeType) -> storage::Result<PageNumber>;
-}
-
-pub struct DatabaseReadTransaction {
-    wal_tx: Rc<RefCell<ReadTransaction>>,
+pub struct DatabaseTransaction {
+    wal_tx: Rc<RefCell<Transaction>>,
     pager: Arc<Pager>,
     catalog: Arc<Catalog>,
 }
 
-impl DatabaseReadTransaction {
-    pub fn cursor(&self, root: PageNumber) -> BTreeCursor<'_, ReadTransaction> {
-        BTreeCursor::new(self.wal_tx.clone(), &self.pager, root, 0)
-    }
-
-    pub fn execute<'tx>(&'tx self, sql: &str) -> Result<QueryResult<'tx>> {
-        let statement = sql::pipeline(self, sql)?;
-
-        let plan = vm::planner::plan_read(statement, self)?;
-        vm::execute_read(plan).map_err(Into::into)
-    }
-
-    #[must_use]
-    pub fn commit(self) -> Result<()> {
-        Ok(())
-    }
-}
-
-impl ReadDbTx for DatabaseReadTransaction {
-    fn catalog(&self) -> &Arc<Catalog> {
-        &self.catalog
-    }
-
-    fn pager(&self) -> &Arc<Pager> {
-        &self.pager
-    }
-
-    fn read_cursor<'tx>(&'tx self, root: PageNumber) -> BTreeCursor<'tx, impl ReadTx> {
-        self.cursor(root)
-    }
-}
-
-pub struct DatabaseWriteTransaction<'tx> {
-    wal_tx: Rc<RefCell<WriteTransaction<'tx>>>,
-    pager: Arc<Pager>,
-    catalog: Arc<Catalog>,
-}
-
-impl<'tx> DatabaseWriteTransaction<'tx> {
-    const DEFAULT_BALANCE_PER_SIDE: u16 = 3;
-
-    pub fn cursor(&self, root: PageNumber) -> BTreeCursor<'_, WriteTransaction<'tx>> {
-        BTreeCursor::new(
-            self.wal_tx.clone(),
-            &self.pager,
-            root,
-            Self::DEFAULT_BALANCE_PER_SIDE,
-        )
+impl DatabaseTransaction {
+    pub fn cursor<'a>(&'a self, root: PageNumber) -> BTreeCursor<'a> {
+        BTreeCursor::new(self.wal_tx.clone(), &self.pager, root, 3)
     }
 
     pub fn execute(&self, sql: &str) -> Result<QueryResult<'_>> {
         let statement = sql::pipeline(self, sql)?;
 
-        let plan = vm::planner::plan_write(statement, self)?;
-        vm::execute_write(self, plan).map_err(Into::into)
+        let plan = vm::planner::plan(statement, self)?;
+        vm::execute(self, plan).map_err(Into::into)
     }
 
-    /// Flushes dirty pages into WAL and marks them as clean. Might run checkpoint.
     #[must_use]
     pub fn commit(self) -> Result<()> {
         let mut wal_tx = Rc::into_inner(self.wal_tx)
             .expect("Something is still using this transaction")
             .into_inner();
 
-        self.pager.flush_dirty(&mut wal_tx, true)?;
-
-        self.pager.wal.commit(&mut wal_tx)?;
+        if !wal_tx.dirty_pages().is_empty() {
+            self.pager.flush_dirty(&mut wal_tx, true)?;
+            self.pager.wal.commit(&mut wal_tx)?;
+        }
 
         Ok(())
     }
-}
 
-impl<'a> ReadDbTx for DatabaseWriteTransaction<'a> {
-    fn catalog(&self) -> &Arc<Catalog> {
+    pub fn catalog(&self) -> &Arc<Catalog> {
         &self.catalog
     }
 
-    fn pager(&self) -> &Arc<Pager> {
-        &self.pager
-    }
-
-    fn read_cursor<'tx>(&'tx self, root: PageNumber) -> BTreeCursor<'tx, impl ReadTx> {
-        self.cursor(root)
-    }
-}
-
-impl<'tx> WriteDbTx for DatabaseWriteTransaction<'tx> {
-    fn write_cursor<'a>(&'a self, root: PageNumber) -> BTreeCursor<'a, impl WriteTx> {
-        self.cursor(root)
-    }
-
-    fn create_btree(&self, btree_type: BTreeType) -> storage::Result<PageNumber> {
+    pub fn create_btree(&self, btree_type: BTreeType) -> storage::Result<PageNumber> {
         self.pager
             .btree_create(self.wal_tx.borrow_mut().deref_mut(), btree_type)
     }
@@ -424,7 +339,7 @@ mod tests {
 
         let db = Database::open(TEST_DB_NAME)?;
 
-        let tx = db.begin_write()?;
+        let tx = db.begin_transaction()?;
 
         // balancing: 12.2 MB
         // dumb split: 22.9 MB
@@ -464,7 +379,7 @@ mod tests {
 
         let db = Database::open(TEST_DB_NAME)?;
 
-        let tx = db.begin_read()?;
+        let tx = db.begin_transaction()?;
 
         {
             let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
@@ -494,7 +409,7 @@ mod tests {
 
         let db = Database::open(TEST_DB_NAME)?;
 
-        let tx = db.begin_read()?;
+        let tx = db.begin_transaction()?;
 
         {
             let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
@@ -522,7 +437,7 @@ mod tests {
 
         let db = Database::open(TEST_DB_NAME)?;
 
-        let tx = db.begin_write()?;
+        let tx = db.begin_transaction()?;
 
         {
             let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
@@ -545,7 +460,7 @@ mod tests {
 
         let db = Database::open(TEST_DB_NAME)?;
 
-        let tx = db.begin_write()?;
+        let tx = db.begin_transaction()?;
 
         {
             let select_all = || {

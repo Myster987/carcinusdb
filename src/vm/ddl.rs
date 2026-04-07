@@ -1,5 +1,5 @@
 use crate::{
-    database::{CARCINUSDB_MASTER_TABLE_ROOT, WriteDbTx},
+    database::{CARCINUSDB_MASTER_TABLE_ROOT, DatabaseTransaction},
     sql::{
         parser::{
             self,
@@ -13,7 +13,7 @@ use crate::{
     vm::{self, query_result::QueryResult},
 };
 
-pub fn create<'tx, Tx: WriteDbTx>(tx: &'tx Tx, statement: Create) -> vm::Result<QueryResult<'tx>> {
+pub fn create(tx: &DatabaseTransaction, statement: Create) -> vm::Result<QueryResult<'_>> {
     match statement {
         Create::Table { name, columns } => create_table(tx, name, columns),
         Create::Index {
@@ -26,11 +26,11 @@ pub fn create<'tx, Tx: WriteDbTx>(tx: &'tx Tx, statement: Create) -> vm::Result<
     }
 }
 
-fn create_table<'tx, Tx: WriteDbTx>(
-    tx: &'tx Tx,
+fn create_table(
+    tx: &DatabaseTransaction,
     name: String,
     columns: Vec<parser::statement::Column>,
-) -> vm::Result<QueryResult<'tx>> {
+) -> vm::Result<QueryResult<'_>> {
     let root_page = tx.create_btree(BTreeType::Table)?;
 
     let sql = reconstruct_create_table_sql(&name, &columns);
@@ -45,7 +45,7 @@ fn create_table<'tx, Tx: WriteDbTx>(
 
     let record = record.serialize_to_record();
 
-    let mut cursor = tx.write_cursor(CARCINUSDB_MASTER_TABLE_ROOT);
+    let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
 
     let row_id = cursor.next_row_id()?;
 
@@ -64,13 +64,13 @@ fn create_table<'tx, Tx: WriteDbTx>(
     Ok(QueryResult::RowsAffected(1))
 }
 
-fn create_index<'tx, Tx: WriteDbTx>(
-    tx: &'tx Tx,
+fn create_index(
+    tx: &DatabaseTransaction,
     name: String,
     table: String,
     column: String,
     unique: bool,
-) -> vm::Result<QueryResult<'tx>> {
+) -> vm::Result<QueryResult<'_>> {
     let root_page = tx.create_btree(BTreeType::Index)?;
 
     let sql = reconstruct_create_index_sql(&name, &table, &column, unique);
@@ -85,7 +85,7 @@ fn create_index<'tx, Tx: WriteDbTx>(
 
     let record = record.serialize_to_record();
 
-    let mut cursor = tx.write_cursor(CARCINUSDB_MASTER_TABLE_ROOT);
+    let mut cursor = tx.cursor(CARCINUSDB_MASTER_TABLE_ROOT);
 
     let row_id = cursor.next_row_id()?;
 
@@ -102,8 +102,8 @@ fn create_index<'tx, Tx: WriteDbTx>(
 
     {
         let source_table_root = tx.catalog().get_table(&table)?.root;
-        let mut source_cursor = tx.read_cursor(source_table_root);
-        let mut index_cursor = tx.write_cursor(root_page);
+        let mut source_cursor = tx.cursor(source_table_root);
+        let mut index_cursor = tx.cursor(root_page);
 
         while source_cursor.next()? {
             let record = source_cursor.try_record()?;

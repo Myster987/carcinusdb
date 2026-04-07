@@ -4,14 +4,12 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use dashmap::DashSet;
-
 use crate::database::MemDatabaseHeader;
 use crate::storage::btree::BTreeType;
 use crate::storage::buffer_pool::BufferPool;
 use crate::storage::cache::ShardedClockCache;
 use crate::storage::page::{DATABASE_HEADER_PAGE_NUMBER, DATABASE_HEADER_SIZE, PageType};
-use crate::storage::wal::transaction::{ReadTx, WriteTx};
+use crate::storage::wal::transaction::Transaction;
 use crate::storage::wal::{DEFAULT_CHECKPOINT_SIZE, WriteAheadLog};
 use crate::utils::io::BlockIO;
 
@@ -398,7 +396,6 @@ pub struct Pager {
     pub wal: Arc<WriteAheadLog>,
     /// Reference to global LRU cache
     pub page_cache: Arc<ShardedClockCache>,
-    pub dirty_pages: Arc<DashSet<PageNumber>>,
     cache_flush_threshold: usize,
 }
 
@@ -431,7 +428,6 @@ impl Pager {
             buffer_pool,
             wal,
             page_cache,
-            dirty_pages: Arc::new(DashSet::new()),
             cache_flush_threshold,
         };
 
@@ -444,7 +440,7 @@ impl Pager {
 
     pub fn init(&self) -> storage::Result<()> {
         log::info!("Initializing database.");
-        let mut tx = self.wal.begin_write_tx()?;
+        let mut tx = self.wal.begin_transaction()?;
 
         let _ = self.btree_create(&mut tx, BTreeType::Table)?;
 
@@ -459,13 +455,15 @@ impl Pager {
         Ok(())
     }
 
-    pub fn write_header<Tx: WriteTx>(&self, tx: &mut Tx) -> storage::Result<()> {
+    pub fn write_header(&self, tx: &mut Transaction) -> storage::Result<()> {
+        tx.acquire_write(&self.wal)?;
+
         let raw_header = self.db_header.load();
 
         let header_page = self.read_page(tx, DATABASE_HEADER_PAGE_NUMBER)?;
         header_page.lock_exclusive().write_db_header(**raw_header);
 
-        self.mark_dirty(&header_page);
+        self.mark_dirty(tx, &header_page);
 
         Ok(())
     }
@@ -477,11 +475,13 @@ impl Pager {
     /// - DB (disk read)
     ///
     /// In case of cache miss it will insert page into cache for future use.
-    pub fn read_page<Tx: ReadTx>(
+    pub fn read_page(
         &self,
-        tx: &Tx,
+        tx: &mut Transaction,
         page_number: PageNumber,
     ) -> storage::Result<MemPageRef> {
+        tx.acquire_read(&self.wal)?;
+
         // check cache...
         if let Some(cached_page) = self.page_cache.get(&page_number) {
             return Ok(cached_page);
@@ -494,11 +494,13 @@ impl Pager {
         Ok(mem_page)
     }
 
-    fn read_page_no_cache<Tx: ReadTx>(
+    fn read_page_no_cache(
         &self,
-        tx: &Tx,
+        tx: &mut Transaction,
         page_number: PageNumber,
     ) -> storage::Result<MemPageRef> {
+        tx.acquire_read(&self.wal)?;
+
         let page_wrapper = Arc::new(MemPage::new(page_number));
 
         {
@@ -550,22 +552,25 @@ impl Pager {
         }
     }
 
-    pub fn write_page<Tx: WriteTx>(&self, tx: &mut Tx, page: MemPageRef) -> storage::Result<()> {
-        // begin_write_page(&page)?;
+    pub fn write_page(&self, tx: &mut Transaction, page: MemPageRef) -> storage::Result<()> {
+        tx.acquire_write(&self.wal)?;
 
         let guard = page.lock_exclusive();
 
         self.wal
-            .append_frame(tx, guard, tx.tx_local_db_header().get_database_size())
+            .append_frame(tx, guard, tx.local_db_header().get_database_size())
     }
 
     /// Allocates new B-tree in database.
-    pub fn btree_create<Tx: WriteTx>(
+    pub fn btree_create(
         &self,
-        tx: &mut Tx,
+        tx: &mut Transaction,
         btree_type: BTreeType,
     ) -> storage::Result<PageNumber> {
         log::debug!("Creating new {:?} B-tree.", btree_type);
+
+        tx.acquire_write(&self.wal)?;
+
         let page_type = match btree_type {
             BTreeType::Index => PageType::IndexLeaf,
             BTreeType::Table => PageType::TableLeaf,
@@ -578,17 +583,19 @@ impl Pager {
     /// freelist and if freelist is empty, then it creates new page at the
     /// end of db file. Page is initialize as B-tree page, so if you want
     /// plain page, use `Self::alloc_empty_page`.
-    pub fn alloc_page<Tx: WriteTx>(
+    pub fn alloc_page(
         &self,
-        tx: &mut Tx,
+        tx: &mut Transaction,
         page_type: PageType,
     ) -> storage::Result<PageNumber> {
-        let first_freelist_page = tx.tx_local_db_header().get_first_freelist_page();
+        tx.acquire_write(&self.wal)?;
+
+        let first_freelist_page = tx.local_db_header().get_first_freelist_page();
 
         // local_db_header.database_size.ad
 
         let free_page = if first_freelist_page == 0 {
-            let page_number = tx.tx_local_db_header_mut().fetch_add_database_size(1);
+            let page_number = tx.local_db_header_mut().fetch_add_database_size(1);
             let offset = if page_number == DATABASE_HEADER_PAGE_NUMBER {
                 DATABASE_HEADER_SIZE
             } else {
@@ -599,7 +606,7 @@ impl Pager {
             new_page.initialize(page_type);
 
             let new_page = Arc::new(MemPage::from_page(page_number, new_page));
-            self.mark_dirty(&new_page);
+            self.mark_dirty(tx, &new_page);
             new_page.set_loaded();
 
             // we have to manually insert new page to cache.
@@ -610,9 +617,9 @@ impl Pager {
             // loads to cache for use.
             let free_page = self.read_page(tx, first_freelist_page)?;
 
-            tx.tx_local_db_header_mut()
+            tx.local_db_header_mut()
                 .set_first_freelist_page(free_page.lock_shared().freelist_next());
-            tx.tx_local_db_header_mut().sub_freelist_pages(1);
+            tx.local_db_header_mut().sub_freelist_pages(1);
 
             {
                 let guard = free_page.lock_exclusive();
@@ -620,7 +627,7 @@ impl Pager {
                 guard.set_loaded();
             }
 
-            self.mark_dirty(&free_page);
+            self.mark_dirty(tx, &free_page);
 
             free_page.id()
         };
@@ -632,11 +639,13 @@ impl Pager {
 
     /// Allocates empty page in database. Can be used to build linked list of
     /// overflow cells.
-    pub fn alloc_empty_page<Tx: WriteTx>(&self, tx: &mut Tx) -> storage::Result<PageNumber> {
-        let first_freelist_page = tx.tx_local_db_header().get_first_freelist_page();
+    pub fn alloc_empty_page(&self, tx: &mut Transaction) -> storage::Result<PageNumber> {
+        tx.acquire_write(&self.wal)?;
+
+        let first_freelist_page = tx.local_db_header().get_first_freelist_page();
 
         let free_page = if first_freelist_page == 0 {
-            let page_number = tx.tx_local_db_header_mut().fetch_add_database_size(1);
+            let page_number = tx.local_db_header_mut().fetch_add_database_size(1);
             let offset = if page_number == DATABASE_HEADER_PAGE_NUMBER {
                 DATABASE_HEADER_SIZE
             } else {
@@ -647,7 +656,7 @@ impl Pager {
 
             let new_page = Arc::new(MemPage::from_page(page_number, new_page));
 
-            self.mark_dirty(&new_page);
+            self.mark_dirty(tx, &new_page);
             new_page.set_loaded();
 
             // we have to manually insert new page to cache.
@@ -658,16 +667,16 @@ impl Pager {
             // loads to cache for use.
             let free_page = self.read_page(tx, first_freelist_page)?;
 
-            tx.tx_local_db_header_mut()
+            tx.local_db_header_mut()
                 .set_first_freelist_page(free_page.lock_shared().freelist_next());
-            tx.tx_local_db_header_mut().sub_freelist_pages(1);
+            tx.local_db_header_mut().sub_freelist_pages(1);
 
             {
                 let guard = free_page.lock_exclusive();
                 guard.set_loaded();
             }
 
-            self.mark_dirty(&free_page);
+            self.mark_dirty(tx, &free_page);
 
             free_page.id()
         };
@@ -678,14 +687,12 @@ impl Pager {
     }
 
     /// Adds page to global freelist.
-    pub fn free_page<Tx: WriteTx>(
-        &self,
-        tx: &mut Tx,
-        page_number: PageNumber,
-    ) -> storage::Result<()> {
+    pub fn free_page(&self, tx: &mut Transaction, page_number: PageNumber) -> storage::Result<()> {
+        tx.acquire_write(&self.wal)?;
+
         let page = self.read_page(tx, page_number)?;
 
-        let prev_head = tx.tx_local_db_header_mut().get_first_freelist_page();
+        let prev_head = tx.local_db_header_mut().get_first_freelist_page();
 
         // set new head to point to prev freelist head.
         {
@@ -693,35 +700,35 @@ impl Pager {
             guard.freelist_set(prev_head);
         }
 
-        tx.tx_local_db_header_mut()
+        tx.local_db_header_mut()
             .set_first_freelist_page(page_number);
-        tx.tx_local_db_header_mut().add_freelist_pages(1);
+        tx.local_db_header_mut().add_freelist_pages(1);
 
-        self.mark_dirty(&page);
-
-        // self.write_header(tx)
+        self.mark_dirty(tx, &page);
 
         Ok(())
     }
 
     /// Marks page as dirty to later identify page to flush durring checkpoint
     /// or when cache is full.
-    pub fn mark_dirty(&self, page: &MemPageRef) {
-        self.dirty_pages.insert(page.id());
+    pub fn mark_dirty(&self, tx: &mut Transaction, page: &MemPageRef) {
+        tx.dirty_pages_mut().insert(page.id());
         page.set_dirty();
     }
 
     /// Marks given page as dirty and can trigger cache flush, after it reaches
     /// `cache_flush_threshold`.
-    pub fn mark_dirty_auto_flush<Tx: WriteTx>(
+    pub fn mark_dirty_auto_flush(
         &self,
-        tx: &mut Tx,
+        tx: &mut Transaction,
         page: &MemPageRef,
     ) -> storage::Result<()> {
-        self.dirty_pages.insert(page.id());
+        tx.acquire_write(&self.wal)?;
+
+        tx.dirty_pages_mut().insert(page.id());
         page.set_dirty();
 
-        if self.dirty_pages.len() > self.cache_flush_threshold {
+        if tx.dirty_pages().len() > self.cache_flush_threshold {
             self.flush_dirty(tx, false)?;
         }
 
@@ -729,12 +736,10 @@ impl Pager {
     }
 
     /// Flushes all pages marked as dirty to WAL.
-    pub fn flush_dirty<Tx: WriteTx>(
-        &self,
-        tx: &mut Tx,
-        should_commit: bool,
-    ) -> storage::Result<()> {
-        let dirty_page_numbers: Vec<_> = self.dirty_pages.iter().map(|pn| *pn).collect();
+    pub fn flush_dirty(&self, tx: &mut Transaction, should_commit: bool) -> storage::Result<()> {
+        tx.acquire_write(&self.wal)?;
+
+        let dirty_page_numbers: Vec<_> = tx.dirty_pages().iter().map(|pn| *pn).collect();
 
         let dirty_pages: Vec<_> = dirty_page_numbers
             .iter()
@@ -747,7 +752,7 @@ impl Pager {
             .collect();
 
         let db_size = if should_commit {
-            tx.tx_local_db_header().get_database_size()
+            tx.local_db_header().get_database_size()
         } else {
             0
         };
@@ -755,7 +760,7 @@ impl Pager {
         self.wal.append_vectored(tx, &mut page_guards, db_size)?;
 
         dirty_page_numbers.iter().for_each(|pn| {
-            self.dirty_pages.remove(&*pn);
+            tx.dirty_pages_mut().remove(&*pn);
         });
 
         for (key, page) in self.page_cache.drain_overflow() {
@@ -764,14 +769,6 @@ impl Pager {
 
         Ok(())
     }
-
-    // pub fn flush(&mut self) -> storage::Result<()> {
-    //     Ok(self.io.flush()?)
-    // }
-
-    // pub fn sync(&self) -> storage::Result<()> {
-    //     Ok(self.io.sync()?)
-    // }
 }
 
 /// Takes reference to write result and consumes exclusive lock to page. If

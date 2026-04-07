@@ -1,5 +1,5 @@
 use crate::{
-    database::ReadDbTx,
+    database::DatabaseTransaction,
     sql::{
         self,
         parser::statement::{Expression, Statement},
@@ -8,7 +8,7 @@ use crate::{
     },
 };
 
-pub fn prepare<Tx: ReadDbTx>(tx: &Tx, statement: &mut Statement) -> sql::Result<()> {
+pub fn prepare(tx: &DatabaseTransaction, statement: &mut Statement) -> sql::Result<()> {
     let catalog = tx.catalog();
     match statement {
         Statement::Select { columns, from, .. }
@@ -37,7 +37,7 @@ pub fn prepare<Tx: ReadDbTx>(tx: &Tx, statement: &mut Statement) -> sql::Result<
                 }
 
                 let mut current_row_id = tx
-                    .read_cursor(metadata.root)
+                    .cursor(metadata.root)
                     .next_row_id()
                     .map_err(|_| sql::Error::InvalidSerialType)?;
 
