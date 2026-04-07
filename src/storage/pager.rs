@@ -527,13 +527,9 @@ impl Pager {
     ///
     /// Page that needs to be read should already be write-locked.
     fn read_page_from_disk(&self, page_number: PageNumber) -> storage::Result<Page> {
-        // begin_read_page(&page);
-
         let mut buffer = self.buffer_pool.get();
 
         let read_result = self.io.read(page_number, &mut buffer, 0);
-
-        // complete_read_page(&read_result, &page, buffer);
 
         match read_result {
             Ok(bytes_read) => {
@@ -592,8 +588,6 @@ impl Pager {
 
         let first_freelist_page = tx.local_db_header().get_first_freelist_page();
 
-        // local_db_header.database_size.ad
-
         let free_page = if first_freelist_page == 0 {
             let page_number = tx.local_db_header_mut().fetch_add_database_size(1);
             let offset = if page_number == DATABASE_HEADER_PAGE_NUMBER {
@@ -631,8 +625,6 @@ impl Pager {
 
             free_page.id()
         };
-
-        // self.write_header(tx)?;
 
         Ok(free_page)
     }
@@ -681,8 +673,6 @@ impl Pager {
             free_page.id()
         };
 
-        // self.write_header(tx)?;
-
         Ok(free_page)
     }
 
@@ -723,8 +713,6 @@ impl Pager {
         tx: &mut Transaction,
         page: &MemPageRef,
     ) -> storage::Result<()> {
-        tx.acquire_write(&self.wal)?;
-
         tx.dirty_pages_mut().insert(page.id());
         page.set_dirty();
 
