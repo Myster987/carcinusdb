@@ -287,7 +287,15 @@ impl DatabaseTransaction {
     }
 
     pub fn execute(&self, sql: &str) -> Result<QueryResult<'_>> {
-        let statement = sql::pipeline(self, sql)?;
+        let input;
+
+        if !sql.trim_end().ends_with(";") {
+            input = format!("{sql};");
+        } else {
+            input = sql.to_string();
+        }
+
+        let statement = sql::pipeline(self, &input)?;
 
         let plan = vm::planner::plan(statement, self)?;
         vm::execute(self, plan).map_err(Into::into)
@@ -464,7 +472,7 @@ mod tests {
 
         {
             let select_all = || {
-                let query = tx.execute("SELECT * FROM test;").unwrap();
+                let query = tx.execute("SELECT * FROM test").unwrap();
 
                 println!("{}", query.to_string().unwrap());
             };
