@@ -18,7 +18,7 @@ pub mod record;
 pub mod schema;
 pub mod types;
 
-pub fn pipeline<'tx>(tx: &DatabaseTransaction<'tx>, input: &str) -> Result<Statement> {
+pub fn pipeline(tx: &DatabaseTransaction, input: &str) -> Result<Statement> {
     let mut statement = parse(input)?;
 
     analyze(&statement, tx.catalog())?;

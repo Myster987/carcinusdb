@@ -16,7 +16,7 @@ use crate::{
 };
 
 pub fn plan_select<'tx>(
-    tx: &DatabaseTransaction<'tx>,
+    tx: &'tx DatabaseTransaction,
     columns: Vec<Expression>,
     from: String,
     r#where: Option<Expression>,

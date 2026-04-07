@@ -4,8 +4,6 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use dashmap::DashSet;
-
 use crate::database::MemDatabaseHeader;
 use crate::storage::btree::BTreeType;
 use crate::storage::buffer_pool::BufferPool;
@@ -457,7 +455,7 @@ impl Pager {
         Ok(())
     }
 
-    pub fn write_header<'a>(&'a self, tx: &mut Transaction<'a>) -> storage::Result<()> {
+    pub fn write_header(&self, tx: &mut Transaction) -> storage::Result<()> {
         tx.acquire_write(&self.wal)?;
 
         let raw_header = self.db_header.load();
@@ -554,11 +552,7 @@ impl Pager {
         }
     }
 
-    pub fn write_page<'a>(
-        &'a self,
-        tx: &mut Transaction<'a>,
-        page: MemPageRef,
-    ) -> storage::Result<()> {
+    pub fn write_page(&self, tx: &mut Transaction, page: MemPageRef) -> storage::Result<()> {
         tx.acquire_write(&self.wal)?;
 
         let guard = page.lock_exclusive();
@@ -568,9 +562,9 @@ impl Pager {
     }
 
     /// Allocates new B-tree in database.
-    pub fn btree_create<'a>(
-        &'a self,
-        tx: &mut Transaction<'a>,
+    pub fn btree_create(
+        &self,
+        tx: &mut Transaction,
         btree_type: BTreeType,
     ) -> storage::Result<PageNumber> {
         log::debug!("Creating new {:?} B-tree.", btree_type);
@@ -589,9 +583,9 @@ impl Pager {
     /// freelist and if freelist is empty, then it creates new page at the
     /// end of db file. Page is initialize as B-tree page, so if you want
     /// plain page, use `Self::alloc_empty_page`.
-    pub fn alloc_page<'a>(
-        &'a self,
-        tx: &mut Transaction<'a>,
+    pub fn alloc_page(
+        &self,
+        tx: &mut Transaction,
         page_type: PageType,
     ) -> storage::Result<PageNumber> {
         tx.acquire_write(&self.wal)?;
@@ -645,7 +639,7 @@ impl Pager {
 
     /// Allocates empty page in database. Can be used to build linked list of
     /// overflow cells.
-    pub fn alloc_empty_page<'a>(&'a self, tx: &mut Transaction<'a>) -> storage::Result<PageNumber> {
+    pub fn alloc_empty_page(&self, tx: &mut Transaction) -> storage::Result<PageNumber> {
         tx.acquire_write(&self.wal)?;
 
         let first_freelist_page = tx.local_db_header().get_first_freelist_page();
@@ -693,11 +687,7 @@ impl Pager {
     }
 
     /// Adds page to global freelist.
-    pub fn free_page<'a>(
-        &'a self,
-        tx: &mut Transaction<'a>,
-        page_number: PageNumber,
-    ) -> storage::Result<()> {
+    pub fn free_page(&self, tx: &mut Transaction, page_number: PageNumber) -> storage::Result<()> {
         tx.acquire_write(&self.wal)?;
 
         let page = self.read_page(tx, page_number)?;
@@ -728,9 +718,9 @@ impl Pager {
 
     /// Marks given page as dirty and can trigger cache flush, after it reaches
     /// `cache_flush_threshold`.
-    pub fn mark_dirty_auto_flush<'a>(
-        &'a self,
-        tx: &mut Transaction<'a>,
+    pub fn mark_dirty_auto_flush(
+        &self,
+        tx: &mut Transaction,
         page: &MemPageRef,
     ) -> storage::Result<()> {
         tx.acquire_write(&self.wal)?;
@@ -746,11 +736,7 @@ impl Pager {
     }
 
     /// Flushes all pages marked as dirty to WAL.
-    pub fn flush_dirty<'a>(
-        &'a self,
-        tx: &mut Transaction<'a>,
-        should_commit: bool,
-    ) -> storage::Result<()> {
+    pub fn flush_dirty(&self, tx: &mut Transaction, should_commit: bool) -> storage::Result<()> {
         tx.acquire_write(&self.wal)?;
 
         let dirty_page_numbers: Vec<_> = tx.dirty_pages().iter().map(|pn| *pn).collect();

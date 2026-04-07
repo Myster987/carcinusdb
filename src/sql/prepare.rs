@@ -8,7 +8,7 @@ use crate::{
     },
 };
 
-pub fn prepare<'tx>(tx: &DatabaseTransaction<'tx>, statement: &mut Statement) -> sql::Result<()> {
+pub fn prepare(tx: &DatabaseTransaction, statement: &mut Statement) -> sql::Result<()> {
     let catalog = tx.catalog();
     match statement {
         Statement::Select { columns, from, .. }

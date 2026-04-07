@@ -21,10 +21,7 @@ pub enum ExecutionPlan<'tx> {
     Explain(Box<ExecutionPlan<'tx>>),
 }
 
-pub fn plan<'tx>(
-    statement: Statement,
-    tx: &DatabaseTransaction<'tx>,
-) -> vm::Result<ExecutionPlan<'tx>> {
+pub fn plan(statement: Statement, tx: &DatabaseTransaction) -> vm::Result<ExecutionPlan<'_>> {
     match statement {
         Statement::Select {
             columns,

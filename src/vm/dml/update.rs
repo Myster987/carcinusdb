@@ -22,7 +22,7 @@ use crate::{
 };
 
 pub fn plan_update<'tx>(
-    tx: &DatabaseTransaction<'tx>,
+    tx: &'tx DatabaseTransaction,
     table: String,
     columns: Vec<Assignment>,
     r#where: Option<Expression>,

@@ -13,10 +13,7 @@ use crate::{
     vm::{self, query_result::QueryResult},
 };
 
-pub fn create<'tx>(
-    tx: &DatabaseTransaction<'tx>,
-    statement: Create,
-) -> vm::Result<QueryResult<'tx>> {
+pub fn create(tx: &DatabaseTransaction, statement: Create) -> vm::Result<QueryResult<'_>> {
     match statement {
         Create::Table { name, columns } => create_table(tx, name, columns),
         Create::Index {
@@ -29,11 +26,11 @@ pub fn create<'tx>(
     }
 }
 
-fn create_table<'tx>(
-    tx: &DatabaseTransaction<'tx>,
+fn create_table(
+    tx: &DatabaseTransaction,
     name: String,
     columns: Vec<parser::statement::Column>,
-) -> vm::Result<QueryResult<'tx>> {
+) -> vm::Result<QueryResult<'_>> {
     let root_page = tx.create_btree(BTreeType::Table)?;
 
     let sql = reconstruct_create_table_sql(&name, &columns);
@@ -67,13 +64,13 @@ fn create_table<'tx>(
     Ok(QueryResult::RowsAffected(1))
 }
 
-fn create_index<'tx>(
-    tx: &DatabaseTransaction<'tx>,
+fn create_index(
+    tx: &DatabaseTransaction,
     name: String,
     table: String,
     column: String,
     unique: bool,
-) -> vm::Result<QueryResult<'tx>> {
+) -> vm::Result<QueryResult<'_>> {
     let root_page = tx.create_btree(BTreeType::Index)?;
 
     let sql = reconstruct_create_index_sql(&name, &table, &column, unique);

@@ -18,7 +18,7 @@ use crate::{
 };
 
 pub fn plan_insert<'tx>(
-    tx: &DatabaseTransaction<'tx>,
+    tx: &'tx DatabaseTransaction,
     into: String,
     columns: Vec<String>,
     values: Vec<Vec<Expression>>,

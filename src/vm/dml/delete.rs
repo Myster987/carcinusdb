@@ -22,7 +22,7 @@ use crate::{
 };
 
 pub fn plan_delete<'tx>(
-    tx: &DatabaseTransaction<'tx>,
+    tx: &'tx DatabaseTransaction,
     from: String,
     r#where: Option<Expression>,
     returning: Option<Vec<Expression>>,

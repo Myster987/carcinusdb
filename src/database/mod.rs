@@ -208,7 +208,7 @@ impl Database {
             let tx = pager.wal.begin_transaction()?;
             let cursor = BTreeCursor::new(
                 Rc::new(RefCell::new(tx)),
-                pager.clone(),
+                &pager,
                 CARCINUSDB_MASTER_TABLE_ROOT,
                 1,
             );
@@ -264,7 +264,7 @@ impl Database {
         Ok(Self { pager, catalog })
     }
 
-    pub fn begin_transaction<'a>(&'a self) -> Result<DatabaseTransaction<'a>> {
+    pub fn begin_transaction(&self) -> Result<DatabaseTransaction> {
         let wal_tx = self.pager.wal.begin_transaction()?;
 
         Ok(DatabaseTransaction {
@@ -275,18 +275,18 @@ impl Database {
     }
 }
 
-pub struct DatabaseTransaction<'tx> {
-    wal_tx: Rc<RefCell<Transaction<'tx>>>,
+pub struct DatabaseTransaction {
+    wal_tx: Rc<RefCell<Transaction>>,
     pager: Arc<Pager>,
     catalog: Arc<Catalog>,
 }
 
-impl<'tx> DatabaseTransaction<'tx> {
-    pub fn cursor(&self, root: PageNumber) -> BTreeCursor<'tx> {
-        BTreeCursor::new(self.wal_tx.clone(), self.pager.clone(), root, 0)
+impl DatabaseTransaction {
+    pub fn cursor<'a>(&'a self, root: PageNumber) -> BTreeCursor<'a> {
+        BTreeCursor::new(self.wal_tx.clone(), &self.pager, root, 3)
     }
 
-    pub fn execute(&self, sql: &str) -> Result<QueryResult<'tx>> {
+    pub fn execute(&self, sql: &str) -> Result<QueryResult<'_>> {
         let statement = sql::pipeline(self, sql)?;
 
         let plan = vm::planner::plan(statement, self)?;
@@ -311,7 +311,7 @@ impl<'tx> DatabaseTransaction<'tx> {
         &self.catalog
     }
 
-    pub fn create_btree(&'tx self, btree_type: BTreeType) -> storage::Result<PageNumber> {
+    pub fn create_btree(&self, btree_type: BTreeType) -> storage::Result<PageNumber> {
         self.pager
             .btree_create(self.wal_tx.borrow_mut().deref_mut(), btree_type)
     }

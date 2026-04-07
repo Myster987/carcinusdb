@@ -181,8 +181,8 @@ enum CursorState {
 /// in B-link tree. It can be used in multiple readers and single writer
 /// scenario.
 pub struct BTreeCursor<'tx> {
-    tx: Rc<RefCell<Transaction<'tx>>>,
-    pager: Arc<Pager>,
+    tx: Rc<RefCell<Transaction>>,
+    pager: &'tx Arc<Pager>,
     root: PageNumber,
     current_page: PageNumber,
     current_slot: SlotNumber,
@@ -194,8 +194,8 @@ pub struct BTreeCursor<'tx> {
 impl<'tx> BTreeCursor<'tx> {
     /// Creates new cursor starting at root of B-tree.
     pub fn new(
-        tx: Rc<RefCell<Transaction<'tx>>>,
-        pager: Arc<Pager>,
+        tx: Rc<RefCell<Transaction>>,
+        pager: &'tx Arc<Pager>,
         root: PageNumber,
         balance_pages_per_side: SlotNumber,
     ) -> Self {
@@ -791,7 +791,7 @@ impl<'tx> BTreeCursor<'tx> {
     // For now it does dumb spliting of pages without rebalancing and key
     // redistribution, but it's work in progress.
     pub fn insert(
-        &'tx mut self,
+        &mut self,
         entry: BTreeKey<'_>,
         options: InsertOptions,
     ) -> storage::Result<Option<Record<'static>>> {
@@ -822,7 +822,7 @@ impl<'tx> BTreeCursor<'tx> {
     }
 
     pub fn update(
-        &'tx mut self,
+        &mut self,
         old_key: &BTreeKey<'_>,
         new_entry: BTreeKey<'_>,
         options: InsertOptions,
@@ -849,7 +849,7 @@ impl<'tx> BTreeCursor<'tx> {
     /// function may cause page split and automatic flush of dirty pages,
     /// after write operation is completed.
     fn try_insert_into_leaf(
-        &'tx mut self,
+        &mut self,
         slot_number: SlotNumber,
         entry: BTreeKey<'_>,
         replace: bool,
@@ -883,7 +883,7 @@ impl<'tx> BTreeCursor<'tx> {
     }
 
     pub fn delete(
-        &'tx mut self,
+        &mut self,
         entry: &BTreeKey<'_>,
         options: DeleteOptions,
     ) -> storage::Result<Option<Record<'static>>> {
@@ -905,7 +905,7 @@ impl<'tx> BTreeCursor<'tx> {
         }
     }
 
-    fn try_delete_from_leaf(&'tx mut self, slot_number: SlotNumber) -> storage::Result<BTreeCell> {
+    fn try_delete_from_leaf(&mut self, slot_number: SlotNumber) -> storage::Result<BTreeCell> {
         let next_key = self.peek()?;
 
         let page = self
@@ -940,7 +940,7 @@ impl<'tx> BTreeCursor<'tx> {
     /// Splits root by preserving it's position in db. For example: if root is
     /// at page 1, after split it will stay the page number. This enables easy
     /// creation of tables and indexes, because we can simply point them at root.
-    fn split_root(&'tx mut self) -> storage::Result<()> {
+    fn split_root(&mut self) -> storage::Result<()> {
         log::trace!("Spliting root");
 
         let root_page = self
@@ -1052,7 +1052,7 @@ impl<'tx> BTreeCursor<'tx> {
         Ok(())
     }
 
-    fn balance(&'tx mut self) -> storage::Result<()> {
+    fn balance(&mut self) -> storage::Result<()> {
         log::trace!("Begin balance B-tree of root: {}", self.root);
 
         loop {
@@ -1472,11 +1472,7 @@ impl<'tx> BTreeCursor<'tx> {
             .collect())
     }
 
-    fn build_high_key(
-        &'tx mut self,
-        page: &Page,
-        entry: &BTreeKey<'_>,
-    ) -> storage::Result<BTreeCell> {
+    fn build_high_key(&mut self, page: &Page, entry: &BTreeKey<'_>) -> storage::Result<BTreeCell> {
         let page_type = page.page_type();
 
         if matches!(page_type, PageType::TableInternal | PageType::TableLeaf) {
@@ -1635,7 +1631,7 @@ impl<'tx> BTreeCursor<'tx> {
         }
     }
 
-    fn free_cell(&'tx mut self, cell: &BTreeCell) -> storage::Result<()> {
+    fn free_cell(&mut self, cell: &BTreeCell) -> storage::Result<()> {
         let mut current_overflow = cell.first_overflow();
 
         while let Some(overflow_page) = current_overflow {

@@ -11,14 +11,14 @@ use crate::{
     utils::concurrency::SlotGuard,
 };
 
-pub struct Transaction<'a> {
+pub struct Transaction {
     min_frame: FrameNumber,
     max_frame: FrameNumber,
-    lock_level: LockLevel<'a>,
+    lock_level: LockLevel,
     dirty_pages: HashSet<PageNumber>,
 }
 
-impl<'a> Transaction<'a> {
+impl Transaction {
     pub fn new(min_frame: FrameNumber, max_frame: FrameNumber) -> Self {
         Self {
             min_frame,
@@ -41,12 +41,10 @@ impl<'a> Transaction<'a> {
     pub fn local_db_header(&self) -> &DatabaseHeader {
         match &self.lock_level {
             LockLevel::Write {
-                guard: _,
-                local_db_header,
+                local_db_header, ..
             } => local_db_header,
             LockLevel::Exclusive {
-                guard: _,
-                local_db_header,
+                local_db_header, ..
             } => local_db_header,
             _ => panic!("Called on wrong transaction type."),
         }
@@ -55,12 +53,10 @@ impl<'a> Transaction<'a> {
     pub fn local_db_header_mut(&mut self) -> &mut DatabaseHeader {
         match &mut self.lock_level {
             LockLevel::Write {
-                guard: _,
-                local_db_header,
+                local_db_header, ..
             } => local_db_header,
             LockLevel::Exclusive {
-                guard: _,
-                local_db_header,
+                local_db_header, ..
             } => local_db_header,
             _ => panic!("Called on wrong transaction type."),
         }
@@ -76,7 +72,12 @@ impl<'a> Transaction<'a> {
         &mut self.dirty_pages
     }
 
+    pub fn release_lock(&mut self) {
+        self.lock_level = LockLevel::None;
+    }
+
     pub fn acquire_read(&mut self, wal: &WriteAheadLog) -> storage::Result<()> {
+        // log::trace!("Acquire read acess for transaction");
         if self.lock_level.is_at_least_read() {
             return Ok(());
         }
@@ -87,13 +88,18 @@ impl<'a> Transaction<'a> {
         Ok(())
     }
 
-    pub fn acquire_write(&mut self, wal: &'a WriteAheadLog) -> storage::Result<()> {
+    pub fn acquire_write(&mut self, wal: &WriteAheadLog) -> storage::Result<()> {
+        // log::trace!("Acquire write acess for transaction");
         if self.lock_level.is_at_least_write() {
             return Ok(());
         }
 
-        let guard = wal.writer.lock();
+        // SAFETY: This needs to be handled carefully because this makes life
+        // so much simpler with compipler, but also removes protection from
+        // not dropping on time, but code logic should handle it properly.
+        let guard = unsafe { std::mem::transmute(wal.writer.lock()) };
         let local_db_header = *wal.db_header.load_full();
+
         self.lock_level = LockLevel::Write {
             guard,
             local_db_header,
@@ -102,13 +108,18 @@ impl<'a> Transaction<'a> {
         Ok(())
     }
 
-    pub fn acquire_exclusive(&mut self, wal: &'a WriteAheadLog) -> storage::Result<()> {
+    pub fn acquire_exclusive(&mut self, wal: &WriteAheadLog) -> storage::Result<()> {
+        // log::trace!("Acquire exclusive acess for transaction");
         if self.lock_level.is_exclusive() {
             return Ok(());
         }
 
-        let guard = wal.writer.lock();
+        // SAFETY: This needs to be handled carefully because this makes life
+        // so much simpler with compipler, but also removes protection from
+        // not dropping on time, but code logic should handle it properly.
+        let guard = unsafe { std::mem::transmute(wal.writer.lock()) };
         let local_db_header = *wal.db_header.load_full();
+
         self.lock_level = LockLevel::Exclusive {
             guard,
             local_db_header,
@@ -118,21 +129,21 @@ impl<'a> Transaction<'a> {
     }
 }
 
-pub enum LockLevel<'a> {
+pub enum LockLevel {
     None,
     Read(SlotGuard<READERS_NUM>),
     Write {
-        guard: MutexGuard<'a, ()>,
+        guard: MutexGuard<'static, ()>,
         local_db_header: DatabaseHeader,
     },
     /// Commit only.
     Exclusive {
-        guard: MutexGuard<'a, ()>,
+        guard: MutexGuard<'static, ()>,
         local_db_header: DatabaseHeader,
     },
 }
 
-impl<'a> LockLevel<'a> {
+impl LockLevel {
     fn rank(&self) -> u8 {
         match self {
             Self::None => 0,

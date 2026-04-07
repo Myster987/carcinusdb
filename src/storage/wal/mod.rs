@@ -379,7 +379,7 @@ impl WriteAheadLog {
 
     /// Reconstructs all the changes registered in WAL and if needed performs
     /// checkpoint.
-    pub fn replay<'a>(&'a self, tx: &mut Transaction<'a>) -> storage::Result<()> {
+    pub fn replay(&self, tx: &mut Transaction) -> storage::Result<()> {
         log::info!("Replaying WAL.");
 
         tx.acquire_exclusive(self)?;
@@ -454,7 +454,7 @@ impl WriteAheadLog {
 }
 
 impl WriteAheadLog {
-    pub fn begin_transaction<'a>(&'a self) -> storage::Result<Transaction<'a>> {
+    pub fn begin_transaction(&self) -> storage::Result<Transaction> {
         let min_frame = self.get_min_frame();
         let max_frame = self.get_max_frame();
 
@@ -465,7 +465,9 @@ impl WriteAheadLog {
         Ok(Transaction::new(min_frame, max_frame))
     }
 
-    pub fn commit<'a>(&'a self, tx: &mut Transaction<'a>) -> storage::Result<()> {
+    pub fn commit(&self, tx: &mut Transaction) -> storage::Result<()> {
+        // log::trace!("Commit transaction");
+
         tx.acquire_write(self)?;
 
         self.wal_file.persist()?;
@@ -481,6 +483,8 @@ impl WriteAheadLog {
         self.db_header.swap(*local_tx_db_header);
 
         // drop(inner.write_guard);
+
+        tx.release_lock();
 
         self.checkpoint(tx)?;
 
@@ -553,18 +557,18 @@ impl WriteAheadLog {
         }
     }
 
-    pub fn append_frame<'a>(
-        &'a self,
-        transaction: &mut Transaction<'a>,
+    pub fn append_frame(
+        &self,
+        transaction: &mut Transaction,
         page: ExclusivePageGuard,
         db_size: u32,
     ) -> storage::Result<()> {
         self.append_vectored(transaction, &mut [page], db_size)
     }
 
-    pub fn append_vectored<'a>(
-        &'a self,
-        transaction: &mut Transaction<'a>,
+    pub fn append_vectored(
+        &self,
+        transaction: &mut Transaction,
         pages: &mut [ExclusivePageGuard],
         db_size: u32,
     ) -> storage::Result<()> {
@@ -659,7 +663,7 @@ impl WriteAheadLog {
         max_frame > self.trigger_checkpoint + self.header.get_backfilled_number()
     }
 
-    pub fn checkpoint<'a>(&'a self, transaction: &mut Transaction<'a>) -> storage::Result<()> {
+    pub fn checkpoint(&self, transaction: &mut Transaction) -> storage::Result<()> {
         if !self.should_checkpoint() {
             return Ok(());
         }
@@ -667,14 +671,11 @@ impl WriteAheadLog {
         self._checkpoint(transaction)
     }
 
-    pub fn force_checkpoint<'a>(
-        &'a self,
-        transaction: &mut Transaction<'a>,
-    ) -> storage::Result<()> {
+    pub fn force_checkpoint(&self, transaction: &mut Transaction) -> storage::Result<()> {
         self._checkpoint(transaction)
     }
 
-    fn _checkpoint<'a>(&'a self, transaction: &mut Transaction<'a>) -> storage::Result<()> {
+    fn _checkpoint(&self, transaction: &mut Transaction) -> storage::Result<()> {
         transaction.acquire_exclusive(self)?;
 
         let max_frame = self.get_max_frame();

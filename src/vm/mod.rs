@@ -44,10 +44,10 @@ pub enum Error {
     SchemaError(#[from] crate::sql::schema::Error),
 }
 
-pub fn execute<'tx>(
-    tx: &DatabaseTransaction<'tx>,
-    plan: ExecutionPlan<'tx>,
-) -> Result<QueryResult<'tx>> {
+pub fn execute<'a>(
+    tx: &'a DatabaseTransaction,
+    plan: ExecutionPlan<'a>,
+) -> Result<QueryResult<'a>> {
     match plan {
         ExecutionPlan::Query(operator) => Ok(QueryResult::Rows(RowIterator::new(operator))),
 
