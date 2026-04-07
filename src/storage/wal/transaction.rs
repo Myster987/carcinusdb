@@ -16,6 +16,7 @@ pub struct Transaction {
     max_frame: FrameNumber,
     lock_level: LockLevel,
     dirty_pages: HashSet<PageNumber>,
+    pub has_modified_pages: bool,
 }
 
 impl Transaction {
@@ -25,6 +26,7 @@ impl Transaction {
             max_frame,
             lock_level: LockLevel::None,
             dirty_pages: HashSet::new(),
+            has_modified_pages: false,
         }
     }
 

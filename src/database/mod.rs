@@ -310,6 +310,9 @@ impl DatabaseTransaction {
         if !wal_tx.dirty_pages().is_empty() {
             self.pager.flush_dirty(&mut wal_tx, true)?;
             self.pager.wal.commit(&mut wal_tx)?;
+        } else if wal_tx.has_modified_pages {
+            self.pager.wal.mark_last_frame_as_commit(&mut wal_tx)?;
+            self.pager.wal.commit(&mut wal_tx)?;
         }
 
         Ok(())

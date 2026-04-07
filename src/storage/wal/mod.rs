@@ -490,6 +490,28 @@ impl WriteAheadLog {
         Ok(())
     }
 
+    pub fn mark_last_frame_as_commit(&self, tx: &mut Transaction) -> storage::Result<()> {
+        tx.acquire_write(self)?;
+
+        let mut frame_header_buffer = vec![0; FRAME_HEADER_SIZE];
+
+        let offset = self.wal_file.calculate_offset(tx.max_frame())? + WAL_HEADER_SIZE;
+
+        if self.wal_file.raw_read(offset, &mut frame_header_buffer)? != FRAME_HEADER_SIZE {
+            return Err(std::io::Error::last_os_error().into());
+        }
+
+        let mut frame_header = FrameHeader::from_bytes(&frame_header_buffer);
+
+        frame_header.db_size = tx.local_db_header().get_database_size();
+
+        frame_header.to_bytes(&mut frame_header_buffer);
+
+        self.wal_file.raw_write(offset, &mut frame_header_buffer)?;
+
+        Ok(())
+    }
+
     fn calculate_frame_offset(&self, frame_number: FrameNumber) -> storage::Result<usize> {
         self.wal_file
             .calculate_offset(frame_number)

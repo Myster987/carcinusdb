@@ -704,6 +704,7 @@ impl Pager {
     pub fn mark_dirty(&self, tx: &mut Transaction, page: &MemPageRef) {
         tx.dirty_pages_mut().insert(page.id());
         page.set_dirty();
+        tx.has_modified_pages = true;
     }
 
     /// Marks given page as dirty and can trigger cache flush, after it reaches
@@ -715,6 +716,7 @@ impl Pager {
     ) -> storage::Result<()> {
         tx.dirty_pages_mut().insert(page.id());
         page.set_dirty();
+        tx.has_modified_pages = true;
 
         if tx.dirty_pages().len() > self.cache_flush_threshold {
             self.flush_dirty(tx, false)?;
