@@ -307,7 +307,7 @@ impl DatabaseTransaction {
         Ok(())
     }
 
-    pub fn catalog(&self) -> &Catalog {
+    pub fn catalog(&self) -> &Arc<Catalog> {
         &self.catalog
     }
 
