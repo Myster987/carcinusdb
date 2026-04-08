@@ -11,6 +11,18 @@ use libc::c_void;
 
 use crate::utils::buffer::Buffer;
 
+pub fn input(message: &str) -> io::Result<String> {
+    let mut buffer = String::new();
+
+    print!("{message}");
+
+    io::stdout().flush()?;
+
+    io::stdin().read_line(&mut buffer)?;
+
+    Ok(buffer.trim().to_string())
+}
+
 pub type BlockNumber = u32;
 
 pub const MAX_VECTORED_IO_BUFFERS: LazyLock<usize> =

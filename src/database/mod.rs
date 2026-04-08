@@ -318,6 +318,12 @@ impl DatabaseTransaction {
         Ok(())
     }
 
+    pub fn rollback(self) -> Result<()> {
+        // simply consume self
+
+        Ok(())
+    }
+
     pub fn catalog(&self) -> &Arc<Catalog> {
         &self.catalog
     }
@@ -338,6 +344,7 @@ mod tests {
             types::{Value, text::Text},
         },
         storage::btree::{BTreeKey, DatabaseCursor, DeleteOptionsBuilder, InsertOptionsBuilder},
+        utils,
     };
 
     const KEYS_START: i64 = 1;
@@ -522,6 +529,46 @@ mod tests {
                 tx.execute(&format!("SELECT * FROM {CARCINUSDB_MASTER_TABLE};"))?
                     .to_string()?
             );
+        }
+
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_select() -> anyhow::Result<()> {
+        simple_logger::init()?;
+
+        let db = Database::open(TEST_DB_NAME)?;
+
+        let tx = db.begin_transaction()?;
+
+        {
+            let query = tx.execute("SELECT * FROM test").unwrap();
+
+            println!("{}", query.to_string().unwrap());
+        }
+
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_user_input() -> anyhow::Result<()> {
+        simple_logger::init()?;
+
+        let db = Database::open(TEST_DB_NAME)?;
+
+        let tx = db.begin_transaction()?;
+
+        {
+            let sql = utils::io::input("Enter SQL: ")?;
+
+            let query = tx.execute(&sql).unwrap();
+
+            println!("{}", query.to_string().unwrap());
         }
 
         tx.commit()?;
