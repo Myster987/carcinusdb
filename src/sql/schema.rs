@@ -250,6 +250,10 @@ impl Schema {
         }
     }
 
+    pub fn get(&self, name: &str) -> &Column {
+        self.columns.iter().find(|&col| col.name == name).unwrap()
+    }
+
     pub fn push(&mut self, column: Column) {
         self.index.insert(column.name.clone(), self.len());
         self.columns.push(column);
@@ -301,6 +305,15 @@ impl Column {
             data_type,
             properties,
             default,
+        }
+    }
+
+    pub fn from_name(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            data_type: ValueType::Null,
+            properties: ColumnProperties::default(),
+            default: None,
         }
     }
 }
