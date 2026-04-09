@@ -319,6 +319,10 @@ impl RecordMut {
                 .collect(),
         }
     }
+
+    pub fn from_values(values: Vec<Value>) -> Self {
+        Self { values }
+    }
 }
 
 impl Debug for RecordMut {
