@@ -194,6 +194,10 @@ fn simplify(expression: &mut Expression) -> sql::Result<()> {
             *expression = mem::replace(nested.as_mut(), Expression::Wildcard);
         }
 
+        Expression::Alias { expr, r#as: _ } => {
+            simplify(expr.as_mut())?;
+        }
+
         _ => {}
     };
 

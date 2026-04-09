@@ -160,10 +160,17 @@ pub enum Expression {
         operator: BinaryOperator,
         right: Box<Expression>,
     },
+
     UnaryOperation {
         operator: UnaryOperator,
         expr: Box<Expression>,
     },
+
+    Alias {
+        expr: Box<Expression>,
+        r#as: String,
+    },
+
     Nested(Box<Expression>),
 }
 
@@ -179,6 +186,7 @@ impl Display for Expression {
                 right,
             } => write!(f, "{left} {operator} {right}"),
             Self::UnaryOperation { operator, expr } => write!(f, "{operator}{expr}"),
+            Self::Alias { expr, r#as } => write!(f, "{expr} AS {}", r#as),
             Self::Nested(expr) => write!(f, "({expr})"),
         }
     }

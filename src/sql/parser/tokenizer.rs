@@ -147,6 +147,7 @@ impl<'a> Tokenizer<'a> {
             "ROLLBACK" => Keyword::Rollback,
             "COMMIT" => Keyword::Rollback,
             "EXPLAIN" => Keyword::Explain,
+            "AS" => Keyword::As,
             _ => Keyword::None,
         };
 

@@ -111,7 +111,8 @@ impl<'a> Parser<'a> {
         self.peek().ok_or(sql::Error::UnexpectedEof)
     }
 
-    /// Returns next token and skips all whitespaces. Assumes that user will stop calling when `Token::Semi` is returned. Otherwise it will constantly return `Token::Eof`.
+    /// Returns next token and skips all whitespaces. Assumes that user will
+    /// stop calling when `Token::Semi` is returned. Otherwise it will constantly return `Token::Eof`.
     fn next_token(&mut self) -> sql::Result<Token> {
         while let Some(token) = self.peek() {
             match token {
@@ -130,7 +131,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Consumes and matches next token if it matches expected one. If next token == expected it returns Ok(token). Otherwise returns sql::Error.
+    /// Consumes and matches next token if it matches expected one. If next
+    /// token == expected it returns Ok(token). Otherwise returns sql::Error.
     fn expect_token(&mut self, expected: Token) -> sql::Result<Token> {
         match self.next_token() {
             Ok(token) => {
@@ -153,7 +155,8 @@ impl<'a> Parser<'a> {
             .map(|_| expected)
     }
 
-    /// If `optional == next_token`, then it's consumed and function returns true. Otherwise returns false.
+    /// If `optional == next_token`, then it's consumed and function returns true.
+    /// Otherwise returns false.
     fn consume_optional_token(&mut self, optional: Token) -> bool {
         match self.peek_token() {
             Ok(token) if token == &optional => {
@@ -169,7 +172,8 @@ impl<'a> Parser<'a> {
         self.consume_optional_token(Token::Keyword(optional))
     }
 
-    /// Consumes one of given keyword in iterator. Returns `Keyword` that was consumed, if any returns `Keyword::None`.
+    /// Consumes one of given keyword in iterator. Returns `Keyword` that was
+    /// consumed, if any returns `Keyword::None`.
     fn consume_one_of<'k, K>(&mut self, keywords: &'k K) -> Keyword
     where
         &'k K: IntoIterator<Item = &'k Keyword>,
@@ -180,7 +184,8 @@ impl<'a> Parser<'a> {
             .unwrap_or(&Keyword::None)
     }
 
-    /// Does the same thing as `Self::consume_one_of` but if no `Keyword` was consumed, then it returns sql::Error.
+    /// Does the same thing as `Self::consume_one_of` but if no `Keyword` was
+    /// consumed, then it returns sql::Error.
     fn expect_one_of<'k, K>(&mut self, keywords: &'k K) -> sql::Result<Keyword>
     where
         &'k K: IntoIterator<Item = &'k Keyword>,
@@ -201,6 +206,7 @@ impl<'a> Parser<'a> {
         };
 
         match token {
+            Token::Keyword(Keyword::As) => 5,
             Token::Keyword(Keyword::Or) => 10,
             Token::Keyword(Keyword::And) => 20,
             Token::Eq | Token::Neq | Token::Gt | Token::GtEq | Token::Lt | Token::LtEq => 30,
@@ -279,6 +285,12 @@ impl<'a> Parser<'a> {
             Token::LtEq => BinaryOperator::LtEq,
             Token::Keyword(Keyword::Or) => BinaryOperator::Or,
             Token::Keyword(Keyword::And) => BinaryOperator::And,
+            Token::Keyword(Keyword::As) => {
+                return Ok(Expression::Alias {
+                    expr: Box::new(left),
+                    r#as: self.parse_identifier()?,
+                });
+            }
             _ => Err(sql::Error::InvalidQuery(self.position))?,
         };
 

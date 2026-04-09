@@ -359,7 +359,7 @@ fn analyze_expression(schema: &Schema, expr: &Expression) -> Result<ValueType> {
             schema.columns[index].data_type
         }
 
-        Expression::UnaryOperation { operator, expr } => {
+        Expression::UnaryOperation { operator: _, expr } => {
             if !matches!(analyze_expression(schema, expr)?, ValueType::Int) {
                 return Err(Error::TypeError(TypeError::ExpectedType {
                     expected: ValueType::Int,
@@ -417,6 +417,8 @@ fn analyze_expression(schema: &Schema, expr: &Expression) -> Result<ValueType> {
         }
 
         Expression::Nested(expr) => analyze_expression(schema, expr)?,
+
+        Expression::Alias { expr, r#as: _ } => analyze_expression(schema, expr)?,
 
         Expression::Wildcard => {
             return Err(Error::TypeError(TypeError::UnexpectedExpression {

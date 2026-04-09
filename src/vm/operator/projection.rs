@@ -1,55 +1,66 @@
 use crate::{
-    sql::{self, parser::statement::Expression, schema::Schema},
+    sql::{
+        self,
+        parser::statement::Expression,
+        record::RecordMut,
+        schema::{Column, Schema},
+        types::Value,
+    },
     vm::{
         self,
+        expression::resolve_expression_to_value,
         operator::{Operator, Row},
     },
 };
 
 pub struct Projection<'tx> {
     child: Box<dyn Operator + 'tx>,
-    indicies: Vec<usize>,
-    schema: Schema,
+    columns: Vec<Expression>,
+    projected_schema: Schema,
 }
 
 impl<'tx> Projection<'tx> {
     pub fn new(child: Box<dyn Operator + 'tx>, columns: Vec<Expression>) -> vm::Result<Self> {
         let child_schema = child.schema();
+        let mut projected_schema = Schema::empty();
 
-        let indicies = columns
-            .iter()
-            .map(|expr| match expr {
-                Expression::Identifier(ident) => child_schema
-                    .index_of(ident)
-                    .ok_or(sql::analyzer::Error::ColumnNotFound(ident.to_owned()).into()),
-                _ => Err(vm::Error::Unsupported(expr.clone())),
-            })
-            .collect::<vm::Result<Vec<usize>>>()?;
-
-        let output_schema = indicies
-            .iter()
-            .map(|&i| child_schema.columns[i].clone())
-            .collect();
-
-        let schema = Schema::new(output_schema);
+        for col in &columns {
+            let new_column = match col {
+                Expression::Identifier(ident) => child_schema.get(ident).to_owned(),
+                Expression::Alias { expr: _, r#as } => Column::from_name(r#as),
+                rest => Column::from_name(&format!("{rest}")),
+            };
+            projected_schema.push(new_column);
+        }
 
         Ok(Self {
             child,
-            indicies,
-            schema,
+            columns,
+            projected_schema,
         })
     }
 }
 
 impl<'tx> Operator for Projection<'tx> {
     fn next(&mut self) -> vm::Result<Option<Row>> {
-        match self.child.next()? {
-            Some(row) => Ok(Some(row.project(&self.indicies)?)),
-            None => Ok(None),
-        }
+        // SELECT id, age + 10 FROM test;
+
+        let Some(row) = self.child.next()? else {
+            return Ok(None);
+        };
+
+        let output = self
+            .columns
+            .iter()
+            .map(|expr| resolve_expression_to_value(&row, self.child.schema(), expr))
+            .collect::<sql::Result<Vec<Value>>>()?;
+
+        let record = RecordMut::from_values(output).serialize_to_record();
+
+        Ok(Some(record))
     }
 
     fn schema(&self) -> &Schema {
-        &self.schema
+        &self.projected_schema
     }
 }

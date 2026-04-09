@@ -78,10 +78,14 @@ pub fn resolve_expression_to_value(
                         _ => unreachable!(),
                     }
                 }
+
+                _ => unreachable!(),
             })
         }
 
         Expression::Nested(expr) => resolve_expression_to_value(record, schema, expr),
+
+        Expression::Alias { expr, r#as: _ } => resolve_expression_to_value(record, schema, expr),
 
         _ => unreachable!(),
     }

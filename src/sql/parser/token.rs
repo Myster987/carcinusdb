@@ -105,6 +105,7 @@ pub enum Keyword {
     Rollback,
     Commit,
     Explain,
+    As,
     /// Not used, only for convinience
     None,
 }
@@ -151,6 +152,7 @@ impl Display for Keyword {
             Self::Rollback => "ROLLBACK",
             Self::Commit => "COMMIT",
             Self::Explain => "EXPLAIN",
+            Self::As => "AS",
             Self::None => "NONE",
         })
     }
