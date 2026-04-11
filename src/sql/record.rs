@@ -5,6 +5,7 @@ use crate::{
         self,
         types::{Value, ValueRef, parse_value, serial::SerialType},
     },
+    tcp::protocol,
     utils::{
         bytes::{BytesCursor, VarInt, varint_size},
         debug_table::DebugTable,
@@ -36,6 +37,13 @@ impl<'a> Record<'a> {
 
     pub fn from_owned(payload: Vec<u8>) -> Self {
         Self::new(Cow::Owned(payload))
+    }
+
+    pub fn from_owned_with_cursor(payload: Vec<u8>, cursor: RecordCursor) -> Self {
+        Self {
+            payload: Cow::Owned(payload),
+            cursor: Rc::new(RefCell::new(cursor)),
+        }
     }
 
     pub fn raw(&'a self) -> &'a [u8] {
@@ -86,16 +94,6 @@ impl<'a> Record<'a> {
             cursor: Rc::new(RefCell::new(self.cursor.borrow().clone())),
         }
     }
-
-    pub fn project(&self, indices: &[usize]) -> sql::Result<Record<'static>> {
-        let mut projected_record = RecordMut::new();
-
-        for i in indices {
-            projected_record.add(self.try_get_value(*i)?.to_owned());
-        }
-
-        Ok(projected_record.serialize_to_record())
-    }
 }
 
 impl<'a> Debug for Record<'a> {
@@ -111,6 +109,49 @@ impl<'a> Debug for Record<'a> {
         dbg_table.insert_row(row);
 
         dbg_table.fmt(f)
+    }
+}
+
+impl<'a> protocol::TcpRead for Record<'a> {
+    fn validate(src: &mut std::io::Cursor<&[u8]>) -> crate::tcp::Result<()> {
+        let current_position = src.position() as usize;
+        let record_payload = &src.get_ref()[current_position..];
+
+        let mut cursor = RecordCursor::new();
+
+        cursor.full_parse(record_payload)?;
+
+        src.set_position((current_position + cursor.parsed_bytes) as u64);
+
+        Ok(())
+    }
+
+    fn parse(src: &mut std::io::Cursor<&[u8]>) -> crate::tcp::Result<Self>
+    where
+        Self: Sized,
+    {
+        let start = src.position() as usize;
+        let record_payload = &src.get_ref()[start..];
+
+        let mut cursor = RecordCursor::new();
+
+        cursor.full_parse(record_payload)?;
+
+        let end = start + cursor.parsed_bytes;
+
+        src.set_position(end as u64);
+
+        let owned_payload = record_payload[..end].to_vec();
+
+        let record = Record::from_owned_with_cursor(owned_payload, cursor);
+
+        Ok(record)
+    }
+}
+
+impl<'a> protocol::TcpWrite for Record<'a> {
+    fn to_bytes(self) -> Vec<u8> {
+        self.payload.into()
     }
 }
 
