@@ -116,11 +116,14 @@ impl MemDatabaseHeader {
 
 /// Constains all the necessary logic to run database.
 pub struct Database {
-    /// Catalog of all table in db.
+    /// Catalog of all tables in db.
     catalog: Arc<Catalog>,
     /// Manages b-trees, pages and free space retrival.
     pager: Arc<Pager>,
 }
+
+unsafe impl Send for Database {}
+unsafe impl Sync for Database {}
 
 impl Database {
     /// Calling this function will open existing db. In case that db file
