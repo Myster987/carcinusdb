@@ -43,8 +43,6 @@ impl<'tx> Projection<'tx> {
 
 impl<'tx> Operator for Projection<'tx> {
     fn next(&mut self) -> vm::Result<Option<Row>> {
-        // SELECT id, age + 10 FROM test;
-
         let Some(row) = self.child.next()? else {
             return Ok(None);
         };

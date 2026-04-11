@@ -514,7 +514,7 @@ mod tests {
 
             select_all();
 
-            let query = tx.execute("DELETE FROM test WHERE id >= 5 RETURNING id;")?;
+            let query = tx.execute("DELETE FROM test WHERE id >= 5 RETURNING id, id + age;")?;
 
             println!("{}", query.to_string()?);
 
