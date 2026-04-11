@@ -1,4 +1,4 @@
-use tokio::net::TcpStream;
+use std::net::TcpStream;
 
 pub struct Connection {
     stream: TcpStream,

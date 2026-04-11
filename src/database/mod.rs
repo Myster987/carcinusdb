@@ -66,25 +66,28 @@ pub enum Error {
     Unknown,
 }
 
-pub async fn run(hostname: String, port: u16) -> Result<()> {
+pub fn run(db_path: impl AsRef<Path>, hostname: String, port: u16) -> Result<()> {
     log::info!("Starting CarcinusDB...");
+
+    let db = Arc::new(Database::open(db_path)?);
 
     let addr = format!("{hostname}:{port}")
         .parse()
         .expect("Invalid hostname or port.");
 
-    let tcp_server = TcpServer::new(addr).await?;
+    let tcp_server = TcpServer::new(addr)?;
     log::info!("Listening on: {}", tcp_server.local_addr());
 
     loop {
-        let conn = tcp_server.accept_connection().await?;
-        tokio::spawn(async move { handle_connection(conn) });
+        let conn = tcp_server.accept_connection()?;
+        let db_clone = db.clone();
+        std::thread::spawn(move || handle_connection(db_clone, conn));
     }
 
     Ok(())
 }
 
-pub fn handle_connection(conn: Connection) -> Result<()> {
+pub fn handle_connection(db: Arc<Database>, conn: Connection) -> Result<()> {
     log::info!("Connection from: {}", conn.client_address());
 
     Ok(())

@@ -8,15 +8,15 @@ mod tcp;
 mod utils;
 mod vm;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     simple_logger::init_with_level(log::Level::Info).unwrap();
     dotenvy::dotenv()?;
 
+    let db_path = env::var("CARCINUSDB_PATH")?;
     let hostname = env::var("CARCINUSDB_HOSTNAME")?;
     let port = env::var("CARCINUSDB_PORT")?.parse::<u16>()?;
 
-    database::run(hostname, port).await?;
+    database::run(db_path, hostname, port)?;
 
     Ok(())
 }

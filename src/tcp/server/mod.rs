@@ -1,18 +1,16 @@
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpListener};
 
-use connection::Connection;
-use tokio::net::TcpListener;
-
-use crate::database::Result;
+use crate::{database::Result, tcp::server::connection::Connection};
 
 pub mod connection;
+
 pub struct TcpServer {
     listener: TcpListener,
 }
 
 impl TcpServer {
-    pub async fn new(addr: SocketAddr) -> Result<Self> {
-        let listener = TcpListener::bind(addr).await?;
+    pub fn new(addr: SocketAddr) -> Result<Self> {
+        let listener = TcpListener::bind(addr)?;
 
         Ok(Self { listener })
     }
@@ -21,8 +19,8 @@ impl TcpServer {
         self.listener.local_addr().unwrap()
     }
 
-    pub async fn accept_connection(&self) -> Result<Connection> {
-        let (stream, _) = self.listener.accept().await?;
+    pub fn accept_connection(&self) -> Result<Connection> {
+        let (stream, _) = self.listener.accept()?;
 
         Ok(Connection::new(stream))
     }
