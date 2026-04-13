@@ -27,12 +27,14 @@ pub enum Error {
     TableNotFound(String),
 }
 
+/// Collection of all tables in database that are currently loaded.
 #[derive(Debug)]
 pub struct Catalog {
     tables: DashMap<String, TableMetadata>,
 }
 
 impl Catalog {
+    /// Returns `TableMetadata`, if table with given `name` exists.
     pub fn get_table(&self, name: &str) -> Result<TableMetadata> {
         self.tables
             .get(name)
@@ -40,10 +42,12 @@ impl Catalog {
             .ok_or(Error::TableNotFound(name.to_string()))
     }
 
+    /// Inserts new table into catalog with given `name` identifier.
     pub fn insert_table(&self, name: String, table: TableMetadata) {
         self.tables.insert(name, table);
     }
 
+    /// Inserts new index for table with given `table_name`.
     pub fn insert_index(&self, table_name: &str, index: IndexMetadata) -> Result<()> {
         let mut table = self
             .tables
@@ -55,6 +59,7 @@ impl Catalog {
         Ok(())
     }
 
+    /// Recreates catalog from b-tree cursor (must be master table).
     pub fn from_cursor(mut master_cursor: BTreeCursor) -> storage::Result<Self> {
         let tables = DashMap::new();
         let mut pending_indexes = Vec::new();
@@ -139,6 +144,7 @@ impl Catalog {
     }
 }
 
+/// Temporary storage for index metadata. Used by `Catalog::from_cursor`.
 struct PendingIndex {
     root: PageNumber,
     name: String,
@@ -147,13 +153,18 @@ struct PendingIndex {
     unique: bool,
 }
 
+/// Holds necessary information that is needed to use given table index.
 #[derive(Debug, Clone)]
 pub struct IndexMetadata {
+    /// Root of index b-tree.
     pub root: PageNumber,
+    /// Name of this index.
     pub name: String,
+    /// Column that it is used on.
     pub column: Column,
+    /// Index of column that it is used one relative to schema.
     pub column_index: usize,
-    // pub schema: Schema,
+    /// If keys must be unique (for now always true).
     pub unique: bool,
 }
 
@@ -175,17 +186,18 @@ impl IndexMetadata {
             unique,
         }
     }
-
-    // pub fn index_of(&self, column: &str) -> Option<usize> {
-    //     self.schema.index_of(column)
-    // }
 }
 
+/// Holds necessary information that is needed to use given table.
 #[derive(Debug, Clone)]
 pub struct TableMetadata {
+    /// Root of table b-tree.
     pub root: PageNumber,
+    /// Table name.
     pub name: String,
+    /// Table schema.
     pub schema: Schema,
+    /// Indexes that are on this table.
     pub indexes: Vec<IndexMetadata>,
 }
 
@@ -204,6 +216,7 @@ impl TableMetadata {
         }
     }
 
+    /// Returns index of column in schema with given name.
     pub fn index_of(&self, column: &str) -> Option<usize> {
         self.schema.index_of(column)
     }
