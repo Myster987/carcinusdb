@@ -347,7 +347,7 @@ fn analyze_assignment(
 }
 
 /// Evaluates into what given expression results.
-fn analyze_expression(schema: &Schema, expr: &Expression) -> Result<ValueType> {
+pub fn analyze_expression(schema: &Schema, expr: &Expression) -> Result<ValueType> {
     Ok(match expr {
         Expression::Value(val) => val.value_type(),
 

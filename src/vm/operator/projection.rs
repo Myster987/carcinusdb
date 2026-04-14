@@ -1,6 +1,7 @@
 use crate::{
     sql::{
         self,
+        analyzer::analyze_expression,
         parser::statement::Expression,
         record::RecordMut,
         schema::{Column, Schema},
@@ -27,8 +28,13 @@ impl<'tx> Projection<'tx> {
         for col in &columns {
             let new_column = match col {
                 Expression::Identifier(ident) => child_schema.get(ident).to_owned(),
-                Expression::Alias { expr: _, r#as } => Column::from_name(r#as),
-                rest => Column::from_name(&format!("{rest}")),
+                Expression::Alias { expr, r#as } => {
+                    Column::from_name_and_data_type(r#as, analyze_expression(&child_schema, expr)?)
+                }
+                rest => Column::from_name_and_data_type(
+                    &format!("{rest}"),
+                    analyze_expression(&child_schema, rest)?,
+                ),
             };
             projected_schema.push(new_column);
         }

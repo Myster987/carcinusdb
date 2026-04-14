@@ -321,10 +321,10 @@ impl Column {
         }
     }
 
-    pub fn from_name(name: &str) -> Self {
+    pub fn from_name_and_data_type(name: &str, data_type: ValueType) -> Self {
         Self {
             name: name.to_string(),
-            data_type: ValueType::Null,
+            data_type,
             properties: ColumnProperties::default(),
             default: None,
         }

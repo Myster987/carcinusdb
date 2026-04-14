@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 
 use crate::{
+    sql::schema::Schema,
     utils::debug_table::DebugTable,
     vm::{
         self,
@@ -50,6 +51,10 @@ pub struct RowIterator<'tx> {
 impl<'tx> RowIterator<'tx> {
     pub fn new(operator: Box<dyn Operator + 'tx>) -> Self {
         Self { operator }
+    }
+
+    pub fn schema(&self) -> &Schema {
+        self.operator.schema()
     }
 }
 
