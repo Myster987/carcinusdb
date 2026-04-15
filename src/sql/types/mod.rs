@@ -31,12 +31,25 @@ impl From<u8> for ValueType {
     fn from(value: u8) -> Self {
         match value {
             0 => Self::Null,
-            1 => Self::Blob,
+            1 => Self::Bool,
             2 => Self::Int,
             3 => Self::Blob,
             4 => Self::Text,
             5 => Self::Error,
             _ => unreachable!(),
+        }
+    }
+}
+
+impl Into<u8> for ValueType {
+    fn into(self) -> u8 {
+        match self {
+            Self::Null => 0,
+            Self::Bool => 1,
+            Self::Int => 2,
+            Self::Blob => 3,
+            Self::Text => 4,
+            Self::Error => 5,
         }
     }
 }
