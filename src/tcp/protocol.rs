@@ -25,12 +25,7 @@
 
 use std::io::Cursor;
 
-use crate::{
-    sql::schema::Schema,
-    tcp,
-    utils::bytes::{BytesCursor, VarInt},
-    vm::query_result::QueryResult,
-};
+use crate::{sql::schema::Schema, tcp, utils::bytes::BytesCursor, vm::query_result::QueryResult};
 
 pub trait TcpRead {
     /// This function should validate if incoming request is correct and
@@ -43,9 +38,10 @@ pub trait TcpRead {
 }
 
 pub trait TcpWrite {
-    /// Anything that implements `to_bytes` can be send over tcp.
+    /// Writes `self` to cursor at ***the end*** of it.
+    /// Anything that implements `write_to_buffer` can be send over tcp.
     /// The problem is if it can be later parsed safely.
-    fn to_bytes(self) -> Vec<u8>;
+    fn push_to_buffer<T: AsRef<[u8]> + AsMut<[u8]> + Extend<u8>>(&self, src: &mut BytesCursor<T>);
 }
 
 pub struct Response<'a> {
@@ -68,39 +64,5 @@ impl<'a> Response<'a> {
             QueryResult::Rows(_) => b'i',
             QueryResult::RowsAffected(_) => b'a',
         }
-    }
-}
-
-impl<'a> TcpWrite for Response<'a> {
-    fn to_bytes(self) -> Vec<u8> {
-        let buffer = vec![self.response_type()];
-
-        let mut cursor = BytesCursor::new(buffer);
-
-        let columns = self.schema.column_names();
-        let columns_len = columns.len() as VarInt;
-
-        cursor.put_varint(columns_len);
-
-        for col in self.schema.column_names() {
-            cursor.put_varint(col.len() as VarInt);
-            cursor.put_bytes(col.as_bytes());
-        }
-
-        match self.query_result {
-            QueryResult::RowsAffected(rows_affected) => cursor.put_varint(rows_affected as VarInt),
-            QueryResult::Rows(row_iterator) => {
-                for row_result in row_iterator {
-                    match row_result {
-                        Ok(row) => cursor.put_bytes(&row.to_bytes()),
-                        Err(_) => todo!(),
-                    }
-                }
-            }
-        }
-
-        cursor.put_bytes(b"\r\n");
-
-        todo!()
     }
 }

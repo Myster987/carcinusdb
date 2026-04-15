@@ -15,6 +15,8 @@ use crate::{
         self, PageNumber,
         btree::{BTreeCursor, DatabaseCursor},
     },
+    tcp::protocol,
+    utils::bytes::VarInt,
 };
 
 pub const ROW_ID_COLUMN: &str = "row_id";
@@ -339,6 +341,19 @@ impl From<parser::statement::Column> for Column {
             properties: value.constrains.into(),
             default: None,
         }
+    }
+}
+
+impl protocol::TcpWrite for Column {
+    fn push_to_buffer<T: AsRef<[u8]> + AsMut<[u8]> + Extend<u8>>(
+        &self,
+        src: &mut crate::utils::bytes::BytesCursor<T>,
+    ) {
+        let column_name_len = self.name.len();
+
+        src.put_varint(column_name_len as VarInt);
+        src.put_bytes(self.name.as_bytes());
+        src.put_u8(self.data_type.into());
     }
 }
 

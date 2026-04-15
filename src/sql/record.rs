@@ -150,8 +150,8 @@ impl<'a> protocol::TcpRead for Record<'a> {
 }
 
 impl<'a> protocol::TcpWrite for Record<'a> {
-    fn to_bytes(self) -> Vec<u8> {
-        self.payload.into()
+    fn push_to_buffer<T: AsRef<[u8]> + AsMut<[u8]> + Extend<u8>>(&self, src: &mut BytesCursor<T>) {
+        src.put_bytes(self.raw());
     }
 }
 

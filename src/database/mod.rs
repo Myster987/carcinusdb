@@ -88,8 +88,6 @@ pub fn run(db_path: impl AsRef<Path>, hostname: String, port: u16) -> Result<()>
 }
 
 pub fn handle_connection(db: Arc<Database>, conn: Connection) -> Result<()> {
-    log::info!("Connection from: {}", conn.client_address());
-
     Ok(())
 }
 
