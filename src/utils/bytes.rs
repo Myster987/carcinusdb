@@ -150,6 +150,14 @@ impl<T> BytesCursor<T> {
     pub fn reset(&mut self) {
         self.position = 0;
     }
+
+    pub fn get_ref(&self) -> &T {
+        &self.buffer
+    }
+
+    pub fn get_mut(&mut self) -> &mut T {
+        &mut self.buffer
+    }
 }
 
 impl<T: AsRef<[u8]>> BytesCursor<T> {
