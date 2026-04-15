@@ -1,12 +1,27 @@
-// plan:
-// Request comes in (SQL).
-// DB runs SQL.
-// QueryResult iterator is returned.
-// Now Connector starts responding and writes rows to buffer.
-// When buffer is filled up it is flushed to connection
-// ^ this is reapeded untill query is empty
-// Enconding etc should be like this:
-// | Request header that contains response schema | Row 1 (variable size) | Row 2 | Row 3 | ... EOF
+//! Protocol used by CarcinusDB:
+//!
+//! Response format:
+//!
+//! ```text
+//! +-------------------------------------------+
+//! |                 HEADER                    |
+//! +-------------------------------------------+
+//! | Schema:                                   |
+//! |   - Schema len - varint                   |
+//! |   - N Columns:                            |
+//! |       - Column name len in bytes - varint |
+//! |       - Column name - n bytes             |
+//! |       - Column data type - 1 byte         |
+//! +-------------------------------------------+
+//! |                  BODY                     |
+//! +-------------------------------------------+
+//! | N Rows:                                   |
+//! |   - type -> OK (o) or ERROR (r) - 1 byte  |
+//! |   - raw row in DB format for fast parse   |
+//! +-------------------------------------------+
+//! |               END - \r\n                  |
+//! +-------------------------------------------+
+//! ```
 
 use std::io::Cursor;
 
