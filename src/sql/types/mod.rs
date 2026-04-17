@@ -19,12 +19,12 @@ pub mod text;
 #[repr(u8)]
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum ValueType {
-    Null,
-    Bool,
-    Int,
-    Blob,
-    Text,
-    Error,
+    Null = 0,
+    Bool = 1,
+    Int = 2,
+    Blob = 3,
+    Text = 4,
+    Error = 5,
 }
 
 impl From<u8> for ValueType {
@@ -37,19 +37,6 @@ impl From<u8> for ValueType {
             4 => Self::Text,
             5 => Self::Error,
             _ => unreachable!(),
-        }
-    }
-}
-
-impl Into<u8> for ValueType {
-    fn into(self) -> u8 {
-        match self {
-            Self::Null => 0,
-            Self::Bool => 1,
-            Self::Int => 2,
-            Self::Blob => 3,
-            Self::Text => 4,
-            Self::Error => 5,
         }
     }
 }
