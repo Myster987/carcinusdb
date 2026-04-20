@@ -23,103 +23,85 @@
 //! +-------------------------------------------+
 //! ```
 
-use std::io::Cursor;
-
 use crate::{
+    sql::schema::Schema,
     tcp,
-    utils::bytes::{BytesCursor, VarInt},
-    vm::query_result::QueryResult,
+    utils::bytes::{BytesCursor, VarInt, encode_to_varint},
+    vm::operator::Row,
 };
 
-pub trait TcpRead {
+pub trait Decode: Sized {
     /// This function should validate if incoming request is correct and
-    /// advance cursor position to go over request len.
-    fn validate(src: &mut Cursor<&[u8]>) -> tcp::Result<()>;
-
-    fn parse(src: &mut Cursor<&[u8]>) -> tcp::Result<Self>
-    where
-        Self: Sized;
+    /// advance cursor position to go over request len and returns parsed
+    /// data if correct.
+    fn decode(src: &mut BytesCursor<&[u8]>) -> tcp::Result<Self>;
 }
 
-pub trait TcpWrite {
+pub trait Encode {
     /// Writes `self` to cursor at ***the end*** of it.
     /// Anything that implements `write_to_buffer` can be send over tcp.
     /// The problem is if it can be later parsed safely.
-    fn push_to_buffer<T: AsRef<[u8]> + AsMut<[u8]> + Extend<u8>>(&self, src: &mut BytesCursor<T>);
+    fn encode(&self, dst: &mut BytesCursor<Vec<u8>>);
 }
 
-pub struct Response<'a> {
-    query_result: QueryResult<'a>,
+#[repr(u8)]
+pub enum MessageType {
+    Query = b'Q',
+    Schema = b'S',
+    Column = b'C',
+    Record = b'R',
+    Error = b'E',
+    RowsAffected = b'A',
+    End = b'Z',
 }
 
-impl<'a> Response<'a> {
-    pub fn new(query_result: QueryResult<'a>) -> Self {
-        Self { query_result }
+pub enum Request<'a> {
+    Query(&'a str),
+    Close,
+}
+
+pub enum Response {
+    Schema(Schema),
+    Row(Row),
+    RowsAffected(usize),
+    Error(String),
+    End,
+}
+
+impl Decode for Response {
+    fn decode(src: &mut BytesCursor<&[u8]>) -> tcp::Result<Self> {
+        let position = src.position();
+
+        let (response_size, _) = src.try_read_varint().map_err(|_| tcp::Error::Incomplete)?;
+
+        todo!()
     }
+}
 
-    /// For iterator based respond type is "i" and for rows affected, it is
-    /// "a".
-    pub fn response_type(&self) -> u8 {
-        match self.query_result {
-            QueryResult::Rows(_) => b'i',
-            QueryResult::RowsAffected(_) => b'a',
+impl Encode for Response {
+    fn encode(&self, dst: &mut BytesCursor<Vec<u8>>) {
+        match self {
+            Self::Schema(schema) => {
+                schema.encode(dst);
+            }
+            Self::Row(row) => {
+                row.encode(dst);
+            }
+            Self::RowsAffected(n) => {
+                let rows_affected_varint = encode_to_varint(*n as VarInt);
+                dst.put_varint(rows_affected_varint.len() as VarInt);
+                dst.put_u8(MessageType::RowsAffected as u8);
+                dst.put_bytes(&rows_affected_varint);
+            }
+            Self::Error(err) => {
+                dst.put_varint(err.len() as VarInt);
+                dst.put_u8(MessageType::Error as u8);
+                dst.put_bytes(err.as_bytes());
+            }
+            Self::End => {
+                dst.put_varint(1);
+                dst.put_u8(MessageType::End as u8);
+            }
         }
     }
 }
-
-pub struct Message {
-    len: usize,
-    r#type: char,
-    data: Vec<u8>,
-}
-
-// impl<'a> TcpWrite for Response<'a> {
-//     fn push_to_buffer<T: AsRef<[u8]> + AsMut<[u8]> + Extend<u8>>(&self, src: &mut BytesCursor<T>) {
-//         src.put_u8(self.response_type());
-
-//         match self.query_result {
-//             QueryResult::RowsAffected(rows_affected) => {
-//                 src.put_varint(rows_affected as VarInt);
-//                 src.put_bytes(b"\r\n");
-//             }
-//             QueryResult::Rows(row_iterator) => {
-//                 let schema = row_iterator.schema();
-
-//                 src.put_varint(schema.len() as VarInt);
-
-//                 for column in &schema.columns {
-//                     TcpWrite::push_to_buffer(column, src);
-//                 }
-
-//                 self.stream.write_all(&buffer)?;
-
-//                 buffer.clear();
-
-//                 let mut cursor = BytesCursor::new(buffer);
-
-//                 for record_result in row_iterator {
-//                     match record_result {
-//                         Ok(row) => {
-//                             cursor.put_u8(b'o');
-//                             TcpWrite::push_to_buffer(&row, &mut cursor);
-//                             self.stream.write_all(cursor.get_ref())?;
-//                         }
-//                         Err(err) => {
-//                             cursor.put_u8(b'e');
-//                             let error_message = format!("{err}");
-
-//                             cursor.put_varint(error_message.len() as VarInt);
-//                             cursor.put_bytes(error_message.as_bytes());
-
-//                             self.stream.write_all(cursor.get_ref())?;
-//                             break;
-//                         }
-//                     }
-//                     cursor.get_mut().clear();
-//                 }
-
-//                 self.stream.write_all(b"\r\n")?;
-//             }
-//         }
-//     }
-// }
