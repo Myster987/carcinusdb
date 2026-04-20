@@ -5,7 +5,10 @@ use crate::{
         self,
         types::{Value, ValueRef, parse_value, serial::SerialType},
     },
-    tcp::protocol,
+    tcp::{
+        self,
+        protocol::{self, MessageType},
+    },
     utils::{
         bytes::{BytesCursor, VarInt, varint_size},
         debug_table::DebugTable,
@@ -112,46 +115,40 @@ impl<'a> Debug for Record<'a> {
     }
 }
 
-impl<'a> protocol::TcpRead for Record<'a> {
-    fn validate(src: &mut std::io::Cursor<&[u8]>) -> crate::tcp::Result<()> {
-        let current_position = src.position() as usize;
-        let record_payload = &src.get_ref()[current_position..];
+impl<'a> protocol::Decode for Record<'a> {
+    fn decode(src: &mut BytesCursor<&[u8]>) -> crate::tcp::Result<Self> {
+        let position = src.position();
+
+        let (record_size, _) = src.try_read_varint().map_err(|_| tcp::Error::Incomplete)?;
+
+        if src.try_read_u8().map_err(|_| tcp::Error::Incomplete)? != MessageType::Record as u8 {
+            src.set_position(position);
+            return Err(tcp::Error::Corrupted);
+        }
+
+        let mut record_buffer = vec![0; record_size as usize];
+
+        src.try_read_exact(&mut record_buffer).map_err(|_| {
+            src.set_position(position);
+            tcp::Error::Incomplete
+        })?;
 
         let mut cursor = RecordCursor::new();
 
-        cursor.full_parse(record_payload)?;
+        cursor.full_parse(&record_buffer).map_err(|_| {
+            src.set_position(position);
+            tcp::Error::Corrupted
+        })?;
 
-        src.set_position((current_position + cursor.parsed_bytes) as u64);
-
-        Ok(())
-    }
-
-    fn parse(src: &mut std::io::Cursor<&[u8]>) -> crate::tcp::Result<Self>
-    where
-        Self: Sized,
-    {
-        let start = src.position() as usize;
-        let record_payload = &src.get_ref()[start..];
-
-        let mut cursor = RecordCursor::new();
-
-        cursor.full_parse(record_payload)?;
-
-        let end = start + cursor.parsed_bytes;
-
-        src.set_position(end as u64);
-
-        let owned_payload = record_payload[..end].to_vec();
-
-        let record = Record::from_owned_with_cursor(owned_payload, cursor);
-
-        Ok(record)
+        Ok(Record::from_owned_with_cursor(record_buffer, cursor))
     }
 }
 
-impl<'a> protocol::TcpWrite for Record<'a> {
-    fn push_to_buffer<T: AsRef<[u8]> + AsMut<[u8]> + Extend<u8>>(&self, src: &mut BytesCursor<T>) {
-        src.put_bytes(self.raw());
+impl<'a> protocol::Encode for Record<'a> {
+    fn encode(&self, dst: &mut BytesCursor<Vec<u8>>) {
+        dst.put_varint(self.size() as VarInt);
+        dst.put_u8(MessageType::Record as u8);
+        dst.put_bytes(self.raw());
     }
 }
 
