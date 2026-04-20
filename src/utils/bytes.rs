@@ -266,6 +266,25 @@ impl<T: AsRef<[u8]>> BytesCursor<T> {
         self.advance(length);
         return Ok((varint, length));
     }
+
+    /// Reads exact number of bytes to fill given `buf`. If successful, advances
+    /// cursor by length of `buf`. Otherwise this function will panic.
+    pub fn read_exact(&mut self, buf: &mut [u8]) {
+        self.try_read_exact(buf).unwrap()
+    }
+
+    /// Reads exact number of bytes to fill given `buf`. If successful, advances
+    /// cursor by length of `buf`. Otherwise returns error.
+    pub fn try_read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
+        let buf_len = buf.len();
+
+        if self.remaining() < buf_len {
+            return Err(Error::OutOfSpace);
+        }
+        buf.copy_from_slice(&self.chunk()[..buf_len]);
+        self.advance(buf_len);
+        Ok(())
+    }
 }
 
 impl<T: AsRef<[u8]> + AsMut<[u8]>> BytesCursor<T> {
