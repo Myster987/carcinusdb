@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use bytes::{Buf, BufMut, BytesMut};
 use dashmap::DashMap;
 use thiserror::Error;
 
@@ -19,7 +20,7 @@ use crate::{
         self,
         protocol::{self, MessageType},
     },
-    utils::bytes::{BytesCursor, VarInt},
+    utils::bytes::{BytesCursor, VarInt, encode_to_varint, put_varint, read_varint},
 };
 
 pub const ROW_ID_COLUMN: &str = "row_id";
@@ -304,24 +305,32 @@ impl Schema {
 }
 
 impl protocol::Decode for Schema {
-    fn decode(src: &mut crate::utils::bytes::BytesCursor<&[u8]>) -> tcp::Result<Self> {
-        let position = src.position();
+    fn decode(src: &mut BytesMut) -> tcp::Result<Self> {
+        let raw = src.chunk();
 
-        let (schema_len, _) = src.try_read_varint().map_err(|_| tcp::Error::Incomplete)?;
+        let (schema_size, varint_len) = read_varint(raw).map_err(|_| tcp::Error::Incomplete)?;
 
-        if src.try_read_u8().map_err(|_| tcp::Error::Incomplete)? != MessageType::Schema as u8 {
-            src.set_position(position);
+        let total_needed = varint_len + size_of::<MessageType>() + schema_size as usize;
+
+        if src.remaining() < total_needed {
+            return Err(tcp::Error::Incomplete);
+        }
+
+        src.advance(varint_len);
+
+        if src.get_u8() != MessageType::Schema as u8 {
             return Err(tcp::Error::Corrupted);
         }
+
+        let raw = src.chunk();
+        let (schema_len, varint_len) = read_varint(raw).map_err(|_| tcp::Error::Incomplete)?;
+
+        src.advance(varint_len);
 
         let mut columns = Vec::with_capacity(schema_len as usize);
 
         for _ in 0..schema_len {
-            let column = Column::decode(src).map_err(|err| {
-                src.set_position(position);
-                err
-            })?;
-            columns.push(column);
+            columns.push(Column::decode(src)?);
         }
 
         Ok(Schema::new(columns))
@@ -329,20 +338,21 @@ impl protocol::Decode for Schema {
 }
 
 impl protocol::Encode for Schema {
-    fn encode(&self, dst: &mut BytesCursor<Vec<u8>>) {
-        let schema_buffer = Vec::new();
-        let mut schema_cursor = BytesCursor::new(schema_buffer);
+    fn encode(&self, dst: &mut BytesMut) {
+        let mut schema_buffer = BytesMut::new();
 
         for col in &self.columns {
-            col.encode(&mut schema_cursor);
+            col.encode(&mut schema_buffer);
         }
-
-        let schema_buffer = schema_cursor.into_inner();
         let schema_size = schema_buffer.len();
+        let schema_len_varint = encode_to_varint(self.len() as VarInt);
 
-        dst.put_varint(schema_size as VarInt);
+        let total_size = schema_len_varint.len() + schema_size;
+
+        put_varint(dst, total_size as VarInt);
         dst.put_u8(MessageType::Schema as u8);
-        dst.put_bytes(&schema_buffer);
+        dst.put_slice(&schema_len_varint);
+        dst.put_slice(&schema_buffer);
     }
 }
 
@@ -391,32 +401,32 @@ impl From<parser::statement::Column> for Column {
 }
 
 impl protocol::Decode for Column {
-    fn decode(src: &mut crate::utils::bytes::BytesCursor<&[u8]>) -> tcp::Result<Self> {
-        let position = src.position();
+    fn decode(src: &mut BytesMut) -> tcp::Result<Self> {
+        let raw = src.chunk();
 
-        let (column_size, _) = src.try_read_varint().map_err(|_| tcp::Error::Incomplete)?;
+        let (column_name_size, varint_len) =
+            read_varint(raw).map_err(|_| tcp::Error::Incomplete)?;
 
-        if src.try_read_u8().map_err(|_| tcp::Error::Incomplete)? != MessageType::Column as u8 {
-            src.set_position(position);
+        let total_needed = varint_len
+            + size_of::<MessageType>()
+            + column_name_size as usize
+            + size_of::<ValueType>();
+
+        if src.remaining() < total_needed {
+            return Err(tcp::Error::Incomplete);
+        }
+
+        src.advance(varint_len);
+
+        if src.get_u8() != MessageType::Column as u8 {
             return Err(tcp::Error::Corrupted);
         }
 
-        let mut name_buffer = vec![0; column_size as usize - 1];
+        let name_buffer = src.copy_to_bytes(column_name_size as usize).to_vec();
 
-        src.try_read_exact(&mut name_buffer).map_err(|_| {
-            src.set_position(position);
-            tcp::Error::Incomplete
-        })?;
+        let name = String::from_utf8(name_buffer).map_err(|_| tcp::Error::Corrupted)?;
 
-        let name = String::from_utf8(name_buffer).map_err(|_| {
-            src.set_position(position);
-            tcp::Error::Corrupted
-        })?;
-
-        let data_type = ValueType::from(src.try_read_u8().map_err(|_| {
-            src.set_position(position);
-            tcp::Error::Incomplete
-        })?);
+        let data_type = ValueType::from(src.get_u8());
 
         Ok(Self {
             name,
@@ -428,12 +438,10 @@ impl protocol::Decode for Column {
 }
 
 impl protocol::Encode for Column {
-    fn encode(&self, dst: &mut crate::utils::bytes::BytesCursor<Vec<u8>>) {
-        let column_size = self.name.len() + size_of::<ValueType>();
-
-        dst.put_varint(column_size as VarInt);
+    fn encode(&self, dst: &mut BytesMut) {
+        put_varint(dst, self.name.len() as VarInt).unwrap();
         dst.put_u8(MessageType::Column as u8);
-        dst.put_bytes(self.name.as_bytes());
+        dst.put_slice(self.name.as_bytes());
         dst.put_u8(self.data_type as u8);
     }
 }

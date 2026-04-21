@@ -1,5 +1,7 @@
 use std::{borrow::Cow, cell::RefCell, fmt::Debug, rc::Rc};
 
+use bytes::{Buf, BufMut, BytesMut};
+
 use crate::{
     sql::{
         self,
@@ -10,7 +12,7 @@ use crate::{
         protocol::{self, MessageType},
     },
     utils::{
-        bytes::{BytesCursor, VarInt, varint_size},
+        bytes::{BytesCursor, VarInt, put_varint, read_varint, varint_size},
         debug_table::DebugTable,
     },
 };
@@ -116,39 +118,39 @@ impl<'a> Debug for Record<'a> {
 }
 
 impl<'a> protocol::Decode for Record<'a> {
-    fn decode(src: &mut BytesCursor<&[u8]>) -> crate::tcp::Result<Self> {
-        let position = src.position();
+    fn decode(src: &mut BytesMut) -> crate::tcp::Result<Self> {
+        let raw = src.chunk();
 
-        let (record_size, _) = src.try_read_varint().map_err(|_| tcp::Error::Incomplete)?;
+        let (record_size, varint_len) = read_varint(raw).map_err(|_| tcp::Error::Incomplete)?;
 
-        if src.try_read_u8().map_err(|_| tcp::Error::Incomplete)? != MessageType::Record as u8 {
-            src.set_position(position);
+        let total_needed = varint_len + size_of::<MessageType>() + record_size as usize;
+
+        if src.remaining() < total_needed {
+            return Err(tcp::Error::Incomplete);
+        }
+
+        src.advance(varint_len);
+
+        if src.get_u8() != MessageType::Record as u8 {
             return Err(tcp::Error::Corrupted);
         }
 
-        let mut record_buffer = vec![0; record_size as usize];
-
-        src.try_read_exact(&mut record_buffer).map_err(|_| {
-            src.set_position(position);
-            tcp::Error::Incomplete
-        })?;
+        let record_buffer = src.copy_to_bytes(record_size as usize).to_vec();
 
         let mut cursor = RecordCursor::new();
-
-        cursor.full_parse(&record_buffer).map_err(|_| {
-            src.set_position(position);
-            tcp::Error::Corrupted
-        })?;
+        cursor
+            .full_parse(&record_buffer)
+            .map_err(|_| tcp::Error::Corrupted)?;
 
         Ok(Record::from_owned_with_cursor(record_buffer, cursor))
     }
 }
 
 impl<'a> protocol::Encode for Record<'a> {
-    fn encode(&self, dst: &mut BytesCursor<Vec<u8>>) {
-        dst.put_varint(self.size() as VarInt);
+    fn encode(&self, dst: &mut BytesMut) {
+        put_varint(dst, self.size() as VarInt).unwrap();
         dst.put_u8(MessageType::Record as u8);
-        dst.put_bytes(self.raw());
+        dst.put_slice(self.raw());
     }
 }
 

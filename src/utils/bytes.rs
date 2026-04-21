@@ -1,3 +1,5 @@
+use bytes::{BufMut, BytesMut};
+
 use super::{Error, Result};
 
 /// Used to represent varints. (this is quite missleading because it's used to
@@ -98,6 +100,31 @@ fn write_varint(buf: &mut [u8], mut value: VarInt) -> Result<usize> {
         }
 
         *buf.get_mut(i).ok_or(Error::OutOfSpace)? = byte;
+        i += 1;
+
+        if value == 0 {
+            return Ok(i);
+        }
+
+        if i == 10 {
+            // buffer overflowed
+            return Err(Error::InvalidVarInt);
+        }
+    }
+}
+
+pub fn put_varint(buf: &mut BytesMut, mut value: VarInt) -> Result<usize> {
+    let mut i = 0;
+
+    loop {
+        let mut byte = value as u8 & PAYLOAD_MASK;
+        value >>= 7;
+
+        if value != 0 {
+            byte |= MOST_SIGNIFICANT_BIT_MASK;
+        }
+
+        buf.put_u8(byte);
         i += 1;
 
         if value == 0 {
