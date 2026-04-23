@@ -12,7 +12,7 @@ use crate::{
         protocol::{self, MessageType},
     },
     utils::{
-        bytes::{BytesCursor, VarInt, put_varint, read_varint, varint_size},
+        bytes::{BytesCursor, VarInt, VarintBuf, read_varint, varint_size},
         debug_table::DebugTable,
     },
 };
@@ -120,7 +120,6 @@ impl<'a> Debug for Record<'a> {
 impl<'a> protocol::Decode for Record<'a> {
     fn decode(src: &mut BytesMut) -> crate::tcp::Result<Self> {
         let raw = src.chunk();
-
         let (record_size, varint_len) = read_varint(raw).map_err(|_| tcp::Error::Incomplete)?;
 
         let total_needed = varint_len + size_of::<MessageType>() + record_size as usize;
@@ -128,7 +127,6 @@ impl<'a> protocol::Decode for Record<'a> {
         if src.remaining() < total_needed {
             return Err(tcp::Error::Incomplete);
         }
-
         src.advance(varint_len);
 
         if src.get_u8() != MessageType::Record as u8 {
@@ -148,7 +146,7 @@ impl<'a> protocol::Decode for Record<'a> {
 
 impl<'a> protocol::Encode for Record<'a> {
     fn encode(&self, dst: &mut BytesMut) {
-        put_varint(dst, self.size() as VarInt).unwrap();
+        dst.put_varint(self.size() as VarInt);
         dst.put_u8(MessageType::Record as u8);
         dst.put_slice(self.raw());
     }

@@ -20,7 +20,7 @@ use crate::{
         self,
         protocol::{self, MessageType},
     },
-    utils::bytes::{BytesCursor, VarInt, encode_to_varint, put_varint, read_varint},
+    utils::bytes::{VarInt, VarintBuf, read_varint},
 };
 
 pub const ROW_ID_COLUMN: &str = "row_id";
@@ -307,27 +307,22 @@ impl Schema {
 impl protocol::Decode for Schema {
     fn decode(src: &mut BytesMut) -> tcp::Result<Self> {
         let raw = src.chunk();
-
         let (schema_size, varint_len) = read_varint(raw).map_err(|_| tcp::Error::Incomplete)?;
 
-        let total_needed = varint_len + size_of::<MessageType>() + schema_size as usize;
+        let total_needed =
+            varint_len + size_of::<MessageType>() + size_of::<u16>() + schema_size as usize;
 
         if src.remaining() < total_needed {
             return Err(tcp::Error::Incomplete);
         }
 
-        src.advance(varint_len);
-
         if src.get_u8() != MessageType::Schema as u8 {
             return Err(tcp::Error::Corrupted);
         }
 
-        let raw = src.chunk();
-        let (schema_len, varint_len) = read_varint(raw).map_err(|_| tcp::Error::Incomplete)?;
+        let schema_len = src.get_u16() as usize;
 
-        src.advance(varint_len);
-
-        let mut columns = Vec::with_capacity(schema_len as usize);
+        let mut columns = Vec::with_capacity(schema_len);
 
         for _ in 0..schema_len {
             columns.push(Column::decode(src)?);
@@ -344,14 +339,9 @@ impl protocol::Encode for Schema {
         for col in &self.columns {
             col.encode(&mut schema_buffer);
         }
-        let schema_size = schema_buffer.len();
-        let schema_len_varint = encode_to_varint(self.len() as VarInt);
-
-        let total_size = schema_len_varint.len() + schema_size;
-
-        put_varint(dst, total_size as VarInt);
+        dst.put_varint(schema_buffer.len() as VarInt);
         dst.put_u8(MessageType::Schema as u8);
-        dst.put_slice(&schema_len_varint);
+        dst.put_u16(self.len() as u16);
         dst.put_slice(&schema_buffer);
     }
 }
@@ -409,24 +399,21 @@ impl protocol::Decode for Column {
 
         let total_needed = varint_len
             + size_of::<MessageType>()
-            + column_name_size as usize
-            + size_of::<ValueType>();
+            + size_of::<ValueType>()
+            + column_name_size as usize;
 
         if src.remaining() < total_needed {
             return Err(tcp::Error::Incomplete);
         }
 
-        src.advance(varint_len);
-
         if src.get_u8() != MessageType::Column as u8 {
             return Err(tcp::Error::Corrupted);
         }
 
-        let name_buffer = src.copy_to_bytes(column_name_size as usize).to_vec();
-
-        let name = String::from_utf8(name_buffer).map_err(|_| tcp::Error::Corrupted)?;
-
         let data_type = ValueType::from(src.get_u8());
+
+        let name_buffer = src.copy_to_bytes(column_name_size as usize).to_vec();
+        let name = String::from_utf8(name_buffer).map_err(|_| tcp::Error::Corrupted)?;
 
         Ok(Self {
             name,
@@ -439,10 +426,10 @@ impl protocol::Decode for Column {
 
 impl protocol::Encode for Column {
     fn encode(&self, dst: &mut BytesMut) {
-        put_varint(dst, self.name.len() as VarInt).unwrap();
+        dst.put_varint(self.name.len() as VarInt);
         dst.put_u8(MessageType::Column as u8);
-        dst.put_slice(self.name.as_bytes());
         dst.put_u8(self.data_type as u8);
+        dst.put_slice(self.name.as_bytes());
     }
 }
 
