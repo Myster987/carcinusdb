@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+pub mod client;
 pub mod protocol;
 pub mod server;
 
@@ -12,6 +13,9 @@ pub enum Error {
 
     #[error("request is corrupted")]
     Corrupted,
+
+    #[error("connection was closed before program finished")]
+    ConnectionClosed,
 
     #[error(transparent)]
     SqlError(#[from] crate::sql::Error),
