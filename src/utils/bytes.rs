@@ -1,4 +1,4 @@
-use bytes::{BufMut, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 
 use super::{Error, Result};
 
@@ -39,6 +39,38 @@ macro_rules! bytes_try_write_int_impl {
 const PAYLOAD_MASK: u8 = 0x7F;
 /// Used to extract most significant bit (indicates if next byte belongs to varint).
 const MOST_SIGNIFICANT_BIT_MASK: u8 = 0x80;
+
+pub trait VarintBuf {
+    fn try_read_varint(&mut self) -> Result<(VarInt, usize)>;
+    fn read_varint(&mut self) -> (VarInt, usize);
+
+    fn try_put_varint(&mut self, value: VarInt) -> Result<usize>;
+    fn put_varint(&mut self, value: VarInt) -> usize;
+}
+
+impl VarintBuf for BytesMut {
+    fn try_read_varint(&mut self) -> Result<(VarInt, usize)> {
+        match read_varint(self.chunk()) {
+            Ok((varint, len)) => {
+                self.advance(len);
+                Ok((varint, len))
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn read_varint(&mut self) -> (VarInt, usize) {
+        self.try_read_varint().unwrap()
+    }
+
+    fn try_put_varint(&mut self, value: VarInt) -> Result<usize> {
+        put_varint(self, value)
+    }
+
+    fn put_varint(&mut self, value: VarInt) -> usize {
+        self.try_put_varint(value).unwrap()
+    }
+}
 
 /// Reads varint in little-endian and returns it with number of bytes read.
 /// If function returned `None`, then varint was invalid.
