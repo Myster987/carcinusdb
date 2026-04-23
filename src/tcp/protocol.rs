@@ -23,12 +23,12 @@
 //! +-------------------------------------------+
 //! ```
 
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 
 use crate::{
     sql::{record::Record, schema::Schema},
     tcp,
-    utils::bytes::{BytesCursor, VarInt, encode_to_varint, read_varint},
+    utils::bytes::{VarInt, VarintBuf, encode_to_varint, read_varint},
     vm::operator::Row,
 };
 
@@ -48,13 +48,14 @@ pub trait Encode {
 
 #[repr(u8)]
 pub enum MessageType {
-    // Query = b'Q',
+    Query = b'Q',
     Schema = b'S',
     Column = b'C',
     Record = b'R',
     Err = b'E',
     RowsAffected = b'A',
     End = b'Z',
+    Close = b'X',
 }
 
 impl TryFrom<u8> for MessageType {
@@ -62,21 +63,72 @@ impl TryFrom<u8> for MessageType {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         Ok(match value {
-            // b'Q' => Self::Query,
+            b'Q' => Self::Query,
             b'S' => Self::Schema,
             b'C' => Self::Column,
             b'R' => Self::Record,
             b'E' => Self::Err,
             b'A' => Self::RowsAffected,
             b'Z' => Self::End,
+            b'X' => Self::Close,
             _ => return Err(Self::Error::Corrupted),
         })
     }
 }
 
-pub enum Request<'a> {
-    Query(&'a str),
+#[derive(Debug)]
+pub enum Request {
+    Query(String),
     Close,
+    End,
+}
+
+impl Decode for Request {
+    fn decode(src: &mut BytesMut) -> tcp::Result<Self> {
+        let raw = src.chunk();
+        let (request_size, varint_len) = read_varint(raw).map_err(|_| tcp::Error::Incomplete)?;
+
+        let total_needed = varint_len + size_of::<MessageType>() + request_size as usize;
+
+        if src.remaining() < total_needed {
+            return Err(tcp::Error::Incomplete);
+        }
+        src.advance(varint_len);
+
+        let message_type = MessageType::try_from(src.get_u8())?;
+
+        Ok(match message_type {
+            MessageType::Query => {
+                let buffer = src.copy_to_bytes(request_size as usize).to_vec();
+                let sql = String::from_utf8(buffer).map_err(|_| tcp::Error::Corrupted)?;
+                Request::Query(sql)
+            }
+            MessageType::Close => Request::Close,
+            MessageType::End => Request::End,
+
+            _ => return Err(tcp::Error::Corrupted),
+        })
+    }
+}
+
+impl Encode for Request {
+    fn encode(&self, dst: &mut BytesMut) {
+        match self {
+            Self::Query(sql) => {
+                dst.put_varint(sql.len() as VarInt);
+                dst.put_u8(MessageType::Query as u8);
+                dst.put_slice(sql.as_bytes());
+            }
+            Self::End => {
+                dst.put_varint(0);
+                dst.put_u8(MessageType::End as u8);
+            }
+            Self::Close => {
+                dst.put_varint(0);
+                dst.put_u8(MessageType::Close as u8);
+            }
+        }
+    }
 }
 
 pub enum Response {
@@ -90,15 +142,13 @@ pub enum Response {
 impl Decode for Response {
     fn decode(src: &mut BytesMut) -> tcp::Result<Self> {
         let raw = src.chunk();
-
         let (response_size, varint_len) = read_varint(raw).map_err(|_| tcp::Error::Incomplete)?;
 
         let total_needed = varint_len + size_of::<MessageType>() + response_size as usize;
 
-        if total_needed < src.remaining() {
+        if src.remaining() < total_needed {
             return Err(tcp::Error::Incomplete);
         }
-
         src.advance(varint_len);
 
         let message_type = MessageType::try_from(src.get_u8())?;
@@ -113,33 +163,23 @@ impl Decode for Response {
                 Response::Row(record)
             }
             MessageType::RowsAffected => {
-                let (rows_affected, _) = read_varint(buf)
+                let (rows_affected, _) = src.read_varint();
                 Response::RowsAffected(rows_affected as usize)
             }
             MessageType::Err => {
-                let mut buffer = vec![0; response_size as usize];
-
-                src.try_read_exact(&mut buffer).map_err(|_| {
-                    src.set_position(position);
-                    tcp::Error::Incomplete
-                })?;
-
-                let error_message = String::from_utf8(buffer).map_err(|_| {
-                    src.set_position(position);
-                    tcp::Error::Corrupted
-                })?;
-
+                let buffer = src.copy_to_bytes(response_size as usize).to_vec();
+                let error_message = String::from_utf8(buffer).map_err(|_| tcp::Error::Corrupted)?;
                 Response::Error(error_message)
             }
             MessageType::End => Response::End,
 
-            _ => unreachable!(),
+            _ => return Err(tcp::Error::Corrupted),
         })
     }
 }
 
 impl Encode for Response {
-    fn encode(&self, dst: &mut BytesCursor<Vec<u8>>) {
+    fn encode(&self, dst: &mut BytesMut) {
         match self {
             Self::Schema(schema) => {
                 schema.encode(dst);
@@ -151,17 +191,65 @@ impl Encode for Response {
                 let rows_affected_varint = encode_to_varint(*n as VarInt);
                 dst.put_varint(rows_affected_varint.len() as VarInt);
                 dst.put_u8(MessageType::RowsAffected as u8);
-                dst.put_bytes(&rows_affected_varint);
+                dst.put_slice(&rows_affected_varint);
             }
             Self::Error(err) => {
                 dst.put_varint(err.len() as VarInt);
                 dst.put_u8(MessageType::Err as u8);
-                dst.put_bytes(err.as_bytes());
+                dst.put_slice(err.as_bytes());
             }
             Self::End => {
-                dst.put_varint(1);
+                dst.put_varint(0);
                 dst.put_u8(MessageType::End as u8);
             }
         }
+    }
+}
+
+pub struct CarcinusClientCodec;
+
+impl tokio_util::codec::Decoder for CarcinusClientCodec {
+    type Item = Response;
+    type Error = tcp::Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        match Response::decode(src) {
+            Ok(res) => Ok(Some(res)),
+            Err(tcp::Error::Incomplete) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+impl tokio_util::codec::Encoder<Request> for CarcinusClientCodec {
+    type Error = tcp::Error;
+
+    fn encode(&mut self, item: Request, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        item.encode(dst);
+        Ok(())
+    }
+}
+
+pub struct CarcinusServerCodec;
+
+impl tokio_util::codec::Decoder for CarcinusServerCodec {
+    type Item = Request;
+    type Error = tcp::Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        match Request::decode(src) {
+            Ok(req) => Ok(Some(req)),
+            Err(tcp::Error::Incomplete) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+impl tokio_util::codec::Encoder<Response> for CarcinusServerCodec {
+    type Error = tcp::Error;
+
+    fn encode(&mut self, item: Response, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        item.encode(dst);
+        Ok(())
     }
 }
