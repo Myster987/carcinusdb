@@ -316,6 +316,8 @@ impl protocol::Decode for Schema {
             return Err(tcp::Error::Incomplete);
         }
 
+        src.advance(varint_len);
+
         if src.get_u8() != MessageType::Schema as u8 {
             return Err(tcp::Error::Corrupted);
         }
@@ -406,6 +408,8 @@ impl protocol::Decode for Column {
             return Err(tcp::Error::Incomplete);
         }
 
+        src.advance(varint_len);
+
         if src.get_u8() != MessageType::Column as u8 {
             return Err(tcp::Error::Corrupted);
         }
@@ -413,6 +417,7 @@ impl protocol::Decode for Column {
         let data_type = ValueType::from(src.get_u8());
 
         let name_buffer = src.copy_to_bytes(column_name_size as usize).to_vec();
+
         let name = String::from_utf8(name_buffer).map_err(|_| tcp::Error::Corrupted)?;
 
         Ok(Self {

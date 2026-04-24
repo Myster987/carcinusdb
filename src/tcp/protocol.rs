@@ -80,7 +80,7 @@ impl TryFrom<u8> for MessageType {
 pub enum Request {
     Query(String),
     Close,
-    End,
+    // End,
 }
 
 impl Decode for Request {
@@ -104,8 +104,7 @@ impl Decode for Request {
                 Request::Query(sql)
             }
             MessageType::Close => Request::Close,
-            MessageType::End => Request::End,
-
+            // MessageType::End => Request::End,
             _ => return Err(tcp::Error::Corrupted),
         })
     }
@@ -119,10 +118,10 @@ impl Encode for Request {
                 dst.put_u8(MessageType::Query as u8);
                 dst.put_slice(sql.as_bytes());
             }
-            Self::End => {
-                dst.put_varint(0);
-                dst.put_u8(MessageType::End as u8);
-            }
+            // Self::End => {
+            //     dst.put_varint(0);
+            //     dst.put_u8(MessageType::End as u8);
+            // }
             Self::Close => {
                 dst.put_varint(0);
                 dst.put_u8(MessageType::Close as u8);
@@ -131,6 +130,7 @@ impl Encode for Request {
     }
 }
 
+#[derive(Debug)]
 pub enum Response {
     Schema(Schema),
     Row(Row),
@@ -149,9 +149,12 @@ impl Decode for Response {
         if src.remaining() < total_needed {
             return Err(tcp::Error::Incomplete);
         }
-        src.advance(varint_len);
 
-        let message_type = MessageType::try_from(src.get_u8())?;
+        // src.advance(varint_len);
+
+        // let message_type = MessageType::try_from(src.get_u8())?;
+
+        let message_type = MessageType::try_from(raw[varint_len])?;
 
         Ok(match message_type {
             MessageType::Schema => {
