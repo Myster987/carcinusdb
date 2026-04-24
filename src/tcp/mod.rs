@@ -11,11 +11,14 @@ pub enum Error {
     #[error("request is incomplete")]
     Incomplete,
 
-    #[error("request is corrupted")]
+    #[error("message is corrupted")]
     Corrupted,
 
     #[error("connection was closed before program finished")]
     ConnectionClosed,
+
+    #[error("{0}")]
+    ServerError(String),
 
     #[error(transparent)]
     SqlError(#[from] crate::sql::Error),
