@@ -3,6 +3,7 @@ use std::{ops::DerefMut, path::Path, sync::Arc};
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
 use thiserror::Error;
+use tokio::net::TcpListener;
 
 use crate::{
     os::{Open, OpenOptions},
@@ -20,7 +21,10 @@ use crate::{
         pager::Pager,
         wal::{WriteAheadLog, transaction::Transaction},
     },
-    tcp::server::{TcpServer, connection::Connection},
+    tcp::{
+        protocol::{Request, Response},
+        server::ServerConnection,
+    },
     utils::io::{BlockIO, IO},
     vm::{self, query_result::QueryResult},
 };
@@ -60,6 +64,9 @@ pub enum Error {
     #[error(transparent)]
     VmError(#[from] crate::vm::Error),
 
+    #[error(transparent)]
+    TcpError(#[from] crate::tcp::Error),
+
     // other
     #[error("error msg: {0}")]
     Other(String),
@@ -67,28 +74,77 @@ pub enum Error {
     Unknown,
 }
 
-pub fn run(db_path: impl AsRef<Path>, hostname: String, port: u16) -> Result<()> {
+pub async fn run(db_path: impl AsRef<Path>, hostname: String, port: u16) -> Result<()> {
     log::info!("Starting CarcinusDB...");
 
     let db = Arc::new(Database::open(db_path)?);
 
-    let addr = format!("{hostname}:{port}")
-        .parse()
-        .expect("Invalid hostname or port.");
+    let addr = format!("{hostname}:{port}");
 
-    let tcp_server = TcpServer::new(addr)?;
-    log::info!("Listening on: {}", tcp_server.local_addr());
+    let listener = TcpListener::bind(addr).await?;
+    log::info!("Listening on: {}", listener.local_addr().unwrap());
 
     loop {
-        let conn = tcp_server.accept_connection()?;
-        let db_clone = db.clone();
-        std::thread::spawn(move || handle_connection(db_clone, conn));
+        let (stream, addr) = listener.accept().await?;
+        let db_clone = Arc::clone(&db);
+
+        tokio::spawn(async move {
+            log::info!("New connection from: {addr}");
+
+            let conn = ServerConnection::new(stream);
+
+            if let Err(err) = handle_connection(db_clone, conn).await {
+                log::error!("Connection {addr} error: {err}");
+            }
+
+            log::info!("Connection {addr} closed");
+        });
     }
 
     Ok(())
 }
 
-pub fn handle_connection(db: Arc<Database>, conn: Connection) -> Result<()> {
+pub async fn handle_connection(db: Arc<Database>, mut conn: ServerConnection) -> Result<()> {
+    loop {
+        match conn.receive().await? {
+            Request::Query(sql) => {
+                log::trace!("Client SQL: {sql}");
+
+                let transaction = db.begin_transaction()?;
+                let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+
+                let handle = tokio::task::spawn_blocking(move || {
+                    {
+                        let result = transaction.execute(&sql)?;
+                        match result {
+                            QueryResult::RowsAffected(n) => {
+                                let _ = tx.blocking_send(Ok(Response::RowsAffected(n)));
+                            }
+                            QueryResult::Rows(iter) => {
+                                let _ =
+                                    tx.blocking_send(Ok(Response::Schema(iter.schema().clone())));
+                                for row in iter {
+                                    if tx.blocking_send(row.map(Response::Row)).is_err() {
+                                        break;
+                                    }
+                                }
+                                let _ = tx.blocking_send(Ok(Response::End));
+                            }
+                        }
+                    }
+                    transaction.commit()?;
+                    Ok::<_, Error>(())
+                });
+
+                while let Some(msg) = rx.recv().await {
+                    conn.send(msg?).await?;
+                }
+
+                handle.await.unwrap()?;
+            }
+            Request::Close => break,
+        }
+    }
     Ok(())
 }
 
