@@ -17,6 +17,9 @@ pub struct AtomicArray<const SIZE: usize> {
     backoff: Backoff,
 }
 
+unsafe impl<const SIZE: usize> Send for AtomicArray<SIZE> {}
+unsafe impl<const SIZE: usize> Sync for AtomicArray<SIZE> {}
+
 impl<const SIZE: usize> AtomicArray<SIZE> {
     const FREE_SLOT: u32 = 0;
 

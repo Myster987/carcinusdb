@@ -26,6 +26,9 @@ pub struct Record<'a> {
     cursor: Rc<RefCell<RecordCursor>>,
 }
 
+unsafe impl Send for Record<'_> {}
+unsafe impl Sync for Record<'_> {}
+
 impl<'a> Record<'a> {
     pub fn new(payload: Cow<'a, [u8]>) -> Self {
         let cursor = Rc::new(RefCell::new(RecordCursor::new()));

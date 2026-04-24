@@ -17,6 +17,9 @@ pub struct BufferPool {
     pool: SegQueue<NonNull<u8>>,
 }
 
+unsafe impl Send for BufferPool {}
+unsafe impl Sync for BufferPool {}
+
 impl BufferPool {
     pub fn default(page_size: usize) -> Self {
         Self::new(page_size, DEFAULT_POOL_SIZE)

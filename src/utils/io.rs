@@ -297,6 +297,9 @@ pub struct BlockIO<I> {
     header_size: usize,
 }
 
+unsafe impl<F: Send> Send for BlockIO<F> {}
+unsafe impl<F: Send> Sync for BlockIO<F> {}
+
 impl<I> BlockIO<I> {
     pub fn new(io: I, block_size: usize, header_size: usize) -> Self {
         Self {

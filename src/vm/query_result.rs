@@ -14,6 +14,8 @@ pub enum QueryResult<'tx> {
     RowsAffected(usize),
 }
 
+unsafe impl Send for QueryResult<'_> {}
+
 impl<'tx> QueryResult<'tx> {
     pub fn to_string(self) -> vm::Result<String> {
         match self {

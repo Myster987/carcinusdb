@@ -19,6 +19,8 @@ pub struct Transaction {
     pub has_modified_pages: bool,
 }
 
+unsafe impl Send for Transaction {}
+
 impl Transaction {
     pub fn new(min_frame: FrameNumber, max_frame: FrameNumber) -> Self {
         Self {

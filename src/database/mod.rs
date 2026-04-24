@@ -1,6 +1,7 @@
-use std::{cell::RefCell, ops::DerefMut, path::Path, rc::Rc, sync::Arc};
+use std::{ops::DerefMut, path::Path, sync::Arc};
 
 use arc_swap::ArcSwap;
+use parking_lot::Mutex;
 use thiserror::Error;
 
 use crate::{
@@ -211,7 +212,7 @@ impl Database {
         let catalog = {
             let tx = pager.wal.begin_transaction()?;
             let cursor = BTreeCursor::new(
-                Rc::new(RefCell::new(tx)),
+                Arc::new(Mutex::new(tx)),
                 &pager,
                 CARCINUSDB_MASTER_TABLE_ROOT,
                 1,
@@ -272,7 +273,7 @@ impl Database {
         let wal_tx = self.pager.wal.begin_transaction()?;
 
         Ok(DatabaseTransaction {
-            wal_tx: Rc::new(RefCell::new(wal_tx)),
+            wal_tx: Arc::new(Mutex::new(wal_tx)),
             pager: self.pager.clone(),
             catalog: self.catalog.clone(),
         })
@@ -280,7 +281,7 @@ impl Database {
 }
 
 pub struct DatabaseTransaction {
-    wal_tx: Rc<RefCell<Transaction>>,
+    wal_tx: Arc<Mutex<Transaction>>,
     pager: Arc<Pager>,
     catalog: Arc<Catalog>,
 }
@@ -307,7 +308,7 @@ impl DatabaseTransaction {
 
     #[must_use]
     pub fn commit(self) -> Result<()> {
-        let mut wal_tx = Rc::into_inner(self.wal_tx)
+        let mut wal_tx = Arc::into_inner(self.wal_tx)
             .expect("Something is still using this transaction")
             .into_inner();
 
@@ -334,7 +335,7 @@ impl DatabaseTransaction {
 
     pub fn create_btree(&self, btree_type: BTreeType) -> storage::Result<PageNumber> {
         self.pager
-            .btree_create(self.wal_tx.borrow_mut().deref_mut(), btree_type)
+            .btree_create(self.wal_tx.lock().deref_mut(), btree_type)
     }
 }
 
