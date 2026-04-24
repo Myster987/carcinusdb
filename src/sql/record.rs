@@ -1,4 +1,9 @@
-use std::{borrow::Cow, cell::RefCell, fmt::Debug, rc::Rc};
+use std::{
+    borrow::Cow,
+    cell::RefCell,
+    fmt::{Debug, Display},
+    rc::Rc,
+};
 
 use bytes::{Buf, BufMut, BytesMut};
 
@@ -116,7 +121,23 @@ impl<'a> Debug for Record<'a> {
 
         dbg_table.insert_row(row);
 
-        dbg_table.fmt(f)
+        Debug::fmt(&dbg_table, f)
+    }
+}
+
+impl<'a> Display for Record<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut dbg_table = DebugTable::new();
+        let mut row = Vec::new();
+
+        for i in 0..self.len() {
+            dbg_table.add_column(&format!("column {} value", i + 1));
+            row.push(format!("{}", self.get_value(i)));
+        }
+
+        dbg_table.insert_row(row);
+
+        Display::fmt(&dbg_table, f)
     }
 }
 
@@ -378,7 +399,7 @@ impl Debug for RecordMut {
 
         dbg_table.insert_row(row);
 
-        dbg_table.fmt(f)
+        Debug::fmt(&dbg_table, f)
     }
 }
 
