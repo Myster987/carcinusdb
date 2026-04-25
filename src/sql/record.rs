@@ -1,9 +1,4 @@
-use std::{
-    borrow::Cow,
-    cell::RefCell,
-    fmt::{Debug, Display},
-    rc::Rc,
-};
+use std::{borrow::Cow, cell::RefCell, fmt::Debug, rc::Rc};
 
 use bytes::{Buf, BufMut, BytesMut};
 
@@ -25,7 +20,7 @@ use crate::{
 pub const MAX_COLUMN_COUNT: usize = 2000;
 
 /// Immutable view to database row.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Record<'a> {
     payload: Cow<'a, [u8]>,
     cursor: Rc<RefCell<RecordCursor>>,
@@ -106,38 +101,6 @@ impl<'a> Record<'a> {
             payload: Cow::Borrowed(&self.payload),
             cursor: Rc::new(RefCell::new(self.cursor.borrow().clone())),
         }
-    }
-}
-
-impl<'a> Debug for Record<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut dbg_table = DebugTable::new();
-        let mut row = Vec::new();
-
-        for i in 0..self.len() {
-            dbg_table.add_column(&format!("column {} value", i + 1));
-            row.push(format!("{:?}", self.get_value(i)));
-        }
-
-        dbg_table.insert_row(row);
-
-        Debug::fmt(&dbg_table, f)
-    }
-}
-
-impl<'a> Display for Record<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut dbg_table = DebugTable::new();
-        let mut row = Vec::new();
-
-        for i in 0..self.len() {
-            dbg_table.add_column(&format!("column {} value", i + 1));
-            row.push(format!("{}", self.get_value(i)));
-        }
-
-        dbg_table.insert_row(row);
-
-        Display::fmt(&dbg_table, f)
     }
 }
 
