@@ -4,7 +4,7 @@ use crate::{
     database::DatabaseTransaction,
     sql::{
         parser::statement::{Assignment, Expression},
-        record::{RecordBuilder, RecordMut},
+        record::{Record, RecordBuilder, RecordMut},
         schema::{IndexMetadata, Schema},
         types::Value,
     },
@@ -27,7 +27,8 @@ pub fn plan_update<'tx>(
     columns: Vec<Assignment>,
     r#where: Option<Expression>,
     returning: Option<Vec<Expression>>,
-) -> vm::Result<Box<dyn Operator + 'tx>> {
+) -> vm::Result<Update<'tx>> {
+    let is_returning = returning.is_some();
     let table = tx.catalog().get_table(&table)?;
 
     let mut plan: Box<dyn Operator + 'tx> = match find_index(&r#where, &table) {
@@ -50,13 +51,13 @@ pub fn plan_update<'tx>(
                 .map(|idx| (idx.clone(), tx.cursor(idx.root)))
                 .collect();
 
-            Box::new(Update::with_index_source(
+            Box::new(UpdateInner::with_index_source(
                 table_cursor,
                 source,
                 table.schema,
                 columns,
                 index_cursors,
-                returning.is_some(),
+                is_returning,
             ))
         }
         // no matching index found. fallback to sequential scan. still corect,
@@ -68,7 +69,7 @@ pub fn plan_update<'tx>(
                 .map(|idx| (idx.clone(), tx.cursor(idx.root)))
                 .collect();
 
-            Box::new(Update::sequential_scan(
+            Box::new(UpdateInner::sequential_scan(
                 tx.cursor(table.root),
                 table.schema.clone(),
                 columns,
@@ -83,10 +84,28 @@ pub fn plan_update<'tx>(
         plan = Box::new(Projection::new(plan, returning)?);
     };
 
-    Ok(plan)
+    Ok(Update {
+        child: plan,
+        is_returning,
+    })
 }
 
 pub struct Update<'tx> {
+    child: Box<dyn Operator + 'tx>,
+    pub is_returning: bool,
+}
+
+impl<'tx> Operator for Update<'tx> {
+    fn schema(&self) -> &Schema {
+        self.child.schema()
+    }
+
+    fn next(&mut self) -> vm::Result<Option<Row>> {
+        self.child.next()
+    }
+}
+
+struct UpdateInner<'tx> {
     cursor: Rc<RefCell<BTreeCursor<'tx>>>,
     source: Box<dyn Operator + 'tx>,
     assignments: HashMap<usize, Value>,
@@ -94,7 +113,7 @@ pub struct Update<'tx> {
     update_options: UpdateOptions,
 }
 
-impl<'tx> Update<'tx> {
+impl<'tx> UpdateInner<'tx> {
     pub fn sequential_scan(
         cursor: BTreeCursor<'tx>,
         schema: Schema,
@@ -171,7 +190,7 @@ impl<'tx> Update<'tx> {
     }
 }
 
-impl<'tx> Operator for Update<'tx> {
+impl<'tx> Operator for UpdateInner<'tx> {
     fn next(&mut self) -> vm::Result<Option<Row>> {
         let Some(row) = self.source.next()? else {
             return Ok(None);
@@ -216,7 +235,7 @@ impl<'tx> Operator for Update<'tx> {
             index_cursor.update(&old_key, new_key, InsertOptions::default())?;
         }
 
-        return Ok(inserted_record);
+        return Ok(inserted_record.or(Some(Record::empty())));
     }
 
     fn schema(&self) -> &Schema {

@@ -1,12 +1,16 @@
 use crate::{
     database::DatabaseTransaction,
     sql::parser::statement::{Create, Drop, Statement},
-    vm::{self, dml, operator::Operator},
+    vm::{self, dml},
 };
 
 pub enum ExecutionPlan<'tx> {
     // iterator based
-    Query(Box<dyn Operator + 'tx>),
+    // Query(Box<dyn Operator + 'tx>),
+    Select(dml::select::Select<'tx>),
+    Insert(dml::insert::Insert<'tx>),
+    Update(dml::update::Update<'tx>),
+    Delete(dml::delete::Delete<'tx>),
 
     // table or index
     Create(Create),
@@ -30,7 +34,7 @@ pub fn plan(statement: Statement, tx: &DatabaseTransaction) -> vm::Result<Execut
             order_by,
         } => {
             let select = dml::select::plan_select(tx, columns, from, r#where, order_by)?;
-            Ok(ExecutionPlan::Query(select))
+            Ok(ExecutionPlan::Select(select))
         }
         Statement::Insert {
             into,
@@ -39,7 +43,7 @@ pub fn plan(statement: Statement, tx: &DatabaseTransaction) -> vm::Result<Execut
             returning,
         } => {
             let insert = dml::insert::plan_insert(tx, into, columns, values, returning)?;
-            Ok(ExecutionPlan::Query(insert))
+            Ok(ExecutionPlan::Insert(insert))
         }
         Statement::Update {
             table,
@@ -48,7 +52,7 @@ pub fn plan(statement: Statement, tx: &DatabaseTransaction) -> vm::Result<Execut
             returning,
         } => {
             let update = dml::update::plan_update(tx, table, columns, r#where, returning)?;
-            Ok(ExecutionPlan::Query(update))
+            Ok(ExecutionPlan::Update(update))
         }
         Statement::Delete {
             from,
@@ -56,7 +60,7 @@ pub fn plan(statement: Statement, tx: &DatabaseTransaction) -> vm::Result<Execut
             returning,
         } => {
             let delete = dml::delete::plan_delete(tx, from, r#where, returning)?;
-            Ok(ExecutionPlan::Query(delete))
+            Ok(ExecutionPlan::Delete(delete))
         }
 
         Statement::Create(s) => Ok(ExecutionPlan::Create(s)),
