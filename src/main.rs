@@ -11,9 +11,9 @@ mod vm;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     simple_logger::init()?;
-    dotenvy::dotenv()?;
+    // dotenvy::dotenv()?;
 
-    let db_path = env::var("CARCINUSDB_PATH")?;
+    let db_path = env::args().nth(1).expect("DB path not provided");
     let hostname = env::var("CARCINUSDB_HOSTNAME").unwrap_or("127.0.0.1".to_string());
     let port = env::var("CARCINUSDB_PORT")
         .unwrap_or("4000".to_string())
