@@ -1,26 +1,56 @@
-//! Protocol used by CarcinusDB:
+//! Protocol used by CarcinusDB.
 //!
-//! Response format:
+//! Every message (both requests and responses) shares the same frame layout:
 //!
 //! ```text
-//! +-------------------------------------------+
-//! |    HEADER - response type ("a" or "i")    |
-//! +-------------------------------------------+
-//! | Schema:                                   |
-//! |   - Schema len - varint                   |
-//! |   - N Columns:                            |
-//! |       - Column name len in bytes - varint |
-//! |       - Column name - n bytes             |
-//! |       - Column data type - 1 byte         |
-//! +-------------------------------------------+
-//! |                  BODY                     |
-//! +-------------------------------------------+
-//! | N Rows:                                   |
-//! |   - type -> OK (o) or ERROR (r) - 1 byte  |
-//! |   - raw row in DB format for fast parse   |
-//! +-------------------------------------------+
-//! |               END - \r\n                  |
-//! +-------------------------------------------+
+//! +-----------------------------------+
+//! | payload_len  - varint             |  length of everything after this field
+//! | message_type - 1 byte (ASCII)     |  see table below
+//! | payload      - payload_len bytes  |
+//! +-----------------------------------+
+//! ```
+//!
+//! Message types:
+//!
+//! ```text
+//! | Tag | Name         | Direction        | Payload                              |
+//! |-----|--------------|------------------|--------------------------------------|
+//! | 'Q' | Query        | Client → Server  | UTF-8 SQL string                     |
+//! | 'X' | Close        | Client → Server  | (empty)                              |
+//! | 'S' | Schema       | Server → Client  | varint col_count, then per column:   |
+//! |     |              |                  |   varint name_len, name bytes,       |
+//! |     |              |                  |   1 byte data type                   |
+//! | 'R' | Record       | Server → Client  | raw row in DB serialization format   |
+//! | 'A' | RowsAffected | Server → Client  | varint row count                     |
+//! | 'E' | Error        | Server → Client  | UTF-8 error message                  |
+//! | 'Z' | End          | Server → Client  | (empty) — terminates a response      |
+//! ```
+//!
+//! A typical successful SELECT exchange looks like:
+//!
+//! ```text
+//! Client:  [Q] "SELECT * FROM users"
+//! Server:  [S] schema
+//!          [R] row
+//!          [R] row
+//!          ...
+//!          [Z] end
+//! ```
+//!
+//! A DML statement (INSERT / UPDATE / DELETE):
+//!
+//! ```text
+//! Client:  [Q] "INSERT INTO ..."
+//! Server:  [A] rows affected
+//!          [Z] end
+//! ```
+//!
+//! On error:
+//!
+//! ```text
+//! Client:  [Q] "SELECT * FROM nonexistent"
+//! Server:  [E] error message
+//!          [Z] end
 //! ```
 
 use bytes::{Buf, BufMut, BytesMut};
