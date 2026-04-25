@@ -196,15 +196,20 @@ impl Decode for Response {
                 Response::Row(record)
             }
             MessageType::RowsAffected => {
+                src.advance(varint_len + 1);
                 let (rows_affected, _) = src.read_varint();
                 Response::RowsAffected(rows_affected as usize)
             }
             MessageType::Err => {
+                src.advance(varint_len + 1);
                 let buffer = src.copy_to_bytes(response_size as usize).to_vec();
                 let error_message = String::from_utf8(buffer).map_err(|_| tcp::Error::Corrupted)?;
                 Response::Error(error_message)
             }
-            MessageType::End => Response::End,
+            MessageType::End => {
+                src.advance(varint_len + 1);
+                Response::End
+            }
 
             _ => return Err(tcp::Error::Corrupted),
         })
