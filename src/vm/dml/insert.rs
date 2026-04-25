@@ -1,4 +1,4 @@
-use std::mem;
+use std::{collections::VecDeque, mem};
 
 use hashbrown::HashSet;
 
@@ -6,7 +6,7 @@ use crate::{
     database::DatabaseTransaction,
     sql::{
         parser::statement::Expression,
-        record::{RecordBuilder, RecordMut},
+        record::{Record, RecordBuilder, RecordMut},
         schema::{IndexMetadata, Schema},
         types::Value,
     },
@@ -23,7 +23,9 @@ pub fn plan_insert<'tx>(
     columns: Vec<String>,
     values: Vec<Vec<Expression>>,
     returning: Option<Vec<Expression>>,
-) -> vm::Result<Box<dyn Operator + 'tx>> {
+) -> vm::Result<Insert<'tx>> {
+    let is_returning = returning.is_some();
+    let values = VecDeque::from(values);
     let table = tx.catalog().get_table(&into)?;
 
     let index_cursors = table
@@ -32,39 +34,56 @@ pub fn plan_insert<'tx>(
         .map(|idx| (idx.clone(), tx.cursor(idx.root)))
         .collect();
 
-    let mut plan: Box<dyn Operator + 'tx> = Box::new(Insert::new(
+    let mut plan: Box<dyn Operator + 'tx> = Box::new(InsertInner::new(
         tx.cursor(table.root),
         table.schema,
         columns,
         values,
         index_cursors,
-        returning.is_some(),
+        is_returning,
     ));
 
     if let Some(returning) = returning {
         plan = Box::new(Projection::new(plan, returning)?);
     };
 
-    Ok(plan)
+    Ok(Insert {
+        child: plan,
+        is_returning,
+    })
 }
 
 pub struct Insert<'tx> {
+    child: Box<dyn Operator + 'tx>,
+    pub is_returning: bool,
+}
+
+impl<'tx> Operator for Insert<'tx> {
+    fn schema(&self) -> &Schema {
+        self.child.schema()
+    }
+
+    fn next(&mut self) -> vm::Result<Option<Row>> {
+        self.child.next()
+    }
+}
+
+struct InsertInner<'tx> {
     cursor: BTreeCursor<'tx>,
     schema: Schema,
     indices: HashSet<usize>,
-    values: Vec<Vec<Expression>>,
-    current: usize,
+    values: VecDeque<Vec<Expression>>,
     temp_record: RecordMut,
     index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx>)>,
     insert_options: InsertOptions,
 }
 
-impl<'tx> Insert<'tx> {
+impl<'tx> InsertInner<'tx> {
     pub fn new(
         cursor: BTreeCursor<'tx>,
         schema: Schema,
         columns: Vec<String>,
-        values: Vec<Vec<Expression>>,
+        values: VecDeque<Vec<Expression>>,
         index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx>)>,
         is_returning: bool,
     ) -> Self {
@@ -84,7 +103,6 @@ impl<'tx> Insert<'tx> {
             schema,
             indices,
             values,
-            current: 0,
             temp_record: RecordMut::new(),
             index_cursors,
             insert_options,
@@ -92,14 +110,11 @@ impl<'tx> Insert<'tx> {
     }
 }
 
-impl<'tx> Operator for Insert<'tx> {
+impl<'tx> Operator for InsertInner<'tx> {
     fn next(&mut self) -> vm::Result<Option<Row>> {
-        if self.current >= self.values.len() {
+        let Some(mut row) = self.values.pop_front() else {
             return Ok(None);
-        }
-
-        let mut row = mem::take(&mut self.values[self.current]);
-        self.current += 1;
+        };
 
         let row_id = row
             .first()
@@ -145,7 +160,7 @@ impl<'tx> Operator for Insert<'tx> {
             index_cursor.insert(key, InsertOptions::default())?;
         }
 
-        Ok(inserted_record)
+        Ok(inserted_record.or(Some(Record::empty())))
     }
 
     fn schema(&self) -> &Schema {

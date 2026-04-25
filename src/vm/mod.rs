@@ -49,7 +49,43 @@ pub fn execute<'a>(
     plan: ExecutionPlan<'a>,
 ) -> Result<QueryResult<'a>> {
     match plan {
-        ExecutionPlan::Query(operator) => Ok(QueryResult::Rows(RowIterator::new(operator))),
+        ExecutionPlan::Select(operator) => {
+            Ok(QueryResult::Rows(RowIterator::new(Box::new(operator))))
+        }
+
+        ExecutionPlan::Delete(operator) => {
+            Ok(QueryResult::Rows(RowIterator::new(Box::new(operator))))
+        }
+
+        ExecutionPlan::Insert(insert) => {
+            let is_returning = insert.is_returning;
+            let row_iterator = RowIterator::new(Box::new(insert));
+            if is_returning {
+                Ok(QueryResult::Rows(row_iterator))
+            } else {
+                let mut inserted = 0;
+                for row_result in row_iterator {
+                    let _ = row_result?;
+                    inserted += 1;
+                }
+                Ok(QueryResult::RowsAffected(inserted))
+            }
+        }
+
+        ExecutionPlan::Update(update) => {
+            let is_returning = update.is_returning;
+            let row_iterator = RowIterator::new(Box::new(update));
+            if is_returning {
+                Ok(QueryResult::Rows(row_iterator))
+            } else {
+                let mut updated = 0;
+                for row_result in row_iterator {
+                    let _ = row_result?;
+                    updated += 1;
+                }
+                Ok(QueryResult::RowsAffected(updated))
+            }
+        }
 
         ExecutionPlan::Create(create) => ddl::create(tx, create),
 

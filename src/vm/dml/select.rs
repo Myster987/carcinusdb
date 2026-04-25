@@ -21,7 +21,7 @@ pub fn plan_select<'tx>(
     from: String,
     r#where: Option<Expression>,
     order_by: Vec<Expression>,
-) -> vm::Result<Box<dyn Operator + 'tx>> {
+) -> vm::Result<Select<'tx>> {
     let table = tx.catalog().get_table(&from)?;
 
     let (scan, residual): (Box<dyn Operator + 'tx>, Option<Expression>) =
@@ -64,7 +64,7 @@ pub fn plan_select<'tx>(
         plan = Box::new(Projection::new(plan, columns)?);
     }
 
-    Ok(Box::new(Select { operator: plan }))
+    Ok(Select { operator: plan })
 }
 
 pub struct Select<'tx> {

@@ -26,7 +26,7 @@ pub fn plan_delete<'tx>(
     from: String,
     r#where: Option<Expression>,
     returning: Option<Vec<Expression>>,
-) -> vm::Result<Box<dyn Operator + 'tx>> {
+) -> vm::Result<Delete<'tx>> {
     let table = tx.catalog().get_table(&from)?;
 
     let mut plan: Box<dyn Operator + 'tx> = match find_index(&r#where, &table) {
@@ -49,7 +49,7 @@ pub fn plan_delete<'tx>(
                 .map(|idx| (idx.clone(), tx.cursor(idx.root)))
                 .collect();
 
-            Box::new(Delete::with_index_source(
+            Box::new(DeleteInner::with_index_source(
                 table_cursor,
                 source,
                 index_cursors,
@@ -64,7 +64,7 @@ pub fn plan_delete<'tx>(
                 .map(|idx| (idx.clone(), tx.cursor(idx.root)))
                 .collect();
 
-            Box::new(Delete::sequential_scan(
+            Box::new(DeleteInner::sequential_scan(
                 tx.cursor(table.root),
                 table.schema.clone(),
                 r#where,
@@ -77,16 +77,30 @@ pub fn plan_delete<'tx>(
         plan = Box::new(Projection::new(plan, returning)?);
     }
 
-    Ok(plan)
+    Ok(Delete { child: plan })
 }
 
 pub struct Delete<'tx> {
+    child: Box<dyn Operator + 'tx>,
+}
+
+impl<'tx> Operator for Delete<'tx> {
+    fn schema(&self) -> &Schema {
+        self.child.schema()
+    }
+
+    fn next(&mut self) -> vm::Result<Option<Row>> {
+        self.child.next()
+    }
+}
+
+struct DeleteInner<'tx> {
     cursor: Rc<RefCell<BTreeCursor<'tx>>>,
     source: Box<dyn Operator + 'tx>,
     index_cursors: Vec<(IndexMetadata, BTreeCursor<'tx>)>,
 }
 
-impl<'tx> Delete<'tx> {
+impl<'tx> DeleteInner<'tx> {
     pub fn sequential_scan(
         cursor: BTreeCursor<'tx>,
         schema: Schema,
@@ -122,7 +136,7 @@ impl<'tx> Delete<'tx> {
     }
 }
 
-impl<'tx> Operator for Delete<'tx> {
+impl<'tx> Operator for DeleteInner<'tx> {
     fn next(&mut self) -> vm::Result<Option<Row>> {
         let Some(row) = self.source.next()? else {
             return Ok(None);
