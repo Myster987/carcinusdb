@@ -99,7 +99,7 @@ pub fn read_varint(buf: &[u8]) -> Result<(VarInt, usize)> {
 pub fn encode_to_varint(mut value: VarInt) -> Vec<u8> {
     let mut bytes = Vec::new();
     loop {
-        let mut byte = (value & 0x7F) as u8;
+        let mut byte = (value as u8 & PAYLOAD_MASK) as u8;
         value >>= 7;
 
         if value != 0 {
