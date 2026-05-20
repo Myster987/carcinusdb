@@ -115,7 +115,14 @@ pub async fn handle_connection(db: Arc<Database>, mut conn: ServerConnection) ->
 
                 let handle = tokio::task::spawn_blocking(move || {
                     {
-                        let result = transaction.execute(&sql)?;
+                        let result = match transaction.execute(&sql) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                log::error!("{e}");
+                                let _ = tx.blocking_send(Ok(Response::Error(e.to_string())));
+                                return Ok(());
+                            }
+                        };
                         match result {
                             QueryResult::RowsAffected(n) => {
                                 let _ = tx.blocking_send(Ok(Response::RowsAffected(n)));
