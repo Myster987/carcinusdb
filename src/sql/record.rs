@@ -70,10 +70,6 @@ impl<'a> Record<'a> {
         self.payload.len()
     }
 
-    pub fn count(&self) -> usize {
-        self.cursor.borrow_mut().len(&self.payload)
-    }
-
     pub fn len(&self) -> usize {
         self.cursor.borrow_mut().len(&self.payload)
     }
