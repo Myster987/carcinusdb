@@ -98,6 +98,14 @@ impl<'a> Record<'a> {
             cursor: Rc::new(RefCell::new(self.cursor.borrow().clone())),
         }
     }
+
+    pub fn deserialize(buffer: &[u8]) -> sql::Result<Self> {
+        let mut cursor = RecordCursor::new();
+        cursor.full_parse(buffer)?;
+        let row_buf = buffer[..cursor.parsed_bytes].to_vec();
+
+        Ok(Self::from_owned_with_cursor(row_buf, cursor))
+    }
 }
 
 impl<'a> protocol::Decode for Record<'a> {
