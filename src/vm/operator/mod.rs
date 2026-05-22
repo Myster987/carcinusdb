@@ -3,6 +3,7 @@ use crate::{
     vm,
 };
 
+pub mod collect;
 pub mod filter;
 pub mod index_scan;
 pub mod projection;
