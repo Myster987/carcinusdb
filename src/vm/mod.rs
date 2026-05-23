@@ -31,6 +31,9 @@ pub enum Error {
     #[error("unsupported expression: {0}")]
     Unsupported(Expression),
 
+    #[error("data was currupted.")]
+    Corrupted,
+
     #[error(transparent)]
     StorageError(#[from] crate::storage::Error),
 
