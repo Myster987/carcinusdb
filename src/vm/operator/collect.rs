@@ -1,7 +1,8 @@
 use std::{
     cmp::Ordering,
     collections::VecDeque,
-    io::{self, BufReader, Read, Seek, Write},
+    fs::File,
+    io::{self, BufRead, BufReader, Read, Seek, Write},
 };
 
 use crate::vm::{
@@ -151,5 +152,76 @@ impl RowBuffer {
 
     pub fn sort_by(&mut self, cmp: impl FnMut(&Row, &Row) -> Ordering) {
         self.rows.make_contiguous().sort_by(cmp);
+    }
+}
+
+pub struct Collect<'tx> {
+    source: Box<dyn Operator + 'tx>,
+
+    /// `true` if iterator is empty.
+    collected: bool,
+
+    /// In memory row buffer.
+    mem_buffer: RowBuffer,
+    /// If rows can't fit in memory they are stored in temp file.
+    file: Option<File>,
+
+    /// If rows can't fit in memory then reader is needed.
+    reader: Option<BufReader<File>>,
+}
+
+impl<'tx> Collect<'tx> {
+    pub fn new(source: Box<dyn Operator + 'tx>, mem_buffer_size: usize, packed: bool) -> Self {
+        Self {
+            source,
+            collected: false,
+            mem_buffer: RowBuffer::new(mem_buffer_size, packed),
+            file: None,
+            reader: None,
+        }
+    }
+
+    fn collect(&mut self) -> vm::Result<()> {
+        while let Some(row) = self.source.next()? {
+            if !self.mem_buffer.can_fit(&row) {
+                if self.file.is_none() {
+                    let temp_file = tempfile::tempfile().map_err(|_| vm::Error::Corrupted)?;
+                    self.file = Some(temp_file);
+                }
+                self.mem_buffer
+                    .write_to(self.file.as_mut().unwrap())
+                    .map_err(|_| vm::Error::Corrupted)?;
+                self.mem_buffer.clear();
+            }
+
+            self.mem_buffer.push(row);
+        }
+
+        if let Some(mut file) = self.file.take() {
+            file.rewind().map_err(|_| vm::Error::Corrupted)?;
+            self.reader = Some(BufReader::with_capacity(self.mem_buffer.page_size, file));
+        }
+
+        Ok(())
+    }
+
+    pub fn next(&mut self) -> vm::Result<Option<Row>> {
+        if !self.collected {
+            self.collect()?;
+            self.collected = true;
+        }
+
+        if let Some(reader) = self.reader.as_mut() {
+            let has_data_left = reader
+                .fill_buf()
+                .map(|r| !r.is_empty())
+                .map_err(|_| vm::Error::Corrupted)?;
+
+            if has_data_left {
+                return Ok(Some(self.mem_buffer.read_from(reader)));
+            }
+        }
+
+        Ok(self.mem_buffer.pop_front())
     }
 }
