@@ -218,7 +218,7 @@ impl<'tx> Collect<'tx> {
                 .map_err(|_| vm::Error::Corrupted)?;
 
             if has_data_left {
-                return Ok(Some(self.mem_buffer.read_from(reader)));
+                // return Ok(Some(self.mem_buffer.read_from(reader)));
             }
         }
 
