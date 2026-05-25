@@ -1,10 +1,8 @@
 use std::{
     borrow::Cow,
-    cell::RefCell,
     cmp::{Ordering, min},
     collections::VecDeque,
     ops::DerefMut,
-    rc::Rc,
     sync::Arc,
 };
 
@@ -414,23 +412,6 @@ impl<'tx> BTreeCursor<'tx> {
 
         Ok(self.row_id()? + 1)
     }
-
-    // fn restore(&mut self) -> storage::Result<bool> {
-    //     match std::mem::replace(&mut self.state, CursorState::Valid) {
-    //         CursorState::RequireSeek(key) => {
-    //             let seek_result = self.seek(&key)?;
-    //         }
-    //         CursorState::Done => {
-    //             self.state = CursorState::Done;
-    //             Ok(false)
-    //         }
-    //         CursorState::Uninitialized => {
-    //             let found = self.seek_first()?;
-    //             Ok(found)
-    //         }
-    //         CursorState::Valid => Ok(true),
-    //     }
-    // }
 
     fn invalidate(&mut self, key: BTreeKey<'static>) {
         self.state = CursorState::RequireSeek(key);
