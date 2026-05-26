@@ -8,6 +8,7 @@ pub mod filter;
 pub mod index_scan;
 pub mod projection;
 pub mod seq_scan;
+pub mod sort;
 
 pub type Row = Record<'static>;
 
