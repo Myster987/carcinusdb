@@ -25,3 +25,4 @@ tokio-util = { version = "0.7.18", features = ["codec"]}
 bytes = "1.11.1"
 futures = "0.3.32"
 tokio-stream = "0.1.18"
+tempfile = "3.27.0"
