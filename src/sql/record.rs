@@ -19,7 +19,7 @@ use crate::{
 
 pub const MAX_COLUMN_COUNT: usize = 2000;
 
-/// Immutable view to database row.
+/// Immutable view to database record.
 #[derive(Debug, Clone)]
 pub struct Record {
     payload: Bytes,
@@ -96,9 +96,9 @@ impl Record {
     pub fn deserialize(buffer: &[u8]) -> sql::Result<Self> {
         let mut cursor = RecordCursor::new();
         cursor.full_parse(buffer)?;
-        let row_buf = buffer[..cursor.parsed_bytes].to_vec();
+        let record_buf = buffer[..cursor.parsed_bytes].to_vec();
 
-        Ok(Self::new_with_cursor(row_buf, cursor))
+        Ok(Self::new_with_cursor(record_buf, cursor))
     }
 }
 

@@ -1,17 +1,14 @@
 use std::fmt::Debug;
 
 use crate::{
-    sql::schema::Schema,
+    sql::{record::Record, schema::Schema},
     utils::debug_table::DebugTable,
-    vm::{
-        self,
-        operator::{Operator, Row},
-    },
+    vm::{self, operator::Operator},
 };
 
 pub enum QueryResult<'tx> {
-    Rows(RowIterator<'tx>),
-    RowsAffected(usize),
+    Records(RecordIterator<'tx>),
+    RecordsAffected(usize),
 }
 
 unsafe impl Send for QueryResult<'_> {}
@@ -19,16 +16,16 @@ unsafe impl Send for QueryResult<'_> {}
 impl<'tx> QueryResult<'tx> {
     pub fn to_string(self) -> vm::Result<String> {
         match self {
-            Self::RowsAffected(affected) => Ok(format!("{} rows affected", affected)),
-            Self::Rows(rows) => {
-                let columns = rows.operator.schema().column_names();
-                let collected = rows.collect::<vm::Result<Vec<_>>>()?;
+            Self::RecordsAffected(affected) => Ok(format!("{} rows affected", affected)),
+            Self::Records(records) => {
+                let columns = records.operator.schema().column_names();
+                let collected = records.collect::<vm::Result<Vec<_>>>()?;
 
                 let mut table = DebugTable::new();
                 columns.iter().for_each(|col| table.add_column(col));
 
-                for row in &collected {
-                    table.insert_row(row.values().iter().map(|v| v.to_string()).collect());
+                for record in &collected {
+                    table.insert_row(record.values().iter().map(|v| v.to_string()).collect());
                 }
 
                 Ok(format!("{}", table))
@@ -40,17 +37,19 @@ impl<'tx> QueryResult<'tx> {
 impl Debug for QueryResult<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Rows(_) => f.write_str("QueryResult::Rows(iterator)"),
-            Self::RowsAffected(affected) => write!(f, "QueryResult::RowsAffected({})", affected),
+            Self::Records(_) => f.write_str("QueryResult::Records(iterator)"),
+            Self::RecordsAffected(affected) => {
+                write!(f, "QueryResult::RecordsAffected({})", affected)
+            }
         }
     }
 }
 
-pub struct RowIterator<'tx> {
+pub struct RecordIterator<'tx> {
     operator: Box<dyn Operator + 'tx>,
 }
 
-impl<'tx> RowIterator<'tx> {
+impl<'tx> RecordIterator<'tx> {
     pub fn new(operator: Box<dyn Operator + 'tx>) -> Self {
         Self { operator }
     }
@@ -60,8 +59,8 @@ impl<'tx> RowIterator<'tx> {
     }
 }
 
-impl<'tx> Iterator for RowIterator<'tx> {
-    type Item = vm::Result<Row>;
+impl<'tx> Iterator for RecordIterator<'tx> {
+    type Item = vm::Result<Record>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.operator.next().transpose()

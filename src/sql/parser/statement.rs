@@ -73,8 +73,8 @@ impl Display for Statement {
                 }
                 let mut fmt_values = vec![];
 
-                for row in values {
-                    fmt_values.push(format!("({})", fmt_join(row, ", ")));
+                for record in values {
+                    fmt_values.push(format!("({})", fmt_join(record, ", ")));
                 }
 
                 write!(f, " VALUES {}", &fmt_values.join(", "))?;

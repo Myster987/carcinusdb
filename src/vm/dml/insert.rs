@@ -13,7 +13,7 @@ use crate::{
     storage::btree::{BTreeCursor, BTreeKey, InsertOptions},
     vm::{
         self,
-        operator::{Operator, Row, projection::Projection},
+        operator::{Operator, projection::Projection},
     },
 };
 
@@ -63,7 +63,7 @@ impl<'tx> Operator for Insert<'tx> {
         self.child.schema()
     }
 
-    fn next(&mut self) -> vm::Result<Option<Row>> {
+    fn next(&mut self) -> vm::Result<Option<Record>> {
         self.child.next()
     }
 }
@@ -111,12 +111,12 @@ impl<'tx> InsertInner<'tx> {
 }
 
 impl<'tx> Operator for InsertInner<'tx> {
-    fn next(&mut self) -> vm::Result<Option<Row>> {
-        let Some(mut row) = self.values.pop_front() else {
+    fn next(&mut self) -> vm::Result<Option<Record>> {
+        let Some(mut Record) = self.values.pop_front() else {
             return Ok(None);
         };
 
-        let row_id = row
+        let Record_id = Record
             .first()
             .map(|expr| match expr {
                 Expression::Value(val) => val.as_ref().to_int(),
@@ -127,7 +127,7 @@ impl<'tx> Operator for InsertInner<'tx> {
         let mut pop_record = 0;
         for idx in 0..self.schema.len() {
             if self.indices.contains(&idx) {
-                let expr = mem::replace(&mut row[pop_record], Expression::Wildcard);
+                let expr = mem::replace(&mut Record[pop_record], Expression::Wildcard);
                 let Expression::Value(value) = expr else {
                     return Err(vm::Error::Unsupported(expr));
                 };
@@ -142,18 +142,18 @@ impl<'tx> Operator for InsertInner<'tx> {
         self.temp_record.clear();
 
         let inserted_record = self.cursor.insert(
-            BTreeKey::new_table_key(row_id, Some(record.to_owned())),
+            BTreeKey::new_table_key(Record_id, Some(record.to_owned())),
             self.insert_options,
         )?;
 
         for (index_metadata, index_cursor) in self.index_cursors.iter_mut() {
             let col_idx = index_metadata.column_index;
             let col_value = record.get_value(col_idx).to_owned();
-            let row_id = record.get_value(0).to_int();
+            let Record_id = record.get_value(0).to_int();
 
             let record = RecordBuilder::new()
                 .add(col_value)
-                .add(Value::Int(row_id))
+                .add(Value::Int(Record_id))
                 .build();
 
             let key = BTreeKey::new_index_key(record);

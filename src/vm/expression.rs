@@ -7,7 +7,7 @@ use crate::sql::{
 };
 
 pub fn resolve_expression_to_value(
-    record: &Record<'_>,
+    record: &Record,
     schema: &Schema,
     expr: &Expression,
 ) -> sql::Result<Value> {

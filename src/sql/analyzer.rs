@@ -199,8 +199,8 @@ pub fn analyze(statement: &Statement, catalog: &Catalog) -> Result<()> {
                 });
             }
 
-            for row in values {
-                for (expr, col) in row.iter().zip(columns) {
+            for record in values {
+                for (expr, col) in record.iter().zip(columns) {
                     analyze_assignment(&table_metadata, col, expr, false)?;
                 }
             }

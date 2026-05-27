@@ -5,14 +5,14 @@ use std::{
     io::{self, BufRead, BufReader, Read, Seek, Write},
 };
 
-use crate::vm::{
-    self,
-    operator::{Operator, Row},
+use crate::{
+    sql::record::Record,
+    vm::{self, operator::Operator},
 };
 
-const ROW_PAGE_HEADER_SIZE: usize = size_of::<u32>();
+const RECORD_PAGE_HEADER_SIZE: usize = size_of::<u32>();
 
-pub struct RowBuffer {
+pub struct RecordBuffer {
     /// Max size of `page` (fixed size block of records) in bytes.
     page_size: usize,
 
@@ -26,10 +26,10 @@ pub struct RowBuffer {
     /// Buffer mode.
     packed: bool,
 
-    rows: VecDeque<Row>,
+    records: VecDeque<Record>,
 }
 
-impl RowBuffer {
+impl RecordBuffer {
     /// Empty buffer used to only replace other ones with `mem::replace`.
     pub fn empty() -> Self {
         Self {
@@ -37,7 +37,7 @@ impl RowBuffer {
             current_size: 0,
             largest_record_size: 0,
             packed: false,
-            rows: VecDeque::new(),
+            records: VecDeque::new(),
         }
     }
 
@@ -46,40 +46,44 @@ impl RowBuffer {
         Self {
             page_size,
             packed,
-            current_size: if packed { 0 } else { ROW_PAGE_HEADER_SIZE },
+            current_size: if packed { 0 } else { RECORD_PAGE_HEADER_SIZE },
             largest_record_size: 0,
-            rows: VecDeque::new(),
+            records: VecDeque::new(),
         }
     }
 
-    pub fn can_fit(&self, row: &Row) -> bool {
-        self.current_size + row.size() <= self.page_size
+    pub fn can_fit(&self, record: &Record) -> bool {
+        self.current_size + record.size() <= self.page_size
     }
 
-    pub fn push(&mut self, row: Row) {
-        let row_size = row.size();
+    pub fn push(&mut self, record: Record) {
+        let record_size = record.size();
 
-        if row_size > self.largest_record_size {
-            self.largest_record_size = row_size;
+        if record_size > self.largest_record_size {
+            self.largest_record_size = record_size;
         }
 
-        self.current_size += row_size;
-        self.rows.push_back(row);
+        self.current_size += record_size;
+        self.records.push_back(record);
     }
 
-    pub fn pop_front(&mut self) -> Option<Row> {
-        self.rows.pop_front().inspect(|row| {
-            self.current_size -= row.size();
+    pub fn pop_front(&mut self) -> Option<Record> {
+        self.records.pop_front().inspect(|record| {
+            self.current_size -= record.size();
         })
     }
 
     pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
+        self.records.is_empty()
     }
 
     pub fn clear(&mut self) {
-        self.rows.clear();
-        self.current_size = if self.packed { 0 } else { ROW_PAGE_HEADER_SIZE };
+        self.records.clear();
+        self.current_size = if self.packed {
+            0
+        } else {
+            RECORD_PAGE_HEADER_SIZE
+        };
     }
 
     pub fn serialize(&self) -> Vec<u8> {
@@ -87,12 +91,12 @@ impl RowBuffer {
 
         // Page header.
         if !self.packed {
-            buf.extend_from_slice(&(self.rows.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&(self.records.len() as u32).to_le_bytes());
         }
 
-        // Tuples.
-        for row in &self.rows {
-            buf.extend_from_slice(row.raw());
+        // Rows.
+        for record in &self.records {
+            buf.extend_from_slice(record.raw());
         }
 
         // Padding.
@@ -115,17 +119,17 @@ impl RowBuffer {
             .map_err(|e| crate::storage::Error::Io(e))?;
 
         let number_of_rows = u32::from_le_bytes(
-            buffer[..ROW_PAGE_HEADER_SIZE]
+            buffer[..RECORD_PAGE_HEADER_SIZE]
                 .try_into()
                 .map_err(|_| vm::Error::Corrupted)?,
         );
 
-        let mut cursor = ROW_PAGE_HEADER_SIZE;
+        let mut cursor = RECORD_PAGE_HEADER_SIZE;
 
         for _ in 0..number_of_rows {
-            let row = Row::deserialize(&buffer[cursor..])?;
-            cursor += row.size();
-            self.push(row);
+            let record = Record::deserialize(&buffer[cursor..])?;
+            cursor += record.size();
+            self.push(record);
         }
 
         Ok(())
@@ -150,8 +154,8 @@ impl RowBuffer {
         page_size
     }
 
-    pub fn sort_by(&mut self, cmp: impl FnMut(&Row, &Row) -> Ordering) {
-        self.rows.make_contiguous().sort_by(cmp);
+    pub fn sort_by(&mut self, cmp: impl FnMut(&Record, &Record) -> Ordering) {
+        self.records.make_contiguous().sort_by(cmp);
     }
 }
 
@@ -161,12 +165,12 @@ pub struct Collect<'tx> {
     /// `true` if iterator is empty.
     collected: bool,
 
-    /// In memory row buffer.
-    mem_buffer: RowBuffer,
-    /// If rows can't fit in memory they are stored in temp file.
+    /// In memory record buffer.
+    mem_buffer: RecordBuffer,
+    /// If records can't fit in memory they are stored in temp file.
     file: Option<File>,
 
-    /// If rows can't fit in memory then reader is needed.
+    /// If records can't fit in memory then reader is needed.
     reader: Option<BufReader<File>>,
 }
 
@@ -175,18 +179,18 @@ impl<'tx> Collect<'tx> {
         Self {
             source,
             collected: false,
-            mem_buffer: RowBuffer::new(mem_buffer_size, packed),
+            mem_buffer: RecordBuffer::new(mem_buffer_size, packed),
             file: None,
             reader: None,
         }
     }
 
     fn collect(&mut self) -> vm::Result<()> {
-        while let Some(row) = self.source.next()? {
-            if !self.mem_buffer.can_fit(&row) {
+        while let Some(record) = self.source.next()? {
+            if !self.mem_buffer.can_fit(&record) {
                 if self.file.is_none() {
-                    let temp_file = tempfile::tempfile().map_err(|_| vm::Error::Corrupted)?;
-                    self.file = Some(temp_file);
+                    // let temp_file = tempfile::tempfile().map_err(|_| vm::Error::Corrupted)?;
+                    // self.file = Some(temp_file);
                 }
                 self.mem_buffer
                     .write_to(self.file.as_mut().unwrap())
@@ -194,7 +198,7 @@ impl<'tx> Collect<'tx> {
                 self.mem_buffer.clear();
             }
 
-            self.mem_buffer.push(row);
+            self.mem_buffer.push(record);
         }
 
         if let Some(mut file) = self.file.take() {
@@ -205,7 +209,7 @@ impl<'tx> Collect<'tx> {
         Ok(())
     }
 
-    pub fn next(&mut self) -> vm::Result<Option<Row>> {
+    pub fn next(&mut self) -> vm::Result<Option<Record>> {
         if !self.collected {
             self.collect()?;
             self.collected = true;

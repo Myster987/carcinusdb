@@ -35,15 +35,15 @@ impl ServerConnection {
 
     pub async fn send_query_result<'tx>(&mut self, result: QueryResult<'tx>) -> tcp::Result<()> {
         match result {
-            QueryResult::RowsAffected(n) => self.send(Response::RowsAffected(n)).await?,
-            QueryResult::Rows(row_iterator) => {
+            QueryResult::RecordsAffected(n) => self.send(Response::RecordsAffected(n)).await?,
+            QueryResult::Records(row_iterator) => {
                 let schema = row_iterator.schema().clone();
 
                 self.send(Response::Schema(schema)).await?;
 
                 for record_result in row_iterator {
                     match record_result {
-                        Ok(row) => self.send(Response::Row(row)).await?,
+                        Ok(r) => self.send(Response::Record(r)).await?,
                         Err(err) => {
                             self.send(Response::Error(format!("{err}"))).await?;
                             break;

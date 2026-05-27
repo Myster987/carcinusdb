@@ -25,7 +25,7 @@ pub fn optimize(statement: &mut Statement) -> sql::Result<()> {
         Statement::Insert { values, .. } => {
             values
                 .iter_mut()
-                .try_for_each(|row| simplify_all(row.iter_mut()))?;
+                .try_for_each(|record| simplify_all(record.iter_mut()))?;
         }
 
         Statement::Delete { r#where, .. } => {

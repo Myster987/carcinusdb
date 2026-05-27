@@ -1,12 +1,9 @@
 use std::{cell::RefCell, rc::Rc};
 
 use crate::{
-    sql::schema::Schema,
+    sql::{record::Record, schema::Schema},
     storage::btree::{BTreeCursor, DatabaseCursor},
-    vm::{
-        self,
-        operator::{Operator, Row},
-    },
+    vm::{self, operator::Operator},
 };
 
 pub struct SeqScan<'tx> {
@@ -26,7 +23,7 @@ impl<'tx> SeqScan<'tx> {
 }
 
 impl<'tx> Operator for SeqScan<'tx> {
-    fn next(&mut self) -> vm::Result<Option<Row>> {
+    fn next(&mut self) -> vm::Result<Option<Record>> {
         let mut cursor = self.cursor.borrow_mut();
         if !self.started {
             self.started = true;

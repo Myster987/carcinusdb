@@ -61,7 +61,7 @@ fn create_table(
         TableMetadata::new(root_page, name, schema, vec![]),
     );
 
-    Ok(QueryResult::RowsAffected(1))
+    Ok(QueryResult::RecordsAffected(1))
 }
 
 fn create_index(
@@ -117,7 +117,7 @@ fn create_index(
         }
     }
 
-    Ok(QueryResult::RowsAffected(1))
+    Ok(QueryResult::RecordsAffected(1))
 }
 
 // Reconstructs "CREATE TABLE name (col1 TYPE, col2 TYPE NOT NULL, ...)" SQL.

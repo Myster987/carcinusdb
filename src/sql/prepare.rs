@@ -41,8 +41,8 @@ pub fn prepare(tx: &DatabaseTransaction, statement: &mut Statement) -> sql::Resu
                     .next_row_id()
                     .map_err(|_| sql::Error::InvalidSerialType)?;
 
-                for row in values.iter_mut() {
-                    row.insert(0, Expression::Value(Value::Int(current_row_id)));
+                for record in values.iter_mut() {
+                    record.insert(0, Expression::Value(Value::Int(current_row_id)));
                     current_row_id += 1;
                 }
             }
@@ -50,8 +50,8 @@ pub fn prepare(tx: &DatabaseTransaction, statement: &mut Statement) -> sql::Resu
             for current_index in 0..metadata.schema.len() {
                 let sorted_index = metadata.schema.index_of(&columns[current_index]).unwrap();
                 columns.swap(current_index, sorted_index);
-                for row in values.iter_mut() {
-                    row.swap(current_index, sorted_index);
+                for record in values.iter_mut() {
+                    record.swap(current_index, sorted_index);
                 }
             }
 
@@ -63,10 +63,10 @@ pub fn prepare(tx: &DatabaseTransaction, statement: &mut Statement) -> sql::Resu
                 let col_idx = metadata.schema.index_of(&col.name).unwrap();
                 let provided = columns.contains(&col.name);
 
-                for row in values.iter_mut() {
+                for record in values.iter_mut() {
                     if provided {
                         if col.properties.is_not_null() {
-                            if let Expression::Value(Value::Null) = &row[col_idx] {
+                            if let Expression::Value(Value::Null) = &record[col_idx] {
                                 return Err(sql::Error::NotNullViolation(col.name.clone()));
                             }
                         }
@@ -76,10 +76,10 @@ pub fn prepare(tx: &DatabaseTransaction, statement: &mut Statement) -> sql::Resu
                             None if col.properties.is_null() => Expression::Value(Value::Null),
                             None => return Err(sql::Error::MissingValue(col.name.clone())),
                         };
-                        if col_idx < row.len() {
-                            row[col_idx] = value;
+                        if col_idx < record.len() {
+                            record[col_idx] = value;
                         } else {
-                            row.push(value);
+                            record.push(value);
                         }
                     }
                 }

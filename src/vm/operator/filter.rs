@@ -1,10 +1,6 @@
 use crate::{
-    sql::{parser::statement::Expression, types::Value},
-    vm::{
-        self,
-        expression::resolve_expression_to_value,
-        operator::{Operator, Row},
-    },
+    sql::{parser::statement::Expression, record::Record, types::Value},
+    vm::{self, expression::resolve_expression_to_value, operator::Operator},
 };
 
 pub struct Filter<'tx> {
@@ -19,12 +15,16 @@ impl<'tx> Filter<'tx> {
 }
 
 impl<'tx> Operator for Filter<'tx> {
-    fn next(&mut self) -> vm::Result<Option<Row>> {
+    fn next(&mut self) -> vm::Result<Option<Record>> {
         loop {
             match self.child.next()? {
-                Some(row) => {
-                    match resolve_expression_to_value(&row, self.child.schema(), &self.predicate)? {
-                        Value::Bool(true) => return Ok(Some(row)),
+                Some(record) => {
+                    match resolve_expression_to_value(
+                        &record,
+                        self.child.schema(),
+                        &self.predicate,
+                    )? {
+                        Value::Bool(true) => return Ok(Some(record)),
                         _ => continue,
                     }
                 }

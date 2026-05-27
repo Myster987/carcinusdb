@@ -3,15 +3,12 @@ use std::{cell::RefCell, cmp::Ordering, rc::Rc};
 use crate::{
     sql::{
         parser::statement::{BinaryOperator, Expression},
-        record::{RecordBuilder, compare_records},
+        record::{Record, RecordBuilder, compare_records},
         schema::{IndexMetadata, Schema, TableMetadata},
         types::Value,
     },
     storage::btree::{BTreeCursor, BTreeKey, DatabaseCursor},
-    vm::{
-        self,
-        operator::{Operator, Row},
-    },
+    vm::{self, operator::Operator},
 };
 
 pub enum ScanBound {
@@ -95,7 +92,7 @@ impl<'tx> IndexScan<'tx> {
 }
 
 impl<'tx> Operator for IndexScan<'tx> {
-    fn next(&mut self) -> vm::Result<Option<Row>> {
+    fn next(&mut self) -> vm::Result<Option<Record>> {
         if self.done {
             return Ok(None);
         }
@@ -160,9 +157,9 @@ impl<'tx> Operator for IndexScan<'tx> {
         let mut table = self.table_cursor.borrow_mut();
         table.seek(&BTreeKey::new_table_key(row_id, None))?;
 
-        let row = table.try_record()?.to_owned();
+        let record = table.try_record()?.to_owned();
 
-        Ok(Some(row))
+        Ok(Some(record))
     }
 
     fn schema(&self) -> &Schema {

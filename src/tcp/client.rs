@@ -6,13 +6,12 @@ use tokio_stream::StreamExt;
 use tokio_util::codec::Framed;
 
 use crate::{
-    sql::schema::Schema,
+    sql::{record::Record, schema::Schema},
     tcp::{
         self,
         protocol::{CarcinusClientCodec, Request, Response},
     },
     utils::debug_table::DebugTable,
-    vm::operator::Row,
 };
 
 pub struct ClientConnection {
@@ -42,18 +41,18 @@ impl ClientConnection {
         self.send(Request::Query(sql.to_string())).await?;
 
         match self.receive().await? {
-            Response::RowsAffected(n) => Ok(ClientQueryResult::RowsAffected(n)),
+            Response::RecordsAffected(n) => Ok(ClientQueryResult::RowsAffected(n)),
             Response::Schema(schema) => {
-                let mut rows = Vec::new();
+                let mut records = Vec::new();
                 loop {
                     match self.receive().await? {
-                        Response::Row(row) => rows.push(row),
+                        Response::Record(r) => records.push(r),
                         Response::End => break,
                         Response::Error(err) => return Err(tcp::Error::ServerError(err)),
                         _ => return Err(tcp::Error::Corrupted),
                     }
                 }
-                Ok(ClientQueryResult::Table(Table::new(schema, rows)))
+                Ok(ClientQueryResult::Table(Table::new(schema, records)))
             }
             Response::Error(err) => Err(tcp::Error::ServerError(err)),
             _ => Err(tcp::Error::Corrupted),
@@ -84,12 +83,12 @@ impl Display for ClientQueryResult {
 
 pub struct Table {
     pub schema: Schema,
-    pub rows: Vec<Row>,
+    pub records: Vec<Record>,
 }
 
 impl Table {
-    pub fn new(schema: Schema, rows: Vec<Row>) -> Self {
-        Self { schema, rows }
+    pub fn new(schema: Schema, records: Vec<Record>) -> Self {
+        Self { schema, records }
     }
 }
 
@@ -101,8 +100,8 @@ impl Display for Table {
             dbg_table.add_column(&col);
         }
 
-        for row in &self.rows {
-            dbg_table.insert_row(row.values().iter().map(|v| v.to_string()).collect());
+        for record in &self.records {
+            dbg_table.insert_row(record.values().iter().map(|v| v.to_string()).collect());
         }
 
         dbg_table.fmt(f)
