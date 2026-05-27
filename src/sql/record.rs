@@ -1,6 +1,6 @@
-use std::{borrow::Cow, cell::RefCell, fmt::Debug, rc::Rc};
+use std::{cell::RefCell, fmt::Debug, rc::Rc};
 
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::{
     sql::{
@@ -21,48 +21,42 @@ pub const MAX_COLUMN_COUNT: usize = 2000;
 
 /// Immutable view to database row.
 #[derive(Debug, Clone)]
-pub struct Record<'a> {
-    payload: Cow<'a, [u8]>,
+pub struct Record {
+    payload: Bytes,
     cursor: Rc<RefCell<RecordCursor>>,
 }
 
-unsafe impl Send for Record<'_> {}
-unsafe impl Sync for Record<'_> {}
+unsafe impl Send for Record {}
+unsafe impl Sync for Record {}
 
-impl<'a> Record<'a> {
-    pub fn new(payload: Cow<'a, [u8]>) -> Self {
-        let cursor = Rc::new(RefCell::new(RecordCursor::new()));
-        Self { payload, cursor }
-    }
-
-    pub fn empty() -> Self {
-        Self::from_owned(vec![])
-    }
-
-    pub fn from_borrowed(payload: &'a [u8]) -> Self {
-        Self::new(Cow::Borrowed(payload))
-    }
-
-    pub fn from_owned(payload: Vec<u8>) -> Self {
-        Self::new(Cow::Owned(payload))
-    }
-
-    pub fn from_owned_with_cursor(payload: Vec<u8>, cursor: RecordCursor) -> Self {
+impl Record {
+    pub fn new(payload: impl Into<Bytes>) -> Self {
         Self {
-            payload: Cow::Owned(payload),
+            payload: payload.into(),
+            cursor: Rc::new(RefCell::new(RecordCursor::new())),
+        }
+    }
+
+    pub fn new_with_cursor(payload: impl Into<Bytes>, cursor: RecordCursor) -> Self {
+        Self {
+            payload: payload.into(),
             cursor: Rc::new(RefCell::new(cursor)),
         }
     }
 
-    pub fn raw(&'a self) -> &'a [u8] {
+    pub fn empty() -> Self {
+        Self::new(Bytes::new())
+    }
+
+    pub fn raw(&self) -> &[u8] {
         &self.payload
     }
 
-    pub fn get_value(&'a self, index: usize) -> ValueRef<'a> {
+    pub fn get_value(&self, index: usize) -> ValueRef {
         self.try_get_value(index).unwrap()
     }
 
-    pub fn try_get_value(&'a self, index: usize) -> sql::Result<ValueRef<'a>> {
+    pub fn try_get_value(&self, index: usize) -> sql::Result<ValueRef> {
         self.cursor.borrow_mut().get_value(&self.payload, index)
     }
 
@@ -74,7 +68,7 @@ impl<'a> Record<'a> {
         self.cursor.borrow_mut().len(&self.payload)
     }
 
-    pub fn values(&'a self) -> Vec<ValueRef<'a>> {
+    pub fn values(&self) -> Vec<ValueRef> {
         let len = self.len();
         let mut values = Vec::with_capacity(len);
 
@@ -85,16 +79,16 @@ impl<'a> Record<'a> {
         values
     }
 
-    pub fn to_owned(&self) -> Record<'static> {
+    pub fn to_owned(&self) -> Record {
         Record {
-            payload: Cow::Owned(self.payload.to_vec()),
+            payload: Bytes::copy_from_slice(&self.payload),
             cursor: Rc::new(RefCell::new(self.cursor.borrow().clone())),
         }
     }
 
-    pub fn to_borrowed(&'a self) -> Record<'a> {
+    pub fn to_borrowed(&self) -> Record {
         Record {
-            payload: Cow::Borrowed(&self.payload),
+            payload: self.payload.clone(),
             cursor: Rc::new(RefCell::new(self.cursor.borrow().clone())),
         }
     }
@@ -104,11 +98,11 @@ impl<'a> Record<'a> {
         cursor.full_parse(buffer)?;
         let row_buf = buffer[..cursor.parsed_bytes].to_vec();
 
-        Ok(Self::from_owned_with_cursor(row_buf, cursor))
+        Ok(Self::new_with_cursor(row_buf, cursor))
     }
 }
 
-impl<'a> protocol::Decode for Record<'a> {
+impl<'a> protocol::Decode for Record {
     fn decode(src: &mut BytesMut) -> crate::tcp::Result<Self> {
         let raw = src.chunk();
         let (record_size, varint_len) = read_varint(raw).map_err(|_| tcp::Error::Incomplete)?;
@@ -131,11 +125,11 @@ impl<'a> protocol::Decode for Record<'a> {
             .full_parse(&record_buffer)
             .map_err(|_| tcp::Error::Corrupted)?;
 
-        Ok(Record::from_owned_with_cursor(record_buffer, cursor))
+        Ok(Record::new_with_cursor(record_buffer, cursor))
     }
 }
 
-impl<'a> protocol::Encode for Record<'a> {
+impl protocol::Encode for Record {
     fn encode(&self, dst: &mut BytesMut) {
         dst.put_varint(self.size() as VarInt);
         dst.put_u8(MessageType::Record as u8);
@@ -329,17 +323,17 @@ impl RecordMut {
         cursor.into_inner()
     }
 
-    pub fn serialize_to_record(&self) -> Record<'static> {
+    pub fn serialize_to_record(&self) -> Record {
         let serialized = self.serialize_to_bytes();
 
-        Record::from_owned(serialized)
+        Record::new(serialized)
     }
 
     pub fn get(&self, index: usize) -> &Value {
         &self.values[index]
     }
 
-    pub fn from_record(record: &Record<'_>) -> Self {
+    pub fn from_record(record: &Record) -> Self {
         Self {
             values: record
                 .values()
@@ -386,7 +380,7 @@ impl RecordBuilder {
         self
     }
 
-    pub fn build(self) -> Record<'static> {
+    pub fn build(self) -> Record {
         self.record.serialize_to_record()
     }
 }
@@ -449,7 +443,7 @@ mod tests {
 
         buffer.extend_from_slice(&crate::utils::bytes::encode_to_varint(125));
 
-        let record = Record::from_owned(buffer);
+        let record = Record::new(buffer);
 
         println!("{:?}", record);
 
@@ -467,9 +461,8 @@ mod tests {
         builder.add(Value::Int(125));
 
         let serialized = builder.serialize_to_bytes();
-        let record = Record::from_borrowed(&serialized);
+        let record = Record::new(serialized);
 
-        println!("{:?}", serialized);
         println!("{:?}", record);
         println!("{:?}", record.get_value(0));
 
