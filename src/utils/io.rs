@@ -23,6 +23,19 @@ pub fn input(message: &str) -> io::Result<String> {
     Ok(buffer.trim().to_string())
 }
 
+pub fn input_buffered(message: &str, input_buffer: &mut String) -> io::Result<()> {
+    // let mut buffer = String::new();
+
+    print!("{message}");
+
+    io::stdout().flush()?;
+
+    io::stdin().read_line(input_buffer)?;
+
+    // Ok(buffer.trim().to_string())
+    Ok(())
+}
+
 pub type BlockNumber = u32;
 
 pub const MAX_VECTORED_IO_BUFFERS: LazyLock<usize> =

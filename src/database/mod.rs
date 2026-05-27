@@ -108,7 +108,7 @@ pub async fn handle_connection(db: Arc<Database>, mut conn: ServerConnection) ->
     loop {
         match conn.receive().await? {
             Request::Query(sql) => {
-                log::trace!("Client SQL: {sql}");
+                log::debug!("Client SQL: {sql}");
 
                 let transaction = db.begin_transaction()?;
                 let (tx, mut rx) = tokio::sync::mpsc::channel(32);

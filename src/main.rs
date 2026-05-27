@@ -40,3 +40,32 @@ async fn test_client() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_simple_cli() -> anyhow::Result<()> {
+    use crate::tcp::client::ClientConnection;
+
+    simple_logger::init()?;
+
+    let mut client = ClientConnection::connect("127.0.0.1:4000").await?;
+
+    loop {
+        let mut sql = String::new();
+
+        while !sql.contains(";") && sql.trim() != ".quit" {
+            utils::io::input_buffered("carcinsudb> ", &mut sql)?;
+        }
+
+        let sql = sql.trim();
+
+        if sql == ".quit" {
+            break;
+        }
+
+        let query_result = client.query(sql).await?;
+
+        println!("{query_result}");
+    }
+
+    Ok(())
+}
