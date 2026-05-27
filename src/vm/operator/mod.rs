@@ -10,9 +10,7 @@ pub mod projection;
 pub mod seq_scan;
 pub mod sort;
 
-pub type Row = Record<'static>;
-
 pub trait Operator {
-    fn next(&mut self) -> vm::Result<Option<Row>>;
+    fn next(&mut self) -> vm::Result<Option<Record>>;
     fn schema(&self) -> &Schema;
 }

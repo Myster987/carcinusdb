@@ -4,7 +4,7 @@ use crate::{
     database::DatabaseTransaction,
     sql::{
         parser::statement::Expression,
-        record::RecordBuilder,
+        record::{Record, RecordBuilder},
         schema::{IndexMetadata, Schema},
         types::Value,
     },
@@ -12,7 +12,7 @@ use crate::{
     vm::{
         self,
         operator::{
-            Operator, Row,
+            Operator,
             filter::Filter,
             index_scan::{IndexScan, find_index},
             projection::Projection,
@@ -89,7 +89,7 @@ impl<'tx> Operator for Delete<'tx> {
         self.child.schema()
     }
 
-    fn next(&mut self) -> vm::Result<Option<Row>> {
+    fn next(&mut self) -> vm::Result<Option<Record>> {
         self.child.next()
     }
 }
@@ -137,20 +137,20 @@ impl<'tx> DeleteInner<'tx> {
 }
 
 impl<'tx> Operator for DeleteInner<'tx> {
-    fn next(&mut self) -> vm::Result<Option<Row>> {
-        let Some(row) = self.source.next()? else {
+    fn next(&mut self) -> vm::Result<Option<Record>> {
+        let Some(record) = self.source.next()? else {
             return Ok(None);
         };
 
         self.cursor.borrow_mut().delete(
-            &BTreeKey::new_table_key(row.get_value(0).to_int(), Some(row.to_borrowed())),
+            &BTreeKey::new_table_key(record.get_value(0).to_int(), Some(record.to_borrowed())),
             DeleteOptions::default(),
         )?;
 
         for (index_metadata, index_cursor) in self.index_cursors.iter_mut() {
             let col_idx = index_metadata.column_index;
-            let col_value = row.get_value(col_idx).to_owned();
-            let row_id = row.get_value(0).to_int();
+            let col_value = record.get_value(col_idx).to_owned();
+            let row_id = record.get_value(0).to_int();
 
             let record = RecordBuilder::new()
                 .add(col_value)
@@ -161,7 +161,7 @@ impl<'tx> Operator for DeleteInner<'tx> {
             index_cursor.delete(&key, DeleteOptions::default())?;
         }
 
-        Ok(Some(row))
+        Ok(Some(record))
     }
 
     fn schema(&self) -> &Schema {

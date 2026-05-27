@@ -12,7 +12,7 @@ use crate::{
     vm::{
         self,
         operator::{
-            Operator, Row,
+            Operator,
             filter::Filter,
             index_scan::{IndexScan, find_index},
             projection::Projection,
@@ -100,7 +100,7 @@ impl<'tx> Operator for Update<'tx> {
         self.child.schema()
     }
 
-    fn next(&mut self) -> vm::Result<Option<Row>> {
+    fn next(&mut self) -> vm::Result<Option<Record>> {
         self.child.next()
     }
 }
@@ -191,19 +191,19 @@ impl<'tx> UpdateInner<'tx> {
 }
 
 impl<'tx> Operator for UpdateInner<'tx> {
-    fn next(&mut self) -> vm::Result<Option<Row>> {
-        let Some(row) = self.source.next()? else {
+    fn next(&mut self) -> vm::Result<Option<Record>> {
+        let Some(record) = self.source.next()? else {
             return Ok(None);
         };
 
-        let mut record_builder = RecordMut::from_record(&row);
+        let mut record_builder = RecordMut::from_record(&record);
 
         for (i, assaign) in self.assignments.iter() {
             let _ = record_builder.set(*i, assaign.clone());
         }
 
-        let row_id = row.get_value(0).to_int();
-        let old_key = BTreeKey::new_table_key(row_id, Some(row.to_borrowed()));
+        let row_id = record.get_value(0).to_int();
+        let old_key = BTreeKey::new_table_key(row_id, Some(record.to_borrowed()));
 
         let new_record = record_builder.serialize_to_record();
         let new_key = BTreeKey::new_table_key(row_id, Some(new_record.to_borrowed()));

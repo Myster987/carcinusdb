@@ -124,14 +124,14 @@ pub async fn handle_connection(db: Arc<Database>, mut conn: ServerConnection) ->
                             }
                         };
                         match result {
-                            QueryResult::RowsAffected(n) => {
-                                let _ = tx.blocking_send(Ok(Response::RowsAffected(n)));
+                            QueryResult::RecordsAffected(n) => {
+                                let _ = tx.blocking_send(Ok(Response::RecordsAffected(n)));
                             }
-                            QueryResult::Rows(iter) => {
+                            QueryResult::Records(iter) => {
                                 let _ =
                                     tx.blocking_send(Ok(Response::Schema(iter.schema().clone())));
-                                for row in iter {
-                                    if tx.blocking_send(row.map(Response::Row)).is_err() {
+                                for record in iter {
+                                    if tx.blocking_send(record.map(Response::Record)).is_err() {
                                         break;
                                     }
                                 }

@@ -20,8 +20,8 @@
 //! | 'S' | Schema       | Server → Client  | varint col_count, then per column:   |
 //! |     |              |                  |   varint name_len, name bytes,       |
 //! |     |              |                  |   1 byte data type                   |
-//! | 'R' | Record       | Server → Client  | raw row in DB serialization format   |
-//! | 'A' | RowsAffected | Server → Client  | varint row count                     |
+//! | 'R' | Record       | Server → Client  | raw record in DB serialization format|
+//! | 'A' | RowsAffected | Server → Client  | varint record count                  |
 //! | 'E' | Error        | Server → Client  | UTF-8 error message                  |
 //! | 'Z' | End          | Server → Client  | (empty) — terminates a response      |
 //! ```
@@ -31,8 +31,8 @@
 //! ```text
 //! Client:  [Q] "SELECT * FROM users"
 //! Server:  [S] schema
-//!          [R] row
-//!          [R] row
+//!          [R] record
+//!          [R] record
 //!          ...
 //!          [Z] end
 //! ```
@@ -59,7 +59,6 @@ use crate::{
     sql::{record::Record, schema::Schema},
     tcp,
     utils::bytes::{VarInt, VarintBuf, encode_to_varint, read_varint},
-    vm::operator::Row,
 };
 
 pub trait Decode: Sized {
@@ -163,8 +162,8 @@ impl Encode for Request {
 #[derive(Debug)]
 pub enum Response {
     Schema(Schema),
-    Row(Row),
-    RowsAffected(usize),
+    Record(Record),
+    RecordsAffected(usize),
     Error(String),
     End,
 }
@@ -193,12 +192,12 @@ impl Decode for Response {
             }
             MessageType::Record => {
                 let record = Record::decode(src)?;
-                Response::Row(record)
+                Response::Record(record)
             }
             MessageType::RowsAffected => {
                 src.advance(varint_len + 1);
                 let (rows_affected, _) = src.read_varint();
-                Response::RowsAffected(rows_affected as usize)
+                Response::RecordsAffected(rows_affected as usize)
             }
             MessageType::Err => {
                 src.advance(varint_len + 1);
@@ -222,10 +221,10 @@ impl Encode for Response {
             Self::Schema(schema) => {
                 schema.encode(dst);
             }
-            Self::Row(row) => {
-                row.encode(dst);
+            Self::Record(record) => {
+                record.encode(dst);
             }
-            Self::RowsAffected(n) => {
+            Self::RecordsAffected(n) => {
                 let rows_affected_varint = encode_to_varint(*n as VarInt);
                 dst.put_varint(rows_affected_varint.len() as VarInt);
                 dst.put_u8(MessageType::RowsAffected as u8);

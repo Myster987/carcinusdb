@@ -2,11 +2,11 @@ use std::{cell::RefCell, rc::Rc};
 
 use crate::{
     database::DatabaseTransaction,
-    sql::{parser::statement::Expression, schema::Schema},
+    sql::{parser::statement::Expression, record::Record, schema::Schema},
     vm::{
         self,
         operator::{
-            Operator, Row,
+            Operator,
             filter::Filter,
             index_scan::{IndexScan, ScanKind, find_index},
             projection::Projection,
@@ -72,7 +72,7 @@ pub struct Select<'tx> {
 }
 
 impl<'tx> Operator for Select<'tx> {
-    fn next(&mut self) -> vm::Result<Option<Row>> {
+    fn next(&mut self) -> vm::Result<Option<Record>> {
         self.operator.next()
     }
 

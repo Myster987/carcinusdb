@@ -1,11 +1,11 @@
 use std::{
-    borrow::Cow,
     cmp::{Ordering, min},
     collections::VecDeque,
     ops::DerefMut,
     sync::Arc,
 };
 
+use bytes::Bytes;
 use parking_lot::Mutex;
 
 use crate::{
@@ -25,17 +25,17 @@ use crate::{
 pub type RowId = i64;
 
 #[derive(Debug)]
-pub enum BTreeKey<'a> {
-    TableKey((RowId, Option<Record<'a>>)),
-    IndexKey(Record<'a>),
+pub enum BTreeKey {
+    TableKey((RowId, Option<Record>)),
+    IndexKey(Record),
 }
 
-impl<'a> BTreeKey<'a> {
-    pub fn new_table_key(row_id: RowId, record: Option<Record<'a>>) -> Self {
+impl BTreeKey {
+    pub fn new_table_key(row_id: RowId, record: Option<Record>) -> Self {
         Self::TableKey((row_id, record))
     }
 
-    pub fn new_index_key(record: Record<'a>) -> Self {
+    pub fn new_index_key(record: Record) -> Self {
         Self::IndexKey(record)
     }
 
@@ -52,7 +52,7 @@ impl<'a> BTreeKey<'a> {
         !self.is_index()
     }
 
-    pub fn get_record(&self) -> Option<Record<'a>> {
+    pub fn get_record(&self) -> Option<Record> {
         match self {
             Self::TableKey((_, record)) => record.clone(),
             Self::IndexKey(record) => Some(record.clone()),
@@ -71,17 +71,17 @@ impl<'a> BTreeKey<'a> {
         }
     }
 
-    pub fn to_owned(&self) -> BTreeKey<'static> {
-        match self {
-            Self::TableKey((row_id, record)) => {
-                BTreeKey::TableKey((*row_id, record.as_ref().map(|r| r.to_owned())))
-            }
-            Self::IndexKey(record) => BTreeKey::IndexKey(record.to_owned()),
-        }
-    }
+    // pub fn to_owned(&self) -> BTreeKey {
+    //     match self {
+    //         Self::TableKey((row_id, record)) => {
+    //             BTreeKey::TableKey((*row_id, record.as_ref().map(|r| r.to_owned())))
+    //         }
+    //         Self::IndexKey(record) => BTreeKey::IndexKey(record.to_owned()),
+    //     }
+    // }
 }
 
-impl PartialEq for BTreeKey<'_> {
+impl PartialEq for BTreeKey {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::TableKey((id1, _)), Self::TableKey((id2, _))) => id1 == id2,
@@ -91,15 +91,15 @@ impl PartialEq for BTreeKey<'_> {
     }
 }
 
-impl Eq for BTreeKey<'_> {}
+impl Eq for BTreeKey {}
 
-impl PartialOrd for BTreeKey<'_> {
+impl PartialOrd for BTreeKey {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for BTreeKey<'_> {
+impl Ord for BTreeKey {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
             // Table keys: compare only by row_id
@@ -154,16 +154,16 @@ pub trait DatabaseCursor {
     fn next(&mut self) -> storage::Result<bool>;
 
     /// Returns next key in B-tree if exists, but doesn't change cursor position.
-    fn peek(&mut self) -> storage::Result<Option<BTreeKey<'static>>>;
+    fn peek(&mut self) -> storage::Result<Option<BTreeKey>>;
 
     /// Returns smallest record in B-tree.
-    fn min(&mut self) -> storage::Result<Option<Record<'static>>>;
+    fn min(&mut self) -> storage::Result<Option<Record>>;
 
     /// Returns largest record in B-tree.
-    fn max(&mut self) -> storage::Result<Option<Record<'static>>>;
+    fn max(&mut self) -> storage::Result<Option<Record>>;
 
     /// Returns record at current cursor position.
-    fn try_record(&self) -> storage::Result<Record<'static>>;
+    fn try_record(&self) -> storage::Result<Record>;
 
     /// Returns current page and slot that cursor is on.
     fn position(&self) -> (PageNumber, SlotNumber);
@@ -174,7 +174,7 @@ enum CursorState {
     Valid,
     Done,
     Uninitialized,
-    RequireSeek(BTreeKey<'static>),
+    RequireSeek(BTreeKey),
 }
 
 /// Cursor that allows traversing, inserting and deleteing (not yet) entries
@@ -259,7 +259,7 @@ impl<'tx> BTreeCursor<'tx> {
     }
 
     /// Returns page high key, if it exists. Otherwise it returns `Ok(None)`.
-    fn extract_high_key<'a>(&self, page: &'a Page) -> storage::Result<Option<BTreeKey<'a>>> {
+    fn extract_high_key<'a>(&self, page: &'a Page) -> storage::Result<Option<BTreeKey>> {
         if !page.has_high_key() {
             return Ok(None);
         }
@@ -269,7 +269,7 @@ impl<'tx> BTreeCursor<'tx> {
 
     /// Takes page reference and returns `BTreeKey` based on page type. Cell
     /// migth need reassembly.
-    fn extracty_key<'a>(&self, page: &'a Page, index: SlotNumber) -> storage::Result<BTreeKey<'a>> {
+    fn extracty_key<'a>(&self, page: &'a Page, index: SlotNumber) -> storage::Result<BTreeKey> {
         if index >= page.len() {
             return Err(storage::Error::CellIndexOutRange);
         }
@@ -297,11 +297,11 @@ impl<'tx> BTreeCursor<'tx> {
 
     /// Takes cell ref and returns (reassembled, if needed) record build from
     /// cell's payload.
-    fn owned_record_from_cell(&self, cell: &BTreeCell) -> storage::Result<Record<'static>> {
+    fn owned_record_from_cell(&self, cell: &BTreeCell) -> storage::Result<Record> {
         let local_payload = cell.payload();
 
         if !cell.is_overflowing() {
-            return Ok(Record::from_owned(local_payload.to_vec()));
+            return Ok(Record::new(local_payload.to_vec()));
         }
 
         let first_overflow = cell.first_overflow().unwrap();
@@ -332,18 +332,14 @@ impl<'tx> BTreeCursor<'tx> {
             return Err(storage::Error::Corrupted);
         }
 
-        Ok(Record::from_owned(result))
+        Ok(Record::new(result))
     }
 
     /// Returns whole cell payload including overflow pages. Takes mutable reference
     /// to pager and cell that you want to reassemble. Returns [Cow], which is
     /// `Borrowed` when cell isn't overflowing and `Owned` when cell needed to be
     /// reconstructed. Returned slice can be directly used as record.
-    fn reassemble_payload<'a>(
-        &self,
-        page: &'a Page,
-        index: SlotNumber,
-    ) -> storage::Result<Cow<'a, [u8]>> {
+    fn reassemble_payload<'a>(&self, page: &'a Page, index: SlotNumber) -> storage::Result<Bytes> {
         let cell = page.get_cell(index)?;
         let offset_to_cell = cell.offset_in_page(page.as_ptr());
 
@@ -352,7 +348,7 @@ impl<'tx> BTreeCursor<'tx> {
             .as_slice(&page.as_ptr()[offset_to_cell..]);
 
         if !cell.is_overflowing() {
-            return Ok(Cow::Borrowed(local_payload));
+            return Ok(Bytes::copy_from_slice(local_payload));
         }
 
         let first_overflow = cell.first_overflow().unwrap();
@@ -383,7 +379,7 @@ impl<'tx> BTreeCursor<'tx> {
             return Err(storage::Error::Corrupted);
         }
 
-        Ok(Cow::Owned(result))
+        Ok(Bytes::from(result))
     }
 
     /// Moves cursor to B-tree root, clears path_stack and marks as not done.
@@ -413,7 +409,7 @@ impl<'tx> BTreeCursor<'tx> {
         Ok(self.row_id()? + 1)
     }
 
-    fn invalidate(&mut self, key: BTreeKey<'static>) {
+    fn invalidate(&mut self, key: BTreeKey) {
         self.state = CursorState::RequireSeek(key);
     }
 }
@@ -576,7 +572,7 @@ impl<'tx> DatabaseCursor for BTreeCursor<'tx> {
         }
     }
 
-    fn peek(&mut self) -> storage::Result<Option<BTreeKey<'static>>> {
+    fn peek(&mut self) -> storage::Result<Option<BTreeKey>> {
         if self.is_done() {
             return Ok(None);
         }
@@ -593,7 +589,7 @@ impl<'tx> DatabaseCursor for BTreeCursor<'tx> {
         // check if there are still cells that haven't been visited. we must
         // use guard.len(), because current_slot often starts at 1.
         if self.current_slot + 1 < guard.len() {
-            let key = self.extracty_key(&guard, self.current_slot + 1)?.to_owned();
+            let key = self.extracty_key(&guard, self.current_slot + 1)?;
             return Ok(Some(key));
         }
 
@@ -605,7 +601,7 @@ impl<'tx> DatabaseCursor for BTreeCursor<'tx> {
 
             let peek_slot = guard.first_data_offset();
 
-            let key = self.extracty_key(&guard, peek_slot)?.to_owned();
+            let key = self.extracty_key(&guard, peek_slot)?;
 
             return Ok(Some(key));
         }
@@ -613,7 +609,7 @@ impl<'tx> DatabaseCursor for BTreeCursor<'tx> {
         return Ok(None);
     }
 
-    fn min(&mut self) -> storage::Result<Option<Record<'static>>> {
+    fn min(&mut self) -> storage::Result<Option<Record>> {
         self.go_to_root();
         if !self.seek_first()? {
             return Ok(None);
@@ -621,7 +617,7 @@ impl<'tx> DatabaseCursor for BTreeCursor<'tx> {
         self.try_record().map(Some)
     }
 
-    fn max(&mut self) -> storage::Result<Option<Record<'static>>> {
+    fn max(&mut self) -> storage::Result<Option<Record>> {
         self.go_to_root();
         if !self.seek_last()? {
             return Ok(None);
@@ -629,7 +625,7 @@ impl<'tx> DatabaseCursor for BTreeCursor<'tx> {
         self.try_record().map(Some)
     }
 
-    fn try_record(&self) -> storage::Result<Record<'static>> {
+    fn try_record(&self) -> storage::Result<Record> {
         let page = self
             .pager
             .read_page(self.tx.lock().deref_mut(), self.current_page)?;
@@ -637,9 +633,8 @@ impl<'tx> DatabaseCursor for BTreeCursor<'tx> {
 
         let key = self.extracty_key(&guard, self.current_slot)?;
 
-        key.get_record()
-            .ok_or(storage::Error::InvalidPageType)
-            .map(|r| r.to_owned())
+        // no need for to owned now record just increments ref counter.
+        key.get_record().ok_or(storage::Error::InvalidPageType)
     }
 
     fn position(&self) -> (PageNumber, SlotNumber) {
@@ -775,13 +770,13 @@ impl<'tx> BTreeCursor<'tx> {
     // redistribution, but it's work in progress.
     pub fn insert(
         &mut self,
-        entry: BTreeKey<'_>,
+        entry: BTreeKey,
         options: InsertOptions,
-    ) -> storage::Result<Option<Record<'static>>> {
+    ) -> storage::Result<Option<Record>> {
         let search_result = self.seek(&entry)?;
 
         let record = if options.is_returning() {
-            entry.get_record().map(|r| r.to_owned())
+            entry.get_record()
         } else {
             None
         };
@@ -806,16 +801,16 @@ impl<'tx> BTreeCursor<'tx> {
 
     pub fn update(
         &mut self,
-        old_key: &BTreeKey<'_>,
-        new_entry: BTreeKey<'_>,
+        old_key: &BTreeKey,
+        new_entry: BTreeKey,
         options: InsertOptions,
-    ) -> storage::Result<Option<Record<'static>>> {
+    ) -> storage::Result<Option<Record>> {
         let search_result = self.seek(old_key)?;
 
         match search_result {
             SearchResult::Found { page: _, slot } => {
                 let record = if options.is_returning() {
-                    new_entry.get_record().map(|r| r.to_owned())
+                    new_entry.get_record()
                 } else {
                     None
                 };
@@ -834,7 +829,7 @@ impl<'tx> BTreeCursor<'tx> {
     fn try_insert_into_leaf(
         &mut self,
         slot_number: SlotNumber,
-        entry: BTreeKey<'_>,
+        entry: BTreeKey,
         replace: bool,
     ) -> storage::Result<()> {
         let page = self
@@ -867,9 +862,9 @@ impl<'tx> BTreeCursor<'tx> {
 
     pub fn delete(
         &mut self,
-        entry: &BTreeKey<'_>,
+        entry: &BTreeKey,
         options: DeleteOptions,
-    ) -> storage::Result<Option<Record<'static>>> {
+    ) -> storage::Result<Option<Record>> {
         let search_result = self.seek(entry)?;
 
         match search_result {
@@ -1446,7 +1441,7 @@ impl<'tx> BTreeCursor<'tx> {
             .collect())
     }
 
-    fn build_high_key(&mut self, page: &Page, entry: &BTreeKey<'_>) -> storage::Result<BTreeCell> {
+    fn build_high_key(&mut self, page: &Page, entry: &BTreeKey) -> storage::Result<BTreeCell> {
         let page_type = page.page_type();
 
         if matches!(page_type, PageType::TableInternal | PageType::TableLeaf) {
@@ -1503,7 +1498,7 @@ impl<'tx> BTreeCursor<'tx> {
         Ok(cell)
     }
 
-    fn build_cell(&mut self, page: &Page, entry: BTreeKey<'_>) -> storage::Result<BTreeCell> {
+    fn build_cell(&mut self, page: &Page, entry: BTreeKey) -> storage::Result<BTreeCell> {
         let record = entry
             .get_record()
             .expect("Entry should contain record in order to be inserted");

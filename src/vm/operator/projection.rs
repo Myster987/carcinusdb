@@ -3,15 +3,11 @@ use crate::{
         self,
         analyzer::analyze_expression,
         parser::statement::Expression,
-        record::RecordMut,
+        record::{Record, RecordMut},
         schema::{Column, Schema},
         types::Value,
     },
-    vm::{
-        self,
-        expression::resolve_expression_to_value,
-        operator::{Operator, Row},
-    },
+    vm::{self, expression::resolve_expression_to_value, operator::Operator},
 };
 
 pub struct Projection<'tx> {
@@ -48,15 +44,15 @@ impl<'tx> Projection<'tx> {
 }
 
 impl<'tx> Operator for Projection<'tx> {
-    fn next(&mut self) -> vm::Result<Option<Row>> {
-        let Some(row) = self.child.next()? else {
+    fn next(&mut self) -> vm::Result<Option<Record>> {
+        let Some(record) = self.child.next()? else {
             return Ok(None);
         };
 
         let output = self
             .columns
             .iter()
-            .map(|expr| resolve_expression_to_value(&row, self.child.schema(), expr))
+            .map(|expr| resolve_expression_to_value(&record, self.child.schema(), expr))
             .collect::<sql::Result<Vec<Value>>>()?;
 
         let record = RecordMut::from_values(output).serialize_to_record();
