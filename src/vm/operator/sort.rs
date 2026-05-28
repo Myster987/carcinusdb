@@ -1,13 +1,10 @@
 use std::{fs::File, path::PathBuf};
 
 use crate::{
-    sql::parser::statement::Expression,
+    sql::{parser::statement::Expression, record::Record},
     storage::page::Page,
     utils::io::BlockIO,
-    vm::{
-        self,
-        operator::{Operator, Row},
-    },
+    vm::{self, operator::Operator},
 };
 
 pub struct Sort<'tx> {
@@ -43,7 +40,7 @@ impl<'tx> Operator for Sort<'tx> {
         self.child.schema()
     }
 
-    fn next(&mut self) -> vm::Result<Option<Row>> {
+    fn next(&mut self) -> vm::Result<Option<Record>> {
         todo!()
     }
 }
