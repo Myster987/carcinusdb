@@ -52,11 +52,11 @@ impl Record {
         &self.payload
     }
 
-    pub fn get_value(&self, index: usize) -> ValueRef {
+    pub fn get_value<'a>(&'a self, index: usize) -> ValueRef<'a> {
         self.try_get_value(index).unwrap()
     }
 
-    pub fn try_get_value(&self, index: usize) -> sql::Result<ValueRef> {
+    pub fn try_get_value<'a>(&'a self, index: usize) -> sql::Result<ValueRef<'a>> {
         self.cursor.borrow_mut().get_value(&self.payload, index)
     }
 
@@ -68,7 +68,7 @@ impl Record {
         self.cursor.borrow_mut().len(&self.payload)
     }
 
-    pub fn values(&self) -> Vec<ValueRef> {
+    pub fn values<'a>(&'a self) -> Vec<ValueRef<'a>> {
         let len = self.len();
         let mut values = Vec::with_capacity(len);
 
