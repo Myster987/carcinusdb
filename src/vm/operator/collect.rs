@@ -11,6 +11,7 @@ use crate::{
 };
 
 const RECORD_PAGE_HEADER_SIZE: usize = size_of::<u32>();
+const RECORD_HEADER_SIZE: usize = size_of::<u32>();
 
 pub struct RecordBuffer {
     /// Max size of `page` (fixed size block of records) in bytes.
@@ -53,11 +54,11 @@ impl RecordBuffer {
     }
 
     pub fn can_fit(&self, record: &Record) -> bool {
-        self.current_size + record.size() <= self.page_size
+        self.current_size + RECORD_HEADER_SIZE + record.size() <= self.page_size
     }
 
     pub fn push(&mut self, record: Record) {
-        let record_size = record.size();
+        let record_size = RECORD_HEADER_SIZE + record.size();
 
         if record_size > self.largest_record_size {
             self.largest_record_size = record_size;
@@ -94,8 +95,9 @@ impl RecordBuffer {
             buf.extend_from_slice(&(self.records.len() as u32).to_le_bytes());
         }
 
-        // Rows.
+        // Records.
         for record in &self.records {
+            buf.extend_from_slice(&(record.size() as u32).to_le_bytes());
             buf.extend_from_slice(record.raw());
         }
 
@@ -127,7 +129,13 @@ impl RecordBuffer {
         let mut cursor = RECORD_PAGE_HEADER_SIZE;
 
         for _ in 0..number_of_rows {
-            let record = Record::deserialize(&buffer[cursor..])?;
+            let record_size = u32::from_le_bytes(
+                buffer[cursor..cursor + RECORD_HEADER_SIZE]
+                    .try_into()
+                    .unwrap(),
+            );
+            cursor += RECORD_HEADER_SIZE;
+            let record = Record::deserialize(&buffer[cursor..cursor + record_size as usize])?;
             cursor += record.size();
             self.push(record);
         }
@@ -189,8 +197,8 @@ impl<'tx> Collect<'tx> {
         while let Some(record) = self.source.next()? {
             if !self.mem_buffer.can_fit(&record) {
                 if self.file.is_none() {
-                    // let temp_file = tempfile::tempfile().map_err(|_| vm::Error::Corrupted)?;
-                    // self.file = Some(temp_file);
+                    let temp_file = tempfile::tempfile().map_err(|_| vm::Error::Corrupted)?;
+                    self.file = Some(temp_file);
                 }
                 self.mem_buffer
                     .write_to(self.file.as_mut().unwrap())
@@ -208,8 +216,14 @@ impl<'tx> Collect<'tx> {
 
         Ok(())
     }
+}
 
-    pub fn next(&mut self) -> vm::Result<Option<Record>> {
+impl<'tx> Operator for Collect<'tx> {
+    fn schema(&self) -> &crate::sql::schema::Schema {
+        self.source.schema()
+    }
+
+    fn next(&mut self) -> vm::Result<Option<Record>> {
         if !self.collected {
             self.collect()?;
             self.collected = true;
@@ -222,7 +236,18 @@ impl<'tx> Collect<'tx> {
                 .map_err(|_| vm::Error::Corrupted)?;
 
             if has_data_left {
-                // return Ok(Some(self.mem_buffer.read_from(reader)));
+                let record_size = &mut [0; 4];
+                reader
+                    .read_exact(record_size)
+                    .map_err(|_| vm::Error::Corrupted)?;
+                let record_size = u32::from_le_bytes(record_size[..].try_into().unwrap()) as usize;
+
+                let mut record_buf = vec![0; record_size];
+                reader
+                    .read_exact(&mut record_buf)
+                    .map_err(|_| vm::Error::Corrupted)?;
+
+                return Ok(Some(Record::new(record_buf)));
             }
         }
 
