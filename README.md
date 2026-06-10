@@ -67,3 +67,157 @@ flushes and syncs the WAL; `ROLLBACK` replays inverse log records.
 The Volcano model composes iterators top-down. Each operator implements
 `next()`. The planner selects between full table scans and index scans
 based on available indexes and query predicates.
+
+---
+
+## SQL Reference
+
+CarcinusDB implements a subset of standard SQL. The sections below document every supported statement, clause, and modifier.
+
+---
+
+### `CREATE TABLE`
+
+Creates a new table with the specified columns and types.
+
+```sql
+CREATE TABLE users (
+    id      INT PRIMARY KEY,
+    name    TEXT,
+    email   TEXT,
+    age     INT
+);
+```
+
+**Supported column types:** `INT` (varint), `TEXT`, `BLOB`, `BOOL`
+
+---
+
+### `INSERT INTO`
+
+Inserts one or more rows into a table.
+
+**Single row:**
+```sql
+INSERT INTO users (id, name, email, age)
+VALUES (1, 'Alice', 'alice@example.com', 30);
+```
+
+**Multiple rows (multi-value insert):**
+```sql
+INSERT INTO users (id, name, email, age)
+VALUES
+    (1, 'Alice', 'alice@example.com', 30),
+    (2, 'Bob',   'bob@example.com',   25),
+    (3, 'Carol', 'carol@example.com', 28);
+```
+
+All rows are inserted atomically — if any row fails validation, no rows are written.
+
+---
+
+### `SELECT`
+
+Retrieves rows from a table.
+
+**All columns:**
+```sql
+SELECT * FROM users;
+```
+
+**Specific columns:**
+```sql
+SELECT id, name FROM users;
+```
+
+**With a filter:**
+```sql
+SELECT id, name FROM users WHERE age > 25;
+```
+
+---
+
+### `WHERE`
+
+Filters rows by a condition. Supported in `SELECT`, `UPDATE`, and `DELETE`.
+
+**Comparison operators:** `=`, `!=`, `<`, `>`, `<=`, `>=`
+
+**Logical operators:** `AND`, `OR`, `NOT`
+
+```sql
+SELECT * FROM users WHERE age >= 18 AND email != '';
+
+UPDATE users SET age = 31 WHERE name = 'Alice';
+
+DELETE FROM users WHERE age < 18 OR name = 'unknown';
+```
+
+String values must be quoted with single quotes. NULL comparisons use `IS NULL` / `IS NOT NULL`.
+
+```sql
+SELECT * FROM users WHERE email IS NOT NULL;
+```
+
+---
+
+### `UPDATE`
+
+Modifies existing rows. Requires a `WHERE` clause to target specific rows; omitting it updates every row in the table.
+
+```sql
+UPDATE users
+SET age = 31, email = 'alice@new.com'
+WHERE id = 1;
+```
+
+Multiple columns can be updated in a single statement by comma-separating the `SET` assignments.
+
+---
+
+### `DELETE`
+
+Removes rows from a table. Like `UPDATE`, a missing `WHERE` clause deletes all rows.
+
+```sql
+DELETE FROM users WHERE id = 3;
+```
+
+---
+
+### `RETURNING`
+
+Returns the affected rows after a write operation. Supported with `INSERT`, `UPDATE`, and `DELETE`. Accepts either `*` or a specific column list.
+
+```sql
+-- Get the full inserted row back
+INSERT INTO users (id, name, email, age)
+VALUES (4, 'Dave', 'dave@example.com', 22)
+RETURNING *;
+
+-- Calculate something after operation
+UPDATE users SET age = 32 WHERE name = 'Alice'
+RETURNING id, age + 10;
+
+-- Confirm which rows were deleted
+DELETE FROM users WHERE age < 20
+RETURNING id, name;
+```
+
+`RETURNING` is evaluated after the write completes and reflects the final state of the row.
+
+---
+
+### `ORDER BY` *(planned)*
+
+> **Not yet implemented.** `ORDER BY` is on the roadmap; queries that include it will return an error.
+
+The planned syntax follows the SQL standard:
+
+```sql
+-- Not yet supported
+SELECT * FROM users ORDER BY age DESC;
+SELECT id, name FROM users ORDER BY name ASC, id DESC;
+```
+
+Disk-backed external merge sort is going to be implemented internally and will power this feature once the query planner layer is wired up.
