@@ -204,6 +204,12 @@ impl<'tx> Collect<'tx> {
                     .write_to(self.file.as_mut().unwrap())
                     .map_err(|_| vm::Error::Corrupted)?;
                 self.mem_buffer.clear();
+
+                if !self.mem_buffer.can_fit(&record) {
+                    panic!(
+                        "Record was bigger than Page, so it can't be sorted now. This needs TOAST-like system to handle it. Which is not implemented"
+                    );
+                }
             }
 
             self.mem_buffer.push(record);
