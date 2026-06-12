@@ -1,4 +1,4 @@
-use std::{cell::RefCell, fmt::Debug, rc::Rc};
+use std::{cell::RefCell, cmp::Ordering, fmt::Debug, rc::Rc};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -134,6 +134,29 @@ impl protocol::Encode for Record {
         dst.put_varint(self.size() as VarInt);
         dst.put_u8(MessageType::Record as u8);
         dst.put_slice(self.raw());
+    }
+}
+
+impl PartialEq for Record {
+    fn eq(&self, other: &Self) -> bool {
+        match compare_records(self, other) {
+            Ordering::Equal => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Record {}
+
+impl PartialOrd for Record {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(compare_records(self, other))
+    }
+}
+
+impl Ord for Record {
+    fn cmp(&self, other: &Self) -> Ordering {
+        compare_records(self, other)
     }
 }
 
