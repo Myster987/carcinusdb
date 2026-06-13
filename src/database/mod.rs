@@ -118,7 +118,7 @@ pub async fn handle_connection(db: Arc<Database>, mut conn: ServerConnection) ->
                         let result = match transaction.execute(&sql) {
                             Ok(r) => r,
                             Err(e) => {
-                                log::error!("{e}");
+                                log::error!("Error when executing query: {e}");
                                 let _ = tx.blocking_send(Ok(Response::Error(e.to_string())));
                                 return Ok(());
                             }
