@@ -13,6 +13,7 @@ use crate::{
         self,
         operator::{
             Operator,
+            collect::Collect,
             filter::Filter,
             index_scan::{IndexScan, find_index},
             projection::Projection,
@@ -75,6 +76,7 @@ pub fn plan_delete<'tx>(
 
     if let Some(returning) = returning {
         plan = Box::new(Projection::new(plan, returning)?);
+        plan = Box::new(Collect::new(plan, tx.page_size(), true));
     }
 
     Ok(Delete { child: plan })

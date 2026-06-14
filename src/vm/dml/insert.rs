@@ -13,7 +13,7 @@ use crate::{
     storage::btree::{BTreeCursor, BTreeKey, InsertOptions},
     vm::{
         self,
-        operator::{Operator, projection::Projection},
+        operator::{Operator, collect::Collect, projection::Projection},
     },
 };
 
@@ -45,6 +45,7 @@ pub fn plan_insert<'tx>(
 
     if let Some(returning) = returning {
         plan = Box::new(Projection::new(plan, returning)?);
+        plan = Box::new(Collect::new(plan, tx.page_size(), true));
     };
 
     Ok(Insert {

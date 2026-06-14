@@ -7,6 +7,7 @@ use crate::{
         self,
         operator::{
             Operator,
+            collect::Collect,
             filter::Filter,
             index_scan::{IndexScan, ScanKind, find_index},
             projection::Projection,
@@ -62,6 +63,10 @@ pub fn plan_select<'tx>(
 
     if !columns.is_empty() {
         plan = Box::new(Projection::new(plan, columns)?);
+    }
+
+    if order_by.is_empty() {
+        plan = Box::new(Collect::new(plan, tx.page_size(), true));
     }
 
     Ok(Select { operator: plan })
