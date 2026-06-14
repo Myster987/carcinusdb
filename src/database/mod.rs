@@ -114,37 +114,46 @@ pub async fn handle_connection(db: Arc<Database>, mut conn: ServerConnection) ->
                 let (tx, mut rx) = tokio::sync::mpsc::channel(32);
 
                 let handle = tokio::task::spawn_blocking(move || {
-                    {
-                        let result = match transaction.execute(&sql) {
-                            Ok(r) => r,
-                            Err(e) => {
-                                log::error!("Error when executing query: {e}");
-                                let _ = tx.blocking_send(Ok(Response::Error(e.to_string())));
-                                return Ok(());
-                            }
-                        };
-                        match result {
-                            QueryResult::RecordsAffected(n) => {
-                                let _ = tx.blocking_send(Ok(Response::RecordsAffected(n)));
-                            }
-                            QueryResult::Records(iter) => {
-                                let _ =
-                                    tx.blocking_send(Ok(Response::Schema(iter.schema().clone())));
-                                for record in iter {
-                                    if tx.blocking_send(record.map(Response::Record)).is_err() {
+                    let ok = match transaction.execute(&sql) {
+                        Err(e) => {
+                            log::error!("Error when executing query: {e}");
+                            let _ = tx.blocking_send(Response::Error(e.to_string()));
+                            false
+                        }
+                        Ok(QueryResult::RecordsAffected(n)) => {
+                            let _ = tx.blocking_send(Response::RecordsAffected(n));
+                            true
+                        }
+                        Ok(QueryResult::Records(iter)) => {
+                            let _ = tx.blocking_send(Response::Schema(iter.schema().clone()));
+                            let mut iter_ok = true;
+                            for record in iter {
+                                match record {
+                                    Ok(r) => {
+                                        let _ = tx.blocking_send(Response::Record(r));
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.blocking_send(Response::Error(e.to_string()));
+                                        iter_ok = false;
                                         break;
                                     }
                                 }
-                                let _ = tx.blocking_send(Ok(Response::End));
                             }
+                            let _ = tx.blocking_send(Response::End);
+                            iter_ok
                         }
+                    };
+                    if ok {
+                        transaction.commit()?;
+                    } else {
+                        transaction.rollback()?;
                     }
-                    transaction.commit()?;
+
                     Ok::<_, Error>(())
                 });
 
                 while let Some(msg) = rx.recv().await {
-                    conn.send(msg?).await?;
+                    conn.send(msg).await?;
                 }
 
                 handle.await.unwrap()?;
@@ -387,7 +396,13 @@ impl DatabaseTransaction {
     }
 
     pub fn rollback(self) -> Result<()> {
-        // simply consume self
+        let mut wal_tx = Arc::into_inner(self.wal_tx)
+            .expect("Something is still using this transaction")
+            .into_inner();
+
+        if !wal_tx.dirty_pages().is_empty() {
+            self.pager.evict_dirty(&mut wal_tx)?;
+        }
 
         Ok(())
     }
@@ -399,6 +414,10 @@ impl DatabaseTransaction {
     pub fn create_btree(&self, btree_type: BTreeType) -> storage::Result<PageNumber> {
         self.pager
             .btree_create(self.wal_tx.lock().deref_mut(), btree_type)
+    }
+
+    pub fn page_size(&self) -> usize {
+        self.pager.db_header.load().get_page_size()
     }
 }
 
