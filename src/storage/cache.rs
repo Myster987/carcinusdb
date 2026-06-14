@@ -64,6 +64,10 @@ impl<S: BuildHasher> ShardedClockCache<S> {
         self.get_shard(&key).lock().try_insert(key, page)
     }
 
+    pub fn remove(&self, key: &PageNumber) -> Option<Arc<MemPage>> {
+        self.get_shard(key).lock().remove(key)
+    }
+
     pub fn drain_overflow(&self) -> Vec<(PageNumber, Arc<MemPage>)> {
         let mut result = Vec::new();
         for shard in &self.shards {
@@ -165,6 +169,20 @@ impl ClockCache {
             }
 
             Some(entry.page.clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn remove(&mut self, key: &PageNumber) -> Option<Arc<MemPage>> {
+        if self.dirty_overflow.contains_key(key) {
+            return self.dirty_overflow.remove(key);
+        }
+
+        if let Some(index) = self.map.remove(key) {
+            let entry = self.pages[index].take().unwrap();
+
+            Some(entry.page)
         } else {
             None
         }

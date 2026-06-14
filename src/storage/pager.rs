@@ -759,6 +759,18 @@ impl Pager {
 
         Ok(())
     }
+
+    pub fn evict_dirty(&self, tx: &mut Transaction) -> storage::Result<()> {
+        tx.acquire_write(&self.wal)?;
+
+        for page in tx.dirty_pages().iter() {
+            self.page_cache.remove(&page);
+        }
+
+        tx.dirty_pages_mut().clear();
+
+        Ok(())
+    }
 }
 
 /// Takes reference to write result and consumes exclusive lock to page. If
