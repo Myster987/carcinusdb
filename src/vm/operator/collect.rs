@@ -74,6 +74,14 @@ impl RecordBuffer {
         })
     }
 
+    pub fn peek_front(&mut self) -> Option<Record> {
+        self.records
+            .iter()
+            .peekable()
+            .peek()
+            .map(|&r| r.to_borrowed())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
@@ -221,6 +229,41 @@ impl<'tx> Collect<'tx> {
         }
 
         Ok(())
+    }
+
+    pub fn peek(&mut self) -> vm::Result<Option<Record>> {
+        if !self.collected {
+            self.collect()?;
+            self.collected = true;
+        }
+
+        if let Some(reader) = self.reader.as_mut() {
+            let has_data_left = reader
+                .fill_buf()
+                .map(|r| !r.is_empty())
+                .map_err(|_| vm::Error::Corrupted)?;
+
+            if has_data_left {
+                let record_size = &mut [0; 4];
+                reader
+                    .read_exact(record_size)
+                    .map_err(|_| vm::Error::Corrupted)?;
+                let record_size = u32::from_le_bytes(record_size[..].try_into().unwrap()) as usize;
+
+                let mut record_buf = vec![0; record_size];
+                reader
+                    .read_exact(&mut record_buf)
+                    .map_err(|_| vm::Error::Corrupted)?;
+
+                reader
+                    .seek_relative((record_size + 4) as i64 * -1)
+                    .map_err(|_| vm::Error::Corrupted)?;
+
+                return Ok(Some(Record::new(record_buf)));
+            }
+        }
+
+        Ok(self.mem_buffer.peek_front())
     }
 }
 
