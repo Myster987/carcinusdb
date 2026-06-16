@@ -585,6 +585,17 @@ pub fn unpack_u64(packed: u64) -> (u32, u32) {
     ((packed >> 32) as u32, packed as u32)
 }
 
+/// Turns `Vec<T>` into consumable chunks like [Vec::chunks], but chunks are owned.
+pub fn into_chunks<T>(mut vec: Vec<T>, size: usize) -> impl Iterator<Item = Vec<T>> {
+    std::iter::from_fn(move || {
+        if vec.is_empty() {
+            return None;
+        }
+        let n = size.min(vec.len());
+        Some(vec.drain(..n).collect())
+    })
+}
+
 #[cfg(test)]
 mod tests {
 
