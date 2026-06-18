@@ -62,7 +62,7 @@ impl<const SIZE: usize> AtomicArray<SIZE> {
 
                     return SlotGuard {
                         array: self.clone(),
-                        slot_number: i,
+                        slot_index: i,
                     };
                 }
             }
@@ -114,14 +114,15 @@ impl<const SIZE: usize> AtomicArray<SIZE> {
     }
 }
 
+/// Protects value in `AtomicArray`.
 pub struct SlotGuard<const SIZE: usize> {
     array: Arc<AtomicArray<SIZE>>,
-    slot_number: usize,
+    slot_index: usize,
 }
 
 impl<const SIZE: usize> Drop for SlotGuard<SIZE> {
     fn drop(&mut self) {
-        self.array.release(self.slot_number);
+        self.array.release(self.slot_index);
     }
 }
 

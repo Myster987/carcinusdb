@@ -7,6 +7,7 @@ use std::{
 
 use crate::storage::page::{MAX_PAGE_SIZE, MIN_PAGE_SIZE};
 
+/// Pointer to memory owned by a buffer.
 pub type BufferData = NonNull<u8>;
 /// Custom drop function handler that returns pointer to buffer memory.
 pub type DropFn = Rc<dyn Fn(BufferData)>;

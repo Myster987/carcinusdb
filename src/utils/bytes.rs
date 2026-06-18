@@ -525,10 +525,12 @@ pub fn varint_size(value: VarInt) -> usize {
     encode_to_varint(value).len()
 }
 
+/// Encodes [i64] as [u64].
 pub fn zigzag_encode(value: i64) -> u64 {
     (value >> 63) as u64 ^ (value << 1) as u64
 }
 
+/// Decodes [u64] as [i64].
 pub fn zigzag_decode(value: u64) -> i64 {
     (value >> 1) as i64 ^ -((value & 1) as i64)
 }

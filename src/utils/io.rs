@@ -11,6 +11,7 @@ use libc::c_void;
 
 use crate::utils::buffer::Buffer;
 
+/// Simple Python-style input from stdin.
 pub fn input(message: &str) -> io::Result<String> {
     let mut buffer = String::new();
 
@@ -23,21 +24,21 @@ pub fn input(message: &str) -> io::Result<String> {
     Ok(buffer.trim().to_string())
 }
 
+/// Simple Python-style input from stdin, but requires buffer for result.
 pub fn input_buffered(message: &str, input_buffer: &mut String) -> io::Result<()> {
-    // let mut buffer = String::new();
-
     print!("{message}");
 
     io::stdout().flush()?;
 
     io::stdin().read_line(input_buffer)?;
 
-    // Ok(buffer.trim().to_string())
     Ok(())
 }
 
+/// Basic identifier for blocks in file.
 pub type BlockNumber = u32;
 
+/// Number of IO buffers, that OS can handle in one batch.
 pub const MAX_VECTORED_IO_BUFFERS: LazyLock<usize> =
     LazyLock::new(|| unsafe { libc::sysconf(libc::_SC_IOV_MAX) } as usize);
 

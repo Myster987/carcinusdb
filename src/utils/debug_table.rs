@@ -14,6 +14,7 @@ impl DebugTable {
         }
     }
 
+    /// Returns number of rows in table.
     pub fn len(&self) -> usize {
         self.rows.len()
     }
