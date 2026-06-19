@@ -13,17 +13,17 @@
 //! Message types:
 //!
 //! ```text
-//! | Tag | Name         | Direction        | Payload                              |
-//! |-----|--------------|------------------|--------------------------------------|
-//! | 'Q' | Query        | Client → Server  | UTF-8 SQL string                     |
-//! | 'X' | Close        | Client → Server  | (empty)                              |
-//! | 'S' | Schema       | Server → Client  | varint col_count, then per column:   |
-//! |     |              |                  |   varint name_len, name bytes,       |
-//! |     |              |                  |   1 byte data type                   |
-//! | 'R' | Record       | Server → Client  | raw record in DB serialization format|
-//! | 'A' | RowsAffected | Server → Client  | varint record count                  |
-//! | 'E' | Error        | Server → Client  | UTF-8 error message                  |
-//! | 'Z' | End          | Server → Client  | (empty) — terminates a response      |
+//! | Tag | Name         | Direction        | Payload                               |
+//! |-----|--------------|------------------|---------------------------------------|
+//! | 'Q' | Query        | Client → Server  | UTF-8 SQL string                      |
+//! | 'X' | Close        | Client → Server  | (empty)                               |
+//! | 'S' | Schema       | Server → Client  | varint col_count, then per column:    |
+//! |     |              |                  |   varint name_len, name bytes,        |
+//! |     |              |                  |   1 byte data type                    |
+//! | 'R' | Record       | Server → Client  | raw record in DB serialization format |
+//! | 'A' | RowsAffected | Server → Client  | varint record count                   |
+//! | 'E' | Error        | Server → Client  | UTF-8 error message                   |
+//! | 'Z' | End          | Server → Client  | (empty) — terminates a response       |
 //! ```
 //!
 //! A typical successful SELECT exchange looks like:
@@ -75,15 +75,24 @@ pub trait Encode {
     fn encode(&self, dst: &mut BytesMut);
 }
 
+/// Used in each messege client/server to indicate how data should be decoded.
 #[repr(u8)]
 pub enum MessageType {
+    /// Payload: UTF-8 string, that is a SQL statement.
     Query = b'Q',
+    /// Payload: `Schema` defintion. Depends on `Decode` impl.
     Schema = b'S',
+    /// Paylaod: `Column` definition. Depends on `Decode` impl.
     Column = b'C',
+    /// Payload: `Record` returned by query. Depends on `Decode` impl.
     Record = b'R',
+    /// Payload: UTF-8 string, error returned by DB.
     Err = b'E',
+    /// Payload: varint, number of rows that this query affected.
     RowsAffected = b'A',
+    /// Payload: none, client or server terminated connection.
     End = b'Z',
+    /// Payload: none, client finished session and wants to close connection.
     Close = b'X',
 }
 
@@ -105,11 +114,11 @@ impl TryFrom<u8> for MessageType {
     }
 }
 
+/// Client request. Can either be SQL or close operation.
 #[derive(Debug)]
 pub enum Request {
     Query(String),
     Close,
-    // End,
 }
 
 impl Decode for Request {
@@ -147,10 +156,6 @@ impl Encode for Request {
                 dst.put_u8(MessageType::Query as u8);
                 dst.put_slice(sql.as_bytes());
             }
-            // Self::End => {
-            //     dst.put_varint(0);
-            //     dst.put_u8(MessageType::End as u8);
-            // }
             Self::Close => {
                 dst.put_varint(0);
                 dst.put_u8(MessageType::Close as u8);
@@ -159,6 +164,7 @@ impl Encode for Request {
     }
 }
 
+/// Server response.
 #[derive(Debug)]
 pub enum Response {
     Schema(Schema),
@@ -243,6 +249,7 @@ impl Encode for Response {
     }
 }
 
+/// Custom protcol used by client to work with db server.
 pub struct CarcinusClientCodec;
 
 impl tokio_util::codec::Decoder for CarcinusClientCodec {
@@ -267,6 +274,7 @@ impl tokio_util::codec::Encoder<Request> for CarcinusClientCodec {
     }
 }
 
+/// Custom protcol used by server to work with client.
 pub struct CarcinusServerCodec;
 
 impl tokio_util::codec::Decoder for CarcinusServerCodec {
