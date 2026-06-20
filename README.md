@@ -210,7 +210,7 @@ RETURNING id, name;
 
 ### `ORDER BY` *(planned)*
 
-> **Not yet implemented.** `ORDER BY` is on the roadmap; queries that include it will return an error.
+> **In development.** `ORDER BY` is under construction; queries that include it will return an error.
 
 The planned syntax follows the SQL standard:
 
