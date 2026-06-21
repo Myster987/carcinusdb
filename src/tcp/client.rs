@@ -14,11 +14,15 @@ use crate::{
     utils::debug_table::DebugTable,
 };
 
+/// Async handler for sending requests and reciving responses. Contains all
+/// the necessary methods to execute SQL queries and parse results.
 pub struct ClientConnection {
+    /// Framed [TcpStream], that allows to parse only complete data.
     framed: Framed<TcpStream, CarcinusClientCodec>,
 }
 
 impl ClientConnection {
+    /// Create new connection to server at given `addr`. Can return error.
     pub async fn connect(addr: &str) -> tcp::Result<Self> {
         let stream = TcpStream::connect(addr).await?;
         Ok(Self {
@@ -26,10 +30,12 @@ impl ClientConnection {
         })
     }
 
+    /// Send `Request` to server.
     pub async fn send(&mut self, request: Request) -> tcp::Result<()> {
         self.framed.send(request).await
     }
 
+    /// Recive response from
     pub async fn receive(&mut self) -> tcp::Result<Response> {
         self.framed
             .next()
@@ -37,6 +43,7 @@ impl ClientConnection {
             .ok_or(tcp::Error::ConnectionClosed)?
     }
 
+    /// Send SQL query to db and return parsed result.
     pub async fn query(&mut self, sql: &str) -> tcp::Result<ClientQueryResult> {
         self.send(Request::Query(sql.to_string())).await?;
 
@@ -81,8 +88,11 @@ impl Display for ClientQueryResult {
     }
 }
 
+/// Simple wrapper to handle data that is returned by query.
 pub struct Table {
+    /// Definition of data.
     pub schema: Schema,
+    /// All records that were returned by query.
     pub records: Vec<Record>,
 }
 
