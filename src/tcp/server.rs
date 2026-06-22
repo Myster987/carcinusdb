@@ -11,17 +11,22 @@ use crate::{
     vm::query_result::QueryResult,
 };
 
+/// Async handler for sending responses and reciving requests. Contains all
+/// the necessary methods to process, execute and encode query results.
 pub struct ServerConnection {
+    /// Framed [TcpStream], that allows to parse only complete data.
     framed: Framed<TcpStream, CarcinusServerCodec>,
 }
 
 impl ServerConnection {
+    /// Create new client/server connection.
     pub fn new(stream: TcpStream) -> Self {
         Self {
             framed: Framed::new(stream, CarcinusServerCodec),
         }
     }
 
+    /// Recive request from `ClientConnection`.
     pub async fn receive(&mut self) -> tcp::Result<Request> {
         self.framed
             .next()
@@ -29,10 +34,12 @@ impl ServerConnection {
             .ok_or(tcp::Error::ConnectionClosed)?
     }
 
+    /// Send `Response` to client.
     pub async fn send(&mut self, response: Response) -> tcp::Result<()> {
         self.framed.send(response).await
     }
 
+    /// Stream whole `QueryResult` to client.
     pub async fn send_query_result<'tx>(&mut self, result: QueryResult<'tx>) -> tcp::Result<()> {
         match result {
             QueryResult::RecordsAffected(n) => self.send(Response::RecordsAffected(n)).await?,

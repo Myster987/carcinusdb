@@ -35,7 +35,7 @@ impl ClientConnection {
         self.framed.send(request).await
     }
 
-    /// Recive response from
+    /// Recive response from.
     pub async fn receive(&mut self) -> tcp::Result<Response> {
         self.framed
             .next()
