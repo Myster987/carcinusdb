@@ -1,17 +1,24 @@
 use std::{
-    cmp::{Ordering, Reverse},
-    collections::BinaryHeap,
+    cmp::Ordering,
     fs::File,
     io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
 };
 
+use binary_heap_plus::{BinaryHeap, FnComparator};
+
 use crate::{
-    sql::{parser::statement::Expression, record::Record},
+    sql::{
+        parser::statement::{Expression, Order},
+        record::{Record, RecordMut},
+        schema::Schema,
+    },
     vm::{
         self,
         operator::{Operator, collect::Collect},
     },
 };
+
+type HeapCmp = FnComparator<fn(&MergeEntry, &MergeEntry) -> std::cmp::Ordering>;
 
 pub struct Sort<'tx> {
     sorted: bool,
@@ -20,6 +27,7 @@ pub struct Sort<'tx> {
     k_way: usize,
 
     order_by: Vec<Expression>,
+    order: Order,
     collect: Collect<'tx>,
 
     sorted_run: Option<SortRunReader>,
@@ -27,8 +35,9 @@ pub struct Sort<'tx> {
 
 impl<'tx> Sort<'tx> {
     pub fn new(
-        order_by: Vec<Expression>,
         collect: Collect<'tx>,
+        order_by: Vec<Expression>,
+        order: Order,
         page_size: usize,
         buffer_mem: usize,
         k_way: usize,
@@ -39,53 +48,62 @@ impl<'tx> Sort<'tx> {
             buffer_mem,
             k_way,
             order_by,
+            order,
             collect,
             sorted_run: None,
         }
     }
 
     fn generate_runs(&mut self) -> vm::Result<Vec<SortRunReader>> {
+        let schema = self.schema().clone();
         let mut sort_runs = Vec::new();
-        let mut sort_heap = RecordHeap::new(self.buffer_mem);
+        let mut sort_heap = ReplacementSelectionHeap::new(self.buffer_mem, self.order);
 
         // RUN 0
 
-        sort_heap.load_to_max_size(&mut self.collect)?;
+        sort_heap.load_to_max_size(&schema, &self.order_by, &mut self.collect)?;
+
+        let mut current_run = SortRun::new();
 
         while let Some(new_record) = self.collect.next()? {
-            let mut run = SortRun::new();
+            let new_entry = MergeEntry::new(self.schema(), &self.order_by, new_record, 0)?;
 
-            while !sort_heap.is_frozen() {
-                loop {
-                    // loop if next is too big
-                    let record_to_write = sort_heap.pop().unwrap();
-
-                    run.write_record(record_to_write)?;
-
-                    if sort_heap.push(new_record.clone()).is_some() {
+            loop {
+                match sort_heap.pop() {
+                    Some(entry) => {
+                        current_run.write_entry(entry)?;
+                        if sort_heap.push(new_entry.clone()).is_some() {
+                            break;
+                        }
+                    }
+                    None => {
+                        sort_heap.force_push(new_entry.clone());
                         break;
                     }
                 }
             }
 
-            // should produce single sorted run.
-            sort_runs.push(SortRunReader::from_run(run)?);
-            sort_heap.unfreez();
-            sort_heap.load_to_max_size(&mut self.collect)?;
+            if sort_heap.is_frozen() {
+                // should produce single sorted run.
+                sort_runs.push(SortRunReader::from_run(current_run)?);
+                current_run = SortRun::new();
+                sort_heap.unfreez();
+                sort_heap.load_to_max_size(&schema, &self.order_by, &mut self.collect)?;
+            }
         }
 
-        if !sort_heap.is_empty() {
-            let mut run = SortRun::new();
+        while let Some(record) = sort_heap.pop() {
+            current_run.write_entry(record)?;
+        }
+        sort_runs.push(SortRunReader::from_run(current_run)?);
 
-            while let Some(record_to_write) = sort_heap.pop() {
-                run.write_record(record_to_write)?;
-
-                if !sort_heap.is_empty() {
-                    sort_heap.unfreez();
-                }
+        if sort_heap.is_frozen() {
+            sort_heap.unfreez();
+            let mut frozen_run = SortRun::new();
+            while let Some(record) = sort_heap.pop() {
+                frozen_run.write_entry(record)?;
             }
-
-            sort_runs.push(SortRunReader::from_run(run)?);
+            sort_runs.push(SortRunReader::from_run(frozen_run)?);
         }
 
         Ok(sort_runs)
@@ -99,12 +117,18 @@ impl<'tx> Sort<'tx> {
 
         let mut merged_runs = Vec::new();
 
+        let cmp = FnComparator(match self.order {
+            Order::Asc => |a: &MergeEntry, b: &MergeEntry| b.cmp(a),
+            Order::Desc => |a: &MergeEntry, b: &MergeEntry| a.cmp(b),
+        });
+
         for mut chunk in crate::utils::bytes::into_chunks(readers, self.k_way) {
-            let mut heap = BinaryHeap::new();
+            let mut heap = BinaryHeap::from_vec_cmp(Vec::new(), cmp);
 
             for (i, reader) in chunk.iter_mut().enumerate() {
-                if let Some(record) = reader.next_record()? {
-                    heap.push(Reverse(MergeEntry { record, run_idx: i }));
+                if let Some(mut entry) = reader.next_entry()? {
+                    entry.run_idx = i;
+                    heap.push(entry);
                 }
             }
 
@@ -115,13 +139,12 @@ impl<'tx> Sort<'tx> {
 
             let mut run = SortRun::new();
 
-            while let Some(Reverse(MergeEntry { record, run_idx })) = merge_state.heap.pop() {
-                run.write_record(record)?;
-                if let Some(next) = merge_state.readers[run_idx].next_record()? {
-                    merge_state.heap.push(Reverse(MergeEntry {
-                        record: next,
-                        run_idx,
-                    }));
+            while let Some(entry) = merge_state.heap.pop() {
+                let run_idx = entry.run_idx;
+                run.write_entry(entry)?;
+                if let Some(mut next_entry) = merge_state.readers[run_idx].next_entry()? {
+                    next_entry.run_idx = run_idx;
+                    merge_state.heap.push(next_entry);
                 }
             }
 
@@ -147,7 +170,7 @@ impl<'tx> Operator for Sort<'tx> {
         }
 
         match self.sorted_run.as_mut() {
-            Some(run) => run.next_record(),
+            Some(run) => run.next_entry().map(|entry| entry.map(|e| e.record)),
             None => Ok(None),
         }
     }
@@ -164,60 +187,128 @@ impl SortRun {
         }
     }
 
-    pub fn write_record(&mut self, record: Record) -> vm::Result<()> {
-        let record_size = (record.size() as u32).to_le_bytes();
+    pub fn write_entry(&mut self, entry: MergeEntry) -> vm::Result<()> {
+        let key_size = (entry.key.size() as u32).to_le_bytes();
+        let record_size = (entry.record.size() as u32).to_le_bytes();
+
+        self.writer
+            .write_all(&key_size)
+            .map_err(|_| vm::Error::Corrupted)?;
         self.writer
             .write_all(&record_size)
             .map_err(|_| vm::Error::Corrupted)?;
+
         self.writer
-            .write_all(record.raw())
+            .write_all(entry.key.raw())
             .map_err(|_| vm::Error::Corrupted)?;
+        self.writer
+            .write_all(entry.record.raw())
+            .map_err(|_| vm::Error::Corrupted)?;
+
         Ok(())
     }
 }
 
-struct RecordHeap {
-    heap: BinaryHeap<Reverse<Record>>,
-
+struct ReplacementSelectionHeap {
+    /// Compare method used by heap. Can either be in `ASC` or `DESC` order.
+    cmp: HeapCmp,
+    heap: BinaryHeap<MergeEntry, HeapCmp>,
     /// Records with `frozen` status.
-    freeze_list: Vec<Record>,
-
-    last_pop: Option<Record>,
-
-    /// Current size of total heap + list size in `bytes`.
-    current_size: usize,
-
+    freeze_list: Vec<MergeEntry>,
+    /// Latest removed entry from heap.
+    last_pop: Option<MergeEntry>,
+    /// Current size of heap in **bytes**.
+    heap_size: usize,
+    /// Current size of freeze list in **bytes**.
+    frozen_size: usize,
     /// Total alloved size of heap + list size in `bytes`.
     max_size: usize,
 }
 
-impl RecordHeap {
-    fn new(max_size: usize) -> Self {
+impl ReplacementSelectionHeap {
+    fn new(max_size: usize, order: Order) -> Self {
+        let cmp = FnComparator(match order {
+            Order::Asc => |a: &MergeEntry, b: &MergeEntry| b.cmp(a),
+            Order::Desc => |a: &MergeEntry, b: &MergeEntry| a.cmp(b),
+        });
+
+        let heap = BinaryHeap::from_vec_cmp(Vec::new(), cmp);
+
         Self {
-            heap: BinaryHeap::new(),
+            cmp,
+            heap,
             freeze_list: Vec::new(),
-
             last_pop: None,
-
-            current_size: 0,
+            heap_size: 0,
+            frozen_size: 0,
             max_size,
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.heap.is_empty() && self.freeze_list.is_empty()
+        self.heap_size == 0 && self.frozen_size == 0
     }
 
     fn is_frozen(&self) -> bool {
-        self.heap.is_empty() && !self.freeze_list.is_empty()
+        self.heap_size == 0 && self.frozen_size > 0
     }
 
-    fn load_to_max_size(&mut self, record_src: &mut Collect<'_>) -> vm::Result<()> {
-        while let Some(record) = record_src.peek()?
-            && self.current_size + record.size() <= self.max_size
-        {
-            self.current_size += record.size();
-            self.heap.push(Reverse(record));
+    fn pop(&mut self) -> Option<MergeEntry> {
+        let popped = self.heap.pop().inspect(|entry| {
+            self.heap_size -= entry.size();
+            self.last_pop = Some(entry.clone());
+        });
+        popped
+    }
+
+    fn push(&mut self, new_entry: MergeEntry) -> Option<()> {
+        let freezes = self
+            .last_pop
+            .as_ref()
+            .map(|last| self.cmp.0(&new_entry, last) == Ordering::Greater)
+            .unwrap_or(false);
+
+        if freezes {
+            self.frozen_size += new_entry.size();
+            self.freeze_list.push(new_entry);
+        } else {
+            if self.heap_size + new_entry.size() > self.max_size {
+                return None;
+            }
+            self.heap_size += new_entry.size();
+            self.heap.push(new_entry);
+        }
+        Some(())
+    }
+
+    fn force_push(&mut self, new_entry: MergeEntry) {
+        let freezes = self
+            .last_pop
+            .as_ref()
+            .map(|last| self.cmp.0(&new_entry, last) == Ordering::Greater)
+            .unwrap_or(false);
+        if freezes {
+            self.frozen_size += new_entry.size();
+            self.freeze_list.push(new_entry);
+        } else {
+            self.heap_size += new_entry.size();
+            self.heap.push(new_entry);
+        }
+    }
+
+    fn load_to_max_size(
+        &mut self,
+        schema: &Schema,
+        expressions: &[Expression],
+        record_src: &mut Collect<'_>,
+    ) -> vm::Result<()> {
+        while let Some(record) = record_src.peek()? {
+            let entry = MergeEntry::new(schema, expressions, record, 0)?;
+            if self.heap_size + entry.size() > self.max_size {
+                break;
+            }
+            self.heap_size += entry.size();
+            self.heap.push(entry);
             let _ = record_src.next();
         }
 
@@ -226,40 +317,10 @@ impl RecordHeap {
 
     fn unfreez(&mut self) {
         let old_vec = std::mem::replace(&mut self.freeze_list, Vec::new());
-        self.heap = BinaryHeap::from_iter(old_vec.into_iter().map(|r| Reverse(r)));
+        self.heap = BinaryHeap::from_vec_cmp(old_vec, self.cmp);
+        self.heap_size = self.frozen_size;
+        self.frozen_size = 0;
         self.last_pop = None;
-    }
-
-    fn can_fit(&self, record: &Record) -> bool {
-        self.current_size + record.size() <= self.max_size
-    }
-
-    fn pop(&mut self) -> Option<Record> {
-        let popped = self.heap.pop().map(|Reverse(r)| {
-            self.current_size -= r.size();
-            r
-        });
-        self.last_pop = popped.clone();
-        popped
-    }
-
-    fn push(&mut self, new_record: Record) -> Option<()> {
-        if self.current_size + new_record.size() > self.max_size {
-            return None;
-        }
-
-        self.current_size += new_record.size();
-        if let Some(last_popped) = &self.last_pop {
-            if &new_record < last_popped {
-                self.freeze_list.push(new_record);
-            } else {
-                self.heap.push(Reverse(new_record));
-            }
-        } else {
-            self.heap.push(Reverse(new_record));
-        }
-
-        Some(())
     }
 }
 
@@ -277,32 +338,81 @@ impl SortRunReader {
         })
     }
 
-    fn next_record(&mut self) -> vm::Result<Option<Record>> {
-        let mut record_size = [0u8; 4];
-        match self.reader.read_exact(&mut record_size) {
+    fn next_entry(&mut self) -> vm::Result<Option<MergeEntry>> {
+        let mut key_and_record_size = [0u8; 8];
+        match self.reader.read_exact(&mut key_and_record_size) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
             Err(_) => return Err(vm::Error::Corrupted),
         };
 
-        let record_size = u32::from_le_bytes(record_size) as usize;
-        let mut buf = vec![0; record_size];
+        let key_size = u32::from_le_bytes(key_and_record_size[..4].try_into().unwrap()) as usize;
+        let record_size = u32::from_le_bytes(key_and_record_size[4..].try_into().unwrap()) as usize;
+
+        let mut key_buf = vec![0; key_size];
+        let mut record_buf = vec![0; record_size];
 
         self.reader
-            .read_exact(&mut buf)
+            .read_exact(&mut key_buf)
             .map_err(|_| vm::Error::Corrupted)?;
-        Ok(Some(Record::new(buf)))
+
+        self.reader
+            .read_exact(&mut record_buf)
+            .map_err(|_| vm::Error::Corrupted)?;
+
+        Ok(Some(MergeEntry::from(
+            Record::new(key_buf),
+            Record::new(record_buf),
+            0,
+        )))
     }
 }
 
+#[derive(Debug, Clone)]
 struct MergeEntry {
+    key: Record,
     record: Record,
     run_idx: usize,
 }
 
+impl MergeEntry {
+    fn new(
+        schema: &Schema,
+        expressions: &[Expression],
+        record: Record,
+        run_idx: usize,
+    ) -> vm::Result<Self> {
+        let mut key = RecordMut::new();
+
+        for expr in expressions {
+            key.add(vm::expression::resolve_expression_to_value(
+                &record, schema, expr,
+            )?);
+        }
+
+        Ok(Self {
+            key: key.serialize_to_record(),
+            record,
+            run_idx,
+        })
+    }
+
+    fn from(key: Record, record: Record, run_idx: usize) -> Self {
+        Self {
+            key,
+            record,
+            run_idx,
+        }
+    }
+
+    fn size(&self) -> usize {
+        self.key.size() + self.record.size()
+    }
+}
+
 impl PartialEq for MergeEntry {
     fn eq(&self, o: &Self) -> bool {
-        self.record == o.record
+        self.key == o.key
     }
 }
 
@@ -316,11 +426,11 @@ impl PartialOrd for MergeEntry {
 
 impl Ord for MergeEntry {
     fn cmp(&self, o: &Self) -> Ordering {
-        self.record.cmp(&o.record)
+        self.key.cmp(&o.key)
     }
 }
 
 struct MergeState {
     readers: Vec<SortRunReader>,
-    heap: BinaryHeap<Reverse<MergeEntry>>,
+    heap: BinaryHeap<MergeEntry, HeapCmp>,
 }
