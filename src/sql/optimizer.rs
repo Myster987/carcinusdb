@@ -3,7 +3,7 @@ use std::mem;
 use crate::{
     sql::{
         self,
-        parser::statement::{BinaryOperator, Expression, Statement, UnaryOperator},
+        parser::statement::{BinaryOperator, Expression, OrderBy, Statement, UnaryOperator},
         types::Value,
     },
     vm,
@@ -19,7 +19,10 @@ pub fn optimize(statement: &mut Statement) -> sql::Result<()> {
         } => {
             simplify_all(columns.iter_mut())?;
             simplfy_where(r#where)?;
-            simplify_all(order_by.iter_mut())?;
+
+            if let Some(OrderBy { order: _, expr }) = order_by.as_mut() {
+                simplify_all(expr.iter_mut())?;
+            }
         }
 
         Statement::Insert { values, .. } => {

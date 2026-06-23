@@ -6,7 +6,7 @@ use crate::{
     database::CARCINUSDB_MASTER_TABLE,
     sql::{
         parser::statement::{
-            BinaryOperator, Constrains, Create, Drop, Expression, Statement, UnaryOperator,
+            BinaryOperator, Constrains, Create, Drop, Expression, OrderBy, Statement, UnaryOperator,
         },
         schema::{Catalog, ROW_ID_COLUMN, Schema, TableMetadata},
         types::{Value, ValueType},
@@ -224,8 +224,10 @@ pub fn analyze(statement: &Statement, catalog: &Catalog) -> Result<()> {
 
             analyze_where(&table_metadata.schema, r#where)?;
 
-            for expr in order_by {
-                analyze_expression(&table_metadata.schema, expr)?;
+            if let Some(OrderBy { order: _, expr }) = order_by.as_ref() {
+                for ex in expr {
+                    analyze_expression(&table_metadata.schema, ex)?;
+                }
             }
         }
 
