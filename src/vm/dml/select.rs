@@ -2,7 +2,11 @@ use std::{cell::RefCell, rc::Rc};
 
 use crate::{
     database::DatabaseTransaction,
-    sql::{parser::statement::Expression, record::Record, schema::Schema},
+    sql::{
+        parser::statement::{Expression, OrderBy},
+        record::Record,
+        schema::Schema,
+    },
     vm::{
         self,
         operator::{
@@ -12,6 +16,7 @@ use crate::{
             index_scan::{IndexScan, ScanKind, find_index},
             projection::Projection,
             seq_scan::SeqScan,
+            sort::Sort,
         },
     },
 };
@@ -21,7 +26,7 @@ pub fn plan_select<'tx>(
     columns: Vec<Expression>,
     from: String,
     r#where: Option<Expression>,
-    order_by: Vec<Expression>,
+    order_by: Option<OrderBy>,
 ) -> vm::Result<Select<'tx>> {
     let table = tx.catalog().get_table(&from)?;
 
@@ -65,8 +70,16 @@ pub fn plan_select<'tx>(
         plan = Box::new(Projection::new(plan, columns)?);
     }
 
-    if order_by.is_empty() {
-        plan = Box::new(Collect::new(plan, tx.page_size(), true));
+    if let Some(OrderBy { order, expr }) = order_by {
+        let collect = Collect::new(plan, tx.page_size(), true);
+        plan = Box::new(Sort::new(
+            collect,
+            expr,
+            order,
+            tx.page_size(),
+            tx.page_size(),
+            4, // for now static
+        ));
     }
 
     Ok(Select { operator: plan })

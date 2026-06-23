@@ -3,7 +3,7 @@ use crate::sql::{
     parser::{
         statement::{
             Assignment, BinaryOperator, Column, Constrains, Create, DataType, Drop, Expression,
-            Statement, UnaryOperator,
+            Order, OrderBy, Statement, UnaryOperator,
         },
         token::{Keyword, Token},
         tokenizer::Tokenizer,
@@ -459,12 +459,21 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_order_by(&mut self) -> sql::Result<Vec<Expression>> {
+    fn parse_order_by(&mut self) -> sql::Result<Option<OrderBy>> {
         if self.consume_optional_keyword(Keyword::Order) {
             self.expect_keyword(Keyword::By)?;
-            Ok(self.parse_comma_separeted_values()?)
+
+            let expr = self.parse_comma_separeted_values()?;
+            let order = match self.consume_one_of(&[Keyword::Asc, Keyword::Desc]) {
+                Keyword::Asc => Order::Asc,
+                Keyword::Desc => Order::Desc,
+                Keyword::None => Order::Asc,
+                _ => unreachable!(),
+            };
+
+            Ok(Some(OrderBy::new(order, expr)))
         } else {
-            Ok(vec![])
+            Ok(None)
         }
     }
 
