@@ -176,39 +176,8 @@ impl<'tx> Operator for Sort<'tx> {
     }
 }
 
-struct SortRun {
-    writer: BufWriter<File>,
-}
-
-impl SortRun {
-    fn new() -> Self {
-        Self {
-            writer: BufWriter::new(tempfile::tempfile().unwrap()),
-        }
-    }
-
-    pub fn write_entry(&mut self, entry: MergeEntry) -> vm::Result<()> {
-        let key_size = (entry.key.size() as u32).to_le_bytes();
-        let record_size = (entry.record.size() as u32).to_le_bytes();
-
-        self.writer
-            .write_all(&key_size)
-            .map_err(|_| vm::Error::Corrupted)?;
-        self.writer
-            .write_all(&record_size)
-            .map_err(|_| vm::Error::Corrupted)?;
-
-        self.writer
-            .write_all(entry.key.raw())
-            .map_err(|_| vm::Error::Corrupted)?;
-        self.writer
-            .write_all(entry.record.raw())
-            .map_err(|_| vm::Error::Corrupted)?;
-
-        Ok(())
-    }
-}
-
+/// Helps to reduce initial count of merge runs. On avarege it's something
+/// arround `2M`, where `M` is size of single run.
 struct ReplacementSelectionHeap {
     /// Compare method used by heap. Can either be in `ASC` or `DESC` order.
     cmp: HeapCmp,
@@ -243,10 +212,6 @@ impl ReplacementSelectionHeap {
             frozen_size: 0,
             max_size,
         }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.heap_size == 0 && self.frozen_size == 0
     }
 
     fn is_frozen(&self) -> bool {
@@ -324,6 +289,39 @@ impl ReplacementSelectionHeap {
     }
 }
 
+struct SortRun {
+    writer: BufWriter<File>,
+}
+
+impl SortRun {
+    fn new() -> Self {
+        Self {
+            writer: BufWriter::new(tempfile::tempfile().unwrap()),
+        }
+    }
+
+    pub fn write_entry(&mut self, entry: MergeEntry) -> vm::Result<()> {
+        let key_size = (entry.key.size() as u32).to_le_bytes();
+        let record_size = (entry.record.size() as u32).to_le_bytes();
+
+        self.writer
+            .write_all(&key_size)
+            .map_err(|_| vm::Error::Corrupted)?;
+        self.writer
+            .write_all(&record_size)
+            .map_err(|_| vm::Error::Corrupted)?;
+
+        self.writer
+            .write_all(entry.key.raw())
+            .map_err(|_| vm::Error::Corrupted)?;
+        self.writer
+            .write_all(entry.record.raw())
+            .map_err(|_| vm::Error::Corrupted)?;
+
+        Ok(())
+    }
+}
+
 struct SortRunReader {
     reader: BufReader<File>,
 }
@@ -366,6 +364,11 @@ impl SortRunReader {
             0,
         )))
     }
+}
+
+struct MergeState {
+    readers: Vec<SortRunReader>,
+    heap: BinaryHeap<MergeEntry, HeapCmp>,
 }
 
 #[derive(Debug, Clone)]
@@ -428,9 +431,4 @@ impl Ord for MergeEntry {
     fn cmp(&self, o: &Self) -> Ordering {
         self.key.cmp(&o.key)
     }
-}
-
-struct MergeState {
-    readers: Vec<SortRunReader>,
-    heap: BinaryHeap<MergeEntry, HeapCmp>,
 }
