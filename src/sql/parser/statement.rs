@@ -204,6 +204,7 @@ pub enum BinaryOperator {
     Sub,
     Mul,
     Div,
+    Mod,
     And,
     Or,
 }
@@ -221,6 +222,7 @@ impl Display for BinaryOperator {
             Self::Sub => "-",
             Self::Mul => "*",
             Self::Div => "/",
+            Self::Mod => "%",
             Self::And => "AND",
             Self::Or => "OR",
         })

@@ -190,6 +190,7 @@ impl<'a> Tokenizer<'a> {
             '-' => self.consume(Token::Sub),
             '*' => self.consume(Token::Mul),
             '/' => self.consume(Token::Div),
+            '%' => self.consume(Token::Mod),
             '(' => self.consume(Token::LeftParen),
             ')' => self.consume(Token::RightParen),
             ',' => self.consume(Token::Comma),
