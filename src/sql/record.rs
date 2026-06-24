@@ -5,6 +5,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crate::{
     sql::{
         self,
+        parser::statement::Order,
         types::{Value, ValueRef, parse_value, serial::SerialType},
     },
     tcp::{
@@ -446,6 +447,31 @@ pub fn compare_records(r1: &Record, r2: &Record) -> std::cmp::Ordering {
     }
 
     // If all compared fields are equal, shorter record comes first
+    len1.cmp(&len2)
+}
+
+pub fn compare_records_custom_order(
+    r1: &Record,
+    r2: &Record,
+    orders: &[Order],
+) -> std::cmp::Ordering {
+    let len1 = r1.len();
+    let len2 = r2.len();
+    let min_len = len1.min(len2);
+
+    for i in 0..min_len {
+        let v1 = r1.get_value(i);
+        let v2 = r2.get_value(i);
+        let cmp = match orders.get(i).unwrap_or(&Order::Asc) {
+            Order::Asc => v1.cmp(&v2),
+            Order::Desc => v2.cmp(&v1),
+        };
+        match cmp {
+            std::cmp::Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+
     len1.cmp(&len2)
 }
 

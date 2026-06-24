@@ -9,7 +9,7 @@ pub enum Statement {
         columns: Vec<Expression>,
         from: String,
         r#where: Option<Expression>,
-        order_by: Option<OrderBy>,
+        order_by: Vec<(Expression, Order)>,
     },
     Insert {
         into: String,
@@ -56,8 +56,13 @@ impl Display for Statement {
                     write!(f, " WHERE {where_expression}")?;
                 }
 
-                if let Some(OrderBy { order, expr }) = order_by.as_ref() {
-                    write!(f, " ORDER BY {} {}", fmt_join(expr, ", "), order)?;
+                if !order_by.is_empty() {
+                    let expressions: Vec<_> = order_by
+                        .iter()
+                        .map(|(expr, order)| format!("{expr} {order}"))
+                        .collect();
+
+                    write!(f, " ORDER BY {}", fmt_join(&expressions, ", "))?;
                 }
                 Ok(())
             }
@@ -299,18 +304,6 @@ pub struct Assignment {
 impl Display for Assignment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} = {}", self.identifier, self.value)
-    }
-}
-
-#[derive(Debug, PartialEq)]
-pub struct OrderBy {
-    pub order: Order,
-    pub expr: Vec<Expression>,
-}
-
-impl OrderBy {
-    pub fn new(order: Order, expr: Vec<Expression>) -> Self {
-        Self { order, expr }
     }
 }
 

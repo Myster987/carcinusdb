@@ -4,12 +4,13 @@ use std::{
     io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
 };
 
-use binary_heap_plus::{BinaryHeap, FnComparator};
+use binary_heap_plus::BinaryHeap;
+use compare::Compare;
 
 use crate::{
     sql::{
         parser::statement::{Expression, Order},
-        record::{Record, RecordMut},
+        record::{self, Record, RecordMut},
         schema::Schema,
     },
     vm::{
@@ -18,16 +19,15 @@ use crate::{
     },
 };
 
-type HeapCmp = FnComparator<fn(&MergeEntry, &MergeEntry) -> std::cmp::Ordering>;
-
 pub struct Sort<'tx> {
     sorted: bool,
     page_size: usize,
     buffer_mem: usize,
     k_way: usize,
 
-    order_by: Vec<Expression>,
-    order: Order,
+    order_by_expr: Vec<Expression>,
+    total_order: Vec<Order>,
+
     collect: Collect<'tx>,
 
     sorted_run: Option<SortRunReader>,
@@ -36,19 +36,26 @@ pub struct Sort<'tx> {
 impl<'tx> Sort<'tx> {
     pub fn new(
         collect: Collect<'tx>,
-        order_by: Vec<Expression>,
-        order: Order,
+        order_by: Vec<(Expression, Order)>,
         page_size: usize,
         buffer_mem: usize,
         k_way: usize,
     ) -> Self {
+        let mut order_by_expr = Vec::with_capacity(order_by.len());
+        let mut total_order = Vec::with_capacity(order_by.len());
+
+        for (expr, order) in order_by.into_iter() {
+            order_by_expr.push(expr);
+            total_order.push(order);
+        }
+
         Self {
             sorted: false,
             page_size,
             buffer_mem,
             k_way,
-            order_by,
-            order,
+            order_by_expr,
+            total_order,
             collect,
             sorted_run: None,
         }
@@ -57,16 +64,17 @@ impl<'tx> Sort<'tx> {
     fn generate_runs(&mut self) -> vm::Result<Vec<SortRunReader>> {
         let schema = self.schema().clone();
         let mut sort_runs = Vec::new();
-        let mut sort_heap = ReplacementSelectionHeap::new(self.buffer_mem, self.order);
+        let mut sort_heap =
+            ReplacementSelectionHeap::new(self.buffer_mem, self.total_order.clone());
 
         // RUN 0
 
-        sort_heap.load_to_max_size(&schema, &self.order_by, &mut self.collect)?;
+        sort_heap.load_to_max_size(&schema, &self.order_by_expr, &mut self.collect)?;
 
         let mut current_run = SortRun::new();
 
         while let Some(new_record) = self.collect.next()? {
-            let new_entry = MergeEntry::new(self.schema(), &self.order_by, new_record, 0)?;
+            let new_entry = MergeEntry::new(self.schema(), &self.order_by_expr, new_record, 0)?;
 
             loop {
                 match sort_heap.pop() {
@@ -88,7 +96,7 @@ impl<'tx> Sort<'tx> {
                 sort_runs.push(SortRunReader::from_run(current_run)?);
                 current_run = SortRun::new();
                 sort_heap.unfreez();
-                sort_heap.load_to_max_size(&schema, &self.order_by, &mut self.collect)?;
+                sort_heap.load_to_max_size(&schema, &self.order_by_expr, &mut self.collect)?;
             }
         }
 
@@ -117,13 +125,10 @@ impl<'tx> Sort<'tx> {
 
         let mut merged_runs = Vec::new();
 
-        let cmp = FnComparator(match self.order {
-            Order::Asc => |a: &MergeEntry, b: &MergeEntry| b.cmp(a),
-            Order::Desc => |a: &MergeEntry, b: &MergeEntry| a.cmp(b),
-        });
+        let cmp = MergeEntryCmp(self.total_order.clone());
 
         for mut chunk in crate::utils::bytes::into_chunks(readers, self.k_way) {
-            let mut heap = BinaryHeap::from_vec_cmp(Vec::new(), cmp);
+            let mut heap = BinaryHeap::from_vec_cmp(Vec::new(), cmp.clone());
 
             for (i, reader) in chunk.iter_mut().enumerate() {
                 if let Some(mut entry) = reader.next_entry()? {
@@ -176,12 +181,21 @@ impl<'tx> Operator for Sort<'tx> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct MergeEntryCmp(Vec<Order>);
+
+impl compare::Compare<MergeEntry> for MergeEntryCmp {
+    fn compare(&self, l: &MergeEntry, r: &MergeEntry) -> Ordering {
+        record::compare_records_custom_order(&l.key, &r.key, &self.0).reverse()
+    }
+}
+
 /// Helps to reduce initial count of merge runs. On avarege it's something
 /// arround `2M`, where `M` is size of single run.
 struct ReplacementSelectionHeap {
     /// Compare method used by heap. Can either be in `ASC` or `DESC` order.
-    cmp: HeapCmp,
-    heap: BinaryHeap<MergeEntry, HeapCmp>,
+    cmp: MergeEntryCmp,
+    heap: BinaryHeap<MergeEntry, MergeEntryCmp>,
     /// Records with `frozen` status.
     freeze_list: Vec<MergeEntry>,
     /// Latest removed entry from heap.
@@ -195,13 +209,10 @@ struct ReplacementSelectionHeap {
 }
 
 impl ReplacementSelectionHeap {
-    fn new(max_size: usize, order: Order) -> Self {
-        let cmp = FnComparator(match order {
-            Order::Asc => |a: &MergeEntry, b: &MergeEntry| b.cmp(a),
-            Order::Desc => |a: &MergeEntry, b: &MergeEntry| a.cmp(b),
-        });
+    fn new(max_size: usize, orders: Vec<Order>) -> Self {
+        let cmp = MergeEntryCmp(orders);
 
-        let heap = BinaryHeap::from_vec_cmp(Vec::new(), cmp);
+        let heap = BinaryHeap::from_vec_cmp(Vec::new(), cmp.clone());
 
         Self {
             cmp,
@@ -230,7 +241,7 @@ impl ReplacementSelectionHeap {
         let freezes = self
             .last_pop
             .as_ref()
-            .map(|last| self.cmp.0(&new_entry, last) == Ordering::Greater)
+            .map(|last| self.cmp.compare(&new_entry, last) == Ordering::Greater)
             .unwrap_or(false);
 
         if freezes {
@@ -250,7 +261,7 @@ impl ReplacementSelectionHeap {
         let freezes = self
             .last_pop
             .as_ref()
-            .map(|last| self.cmp.0(&new_entry, last) == Ordering::Greater)
+            .map(|last| self.cmp.compare(&new_entry, last) == Ordering::Greater)
             .unwrap_or(false);
         if freezes {
             self.frozen_size += new_entry.size();
@@ -282,7 +293,7 @@ impl ReplacementSelectionHeap {
 
     fn unfreez(&mut self) {
         let old_vec = std::mem::replace(&mut self.freeze_list, Vec::new());
-        self.heap = BinaryHeap::from_vec_cmp(old_vec, self.cmp);
+        self.heap = BinaryHeap::from_vec_cmp(old_vec, self.cmp.clone());
         self.heap_size = self.frozen_size;
         self.frozen_size = 0;
         self.last_pop = None;
@@ -368,7 +379,7 @@ impl SortRunReader {
 
 struct MergeState {
     readers: Vec<SortRunReader>,
-    heap: BinaryHeap<MergeEntry, HeapCmp>,
+    heap: BinaryHeap<MergeEntry, MergeEntryCmp>,
 }
 
 #[derive(Debug, Clone)]
@@ -410,25 +421,5 @@ impl MergeEntry {
 
     fn size(&self) -> usize {
         self.key.size() + self.record.size()
-    }
-}
-
-impl PartialEq for MergeEntry {
-    fn eq(&self, o: &Self) -> bool {
-        self.key == o.key
-    }
-}
-
-impl Eq for MergeEntry {}
-
-impl PartialOrd for MergeEntry {
-    fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
-        Some(self.cmp(o))
-    }
-}
-
-impl Ord for MergeEntry {
-    fn cmp(&self, o: &Self) -> Ordering {
-        self.key.cmp(&o.key)
     }
 }

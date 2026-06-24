@@ -3,7 +3,7 @@ use crate::sql::{
     parser::{
         statement::{
             Assignment, BinaryOperator, Column, Constrains, Create, DataType, Drop, Expression,
-            Order, OrderBy, Statement, UnaryOperator,
+            Order, Statement, UnaryOperator,
         },
         token::{Keyword, Token},
         tokenizer::Tokenizer,
@@ -343,6 +343,22 @@ impl<'a> Parser<'a> {
         self.parse_comma_separeted(Self::parse_identifier, true)
     }
 
+    fn parse_comma_separeted_order_by(&mut self) -> sql::Result<Vec<(Expression, Order)>> {
+        self.parse_comma_separeted(
+            |_self| {
+                let expr = Self::parse_expression(_self)?;
+                let order = match _self.consume_one_of(&[Keyword::Asc, Keyword::Desc]) {
+                    Keyword::Asc => Order::Asc,
+                    Keyword::Desc => Order::Desc,
+                    Keyword::None => Order::Asc,
+                    _ => unreachable!(),
+                };
+                Ok((expr, order))
+            },
+            false,
+        )
+    }
+
     fn parse_optional_identifier_list(&mut self) -> sql::Result<Vec<String>> {
         if self
             .peek_token()
@@ -459,21 +475,13 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_order_by(&mut self) -> sql::Result<Option<OrderBy>> {
+    fn parse_order_by(&mut self) -> sql::Result<Vec<(Expression, Order)>> {
         if self.consume_optional_keyword(Keyword::Order) {
             self.expect_keyword(Keyword::By)?;
 
-            let expr = self.parse_comma_separeted_values()?;
-            let order = match self.consume_one_of(&[Keyword::Asc, Keyword::Desc]) {
-                Keyword::Asc => Order::Asc,
-                Keyword::Desc => Order::Desc,
-                Keyword::None => Order::Asc,
-                _ => unreachable!(),
-            };
-
-            Ok(Some(OrderBy::new(order, expr)))
+            self.parse_comma_separeted_order_by()
         } else {
-            Ok(None)
+            Ok(Vec::new())
         }
     }
 

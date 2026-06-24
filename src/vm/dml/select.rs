@@ -3,7 +3,7 @@ use std::{cell::RefCell, rc::Rc};
 use crate::{
     database::DatabaseTransaction,
     sql::{
-        parser::statement::{Expression, OrderBy},
+        parser::statement::{Expression, Order},
         record::Record,
         schema::Schema,
     },
@@ -26,7 +26,7 @@ pub fn plan_select<'tx>(
     columns: Vec<Expression>,
     from: String,
     r#where: Option<Expression>,
-    order_by: Option<OrderBy>,
+    order_by: Vec<(Expression, Order)>,
 ) -> vm::Result<Select<'tx>> {
     let table = tx.catalog().get_table(&from)?;
 
@@ -70,12 +70,11 @@ pub fn plan_select<'tx>(
         plan = Box::new(Projection::new(plan, columns)?);
     }
 
-    if let Some(OrderBy { order, expr }) = order_by {
+    if !order_by.is_empty() {
         let collect = Collect::new(plan, tx.page_size(), true);
         plan = Box::new(Sort::new(
             collect,
-            expr,
-            order,
+            order_by,
             tx.page_size(),
             tx.page_size(),
             4, // for now static
