@@ -208,16 +208,11 @@ RETURNING id, name;
 
 ---
 
-### `ORDER BY` *(planned)*
+### `ORDER BY`
 
-> **In development.** `ORDER BY` is under construction; queries that include it will return an error.
-
-The planned syntax follows the SQL standard:
+Sorts query output in defined order (*ASC* or *DESC*).
 
 ```sql
--- Not yet supported
 SELECT * FROM users ORDER BY age DESC;
 SELECT id, name FROM users ORDER BY name ASC, id DESC;
 ```
-
-Disk-backed external merge sort is going to be implemented internally and will power this feature once the query planner layer is wired up.
