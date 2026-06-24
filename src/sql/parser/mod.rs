@@ -211,7 +211,7 @@ impl<'a> Parser<'a> {
             Token::Keyword(Keyword::And) => 20,
             Token::Eq | Token::Neq | Token::Gt | Token::GtEq | Token::Lt | Token::LtEq => 30,
             Token::Add | Token::Sub => 40,
-            Token::Mul | Token::Div => 50,
+            Token::Mul | Token::Div | Token::Mod => 50,
             _ => 0,
         }
     }
@@ -277,6 +277,7 @@ impl<'a> Parser<'a> {
             Token::Sub => BinaryOperator::Sub,
             Token::Mul => BinaryOperator::Mul,
             Token::Div => BinaryOperator::Div,
+            Token::Mod => BinaryOperator::Mod,
             Token::Eq => BinaryOperator::Eq,
             Token::Neq => BinaryOperator::Neq,
             Token::Gt => BinaryOperator::Gt,

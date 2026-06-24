@@ -401,6 +401,7 @@ pub fn analyze_expression(schema: &Schema, expr: &Expression) -> Result<ValueTyp
                 | BinaryOperator::Sub
                 | BinaryOperator::Div
                 | BinaryOperator::Mul
+                | BinaryOperator::Mod
                     if left_data_type == ValueType::Int =>
                 {
                     ValueType::Int

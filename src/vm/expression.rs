@@ -57,6 +57,7 @@ pub fn resolve_expression_to_value(
                 BinaryOperator::Sub => left - right,
                 BinaryOperator::Mul => left * right,
                 BinaryOperator::Div => left / right,
+                BinaryOperator::Mod => left % right,
 
                 // comparison
                 BinaryOperator::Eq => Value::Bool(left == right),

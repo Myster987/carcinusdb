@@ -1,6 +1,6 @@
 use std::{
     fmt::Display,
-    ops::{Add, Div, Mul, Sub},
+    ops::{Add, Div, Mul, Rem, Sub},
 };
 
 use crate::sql::{
@@ -158,6 +158,17 @@ impl Div for Value {
     fn div(self, rhs: Self) -> Self::Output {
         match (self, rhs) {
             (Value::Int(a), Value::Int(b)) => Value::Int(a / b),
+            _ => Value::Null,
+        }
+    }
+}
+
+impl Rem for Value {
+    type Output = Value;
+
+    fn rem(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (Value::Int(a), Value::Int(b)) => Value::Int(a % b),
             _ => Value::Null,
         }
     }

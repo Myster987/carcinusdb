@@ -132,17 +132,23 @@ fn simplify(expression: &mut Expression) -> sql::Result<()> {
                 // 0 * val
                 // 0 / val
                 // val * 0
+                // val % 1
                 (
-                    zero @ Expression::Value(Value::Int(0)),
+                    Expression::Value(Value::Int(0)),
                     BinaryOperator::Mul | BinaryOperator::Div,
                     Expression::Identifier(_),
                 )
                 | (
                     Expression::Identifier(_),
                     BinaryOperator::Mul,
-                    zero @ Expression::Value(Value::Int(0)),
+                    Expression::Value(Value::Int(0)),
+                )
+                | (
+                    Expression::Identifier(_),
+                    BinaryOperator::Mod,
+                    Expression::Value(Value::Int(1)),
                 ) => {
-                    *expression = mem::replace(zero, Expression::Wildcard);
+                    *expression = Expression::Value(Value::Int(0));
                 }
 
                 // Resolve binary operation `0 - x` to unary `-x`.
