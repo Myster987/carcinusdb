@@ -1,30 +1,7 @@
-[package]
-name = "carcinusdb"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = [
+    "crates/carcinusdb",
+    "crates/cli",
+]
 
-[dependencies]
-
-simple_logger = "5.0"
-log = "0.4"
-dotenvy = "0.15.7"
-
-thiserror = "2.0.12"
-anyhow = "1.0.97"
-
-tokio = { version = "1.44.1", features = ["full"] }
-
-libc = "0.2.171"
-
-crossbeam = "0.8.4"
-dashmap = "6.1.0"
-parking_lot = "0.12.3"
-hashbrown = "0.16.1"
-arc-swap = "1.8.2"
-tokio-util = { version = "0.7.18", features = ["codec"]}
-bytes = "1.11.1"
-futures = "0.3.32"
-tokio-stream = "0.1.18"
-tempfile = "3.27.0"
-binary-heap-plus = "0.5.0"
-compare = "0.1.0"
+resolver = "3"

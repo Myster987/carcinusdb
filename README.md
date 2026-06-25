@@ -15,6 +15,29 @@ development and are worth checking:
 
 ---
 
+## Running program
+
+> Works **ONLY** on Linux.
+
+This command starts main db server on port `4000` by default.
+
+```sh
+cargo run --package carcinusdb -- your_db_file_path.db 
+# OR on specific port
+cargo run --package carcinusdb -- your_db_file_path.db 8080
+```
+
+Connect to database using simple CLI, similar what other DBs provide and
+write raw SQL queries.
+
+```sh
+cargo run --package cli # connects to port 4000 
+# OR on specific port
+cargo run --package carcinusdb -- 8080
+```
+
+---
+
 ## Features
 
 - **B-link Tree Storage** — Concurrent-safe B-link tree implementation 
