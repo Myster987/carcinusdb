@@ -9,6 +9,7 @@ use crate::{
     os::{Open, OpenOptions},
     sql::{
         self,
+        parser::statement::Statement,
         schema::{Catalog, Column, ColumnProperties, Schema, TableMetadata},
         types::ValueType,
     },
@@ -111,57 +112,198 @@ pub async fn handle_connection(db: Arc<Database>, mut conn: ServerConnection) ->
                 log::debug!("Client SQL: {sql}");
 
                 let transaction = db.begin_transaction()?;
-                let (tx, mut rx) = tokio::sync::mpsc::channel(32);
 
-                let handle = tokio::task::spawn_blocking(move || {
-                    let ok = match transaction.execute(&sql) {
-                        Err(e) => {
-                            log::error!("Error when executing query: {e}");
-                            let _ = tx.blocking_send(Response::Error(e.to_string()));
-                            false
-                        }
-                        Ok(QueryResult::RecordsAffected(n)) => {
-                            let _ = tx.blocking_send(Response::RecordsAffected(n));
-                            true
-                        }
-                        Ok(QueryResult::Records(iter)) => {
-                            let _ = tx.blocking_send(Response::Schema(iter.schema().clone()));
-                            let mut iter_ok = true;
-                            for record in iter {
-                                match record {
-                                    Ok(r) => {
-                                        let _ = tx.blocking_send(Response::Record(r));
-                                    }
-                                    Err(e) => {
-                                        let _ = tx.blocking_send(Response::Error(e.to_string()));
-                                        iter_ok = false;
-                                        break;
-                                    }
-                                }
-                            }
-                            let _ = tx.blocking_send(Response::End);
-                            iter_ok
-                        }
-                    };
-                    if ok {
-                        transaction.commit()?;
-                    } else {
-                        transaction.rollback()?;
+                match transaction.parse_sql(&sql)? {
+                    Statement::BeginTransaction => {
+                        conn.send(Response::RecordsAffected(0)).await?;
+                        run_explicit_transaction(transaction, &mut conn).await?;
                     }
 
-                    Ok::<_, Error>(())
-                });
+                    Statement::Commit | Statement::Rollback => {
+                        transaction.rollback()?;
+                        conn.send(Response::Error("no active transaction".into()))
+                            .await?;
+                    }
 
-                while let Some(msg) = rx.recv().await {
-                    conn.send(msg).await?;
+                    _ => run_autocommit(transaction, &mut conn, sql).await?,
                 }
-
-                handle.await.unwrap()?;
             }
             Request::Close => break,
         }
     }
     Ok(())
+}
+
+enum TxEvent {
+    /// A protocol response to be forwarded to the client.
+    Msg(Response),
+    /// Current statement finished OK; worker is parked, ready for next SQL.
+    Ready,
+    /// COMMIT was executed; worker has exited.
+    Committed,
+    /// ROLLBACK executed (explicit or due to a statement error); worker has exited.
+    RolledBack,
+}
+
+async fn run_autocommit(
+    mut transaction: DatabaseTransaction,
+    conn: &mut ServerConnection,
+    sql: String,
+) -> Result<()> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<TxEvent>(32);
+
+    let handle = tokio::task::spawn_blocking(move || {
+        let ok = execute_and_stream(&mut transaction, &sql, &tx);
+        if ok {
+            transaction.commit()?
+        } else {
+            transaction.rollback()?
+        }
+        Ok::<_, Error>(())
+    });
+
+    while let Some(TxEvent::Msg(resp)) = rx.recv().await {
+        conn.send(resp).await?;
+    }
+    handle.await.map_err(|_| Error::Unknown)?
+}
+
+async fn run_explicit_transaction(
+    transaction: DatabaseTransaction,
+    conn: &mut ServerConnection,
+) -> Result<()> {
+    let (sql_tx, sql_rx) = tokio::sync::mpsc::channel::<String>(1);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TxEvent>(32);
+
+    let worker =
+        tokio::task::spawn_blocking(move || explicit_tx_worker(transaction, sql_rx, event_tx));
+
+    let driver_result = explicit_tx_driver(conn, sql_tx, &mut event_rx).await;
+
+    worker.await.map_err(|_| Error::Unknown)??;
+    driver_result
+}
+
+fn explicit_tx_worker(
+    mut transaction: DatabaseTransaction,
+    mut sql_rx: tokio::sync::mpsc::Receiver<String>,
+    event_tx: tokio::sync::mpsc::Sender<TxEvent>,
+) -> Result<()> {
+    loop {
+        let Some(sql) = sql_rx.blocking_recv() else {
+            transaction.rollback()?;
+            return Ok(());
+        };
+
+        match transaction.parse_sql(&sql) {
+            Err(e) => {
+                let _ = event_tx.blocking_send(TxEvent::Msg(Response::Error(e.to_string())));
+                let _ = event_tx.blocking_send(TxEvent::Ready);
+            }
+
+            Ok(Statement::Commit) => {
+                transaction.commit()?;
+                let _ = event_tx.blocking_send(TxEvent::Committed);
+                return Ok(());
+            }
+
+            Ok(Statement::Rollback) => {
+                transaction.rollback()?;
+                let _ = event_tx.blocking_send(TxEvent::RolledBack);
+                return Ok(());
+            }
+
+            Ok(Statement::BeginTransaction) => {
+                let _ = event_tx.blocking_send(TxEvent::Msg(Response::Error(
+                    "already in a transaction".into(),
+                )));
+                let _ = event_tx.blocking_send(TxEvent::Ready);
+            }
+
+            Ok(_) => {
+                let ok = execute_and_stream(&mut transaction, &sql, &event_tx);
+                if ok {
+                    let _ = event_tx.blocking_send(TxEvent::Ready);
+                } else {
+                    transaction.rollback()?;
+                    let _ = event_tx.blocking_send(TxEvent::RolledBack);
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+async fn explicit_tx_driver(
+    conn: &mut ServerConnection,
+    sql_tx: tokio::sync::mpsc::Sender<String>,
+    evt_rx: &mut tokio::sync::mpsc::Receiver<TxEvent>,
+) -> Result<()> {
+    loop {
+        let sql = match conn.receive().await? {
+            Request::Query(s) => s,
+            Request::Close => {
+                return Err(Error::VmError(vm::Error::Corrupted));
+            }
+        };
+
+        if sql_tx.send(sql).await.is_err() {
+            break;
+        }
+
+        loop {
+            match evt_rx.recv().await {
+                Some(TxEvent::Msg(r)) => conn.send(r).await?,
+
+                Some(TxEvent::Ready) => break,
+
+                Some(TxEvent::Committed) => {
+                    conn.send(Response::RecordsAffected(0)).await?; // COMMIT ack
+                    return Ok(());
+                }
+                Some(TxEvent::RolledBack) => {
+                    conn.send(Response::RecordsAffected(0)).await?; // ROLLBACK ack
+                    return Ok(());
+                }
+
+                None => return Ok(()),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn execute_and_stream(
+    transaction: &mut DatabaseTransaction,
+    sql: &str,
+    tx: &tokio::sync::mpsc::Sender<TxEvent>,
+) -> bool {
+    match transaction.execute(sql) {
+        Err(e) => {
+            let _ = tx.blocking_send(TxEvent::Msg(Response::Error(e.to_string())));
+            false
+        }
+        Ok(QueryResult::RecordsAffected(n)) => {
+            let _ = tx.blocking_send(TxEvent::Msg(Response::RecordsAffected(n)));
+            true
+        }
+        Ok(QueryResult::Records(iter)) => {
+            let _ = tx.blocking_send(TxEvent::Msg(Response::Schema(iter.schema().clone())));
+            for record in iter {
+                match record {
+                    Ok(r) => {
+                        let _ = tx.blocking_send(TxEvent::Msg(Response::Record(r)));
+                    }
+                    Err(e) => {
+                        let _ = tx.blocking_send(TxEvent::Msg(Response::Error(e.to_string())));
+                        return false;
+                    }
+                }
+            }
+            let _ = tx.blocking_send(TxEvent::Msg(Response::End));
+            true
+        }
+    }
 }
 
 pub struct MemDatabaseHeader {
@@ -364,6 +506,10 @@ impl DatabaseTransaction {
     }
 
     pub fn execute(&self, sql: &str) -> Result<QueryResult<'_>> {
+        self.execute_statement(self.parse_sql(sql)?)
+    }
+
+    pub fn parse_sql(&self, sql: &str) -> Result<Statement> {
         let input;
 
         if !sql.trim_end().ends_with(";") {
@@ -372,8 +518,10 @@ impl DatabaseTransaction {
             input = sql.to_string();
         }
 
-        let statement = sql::pipeline(self, &input)?;
+        sql::pipeline(self, &input).map_err(Into::into)
+    }
 
+    pub fn execute_statement(&self, statement: Statement) -> Result<QueryResult<'_>> {
         let plan = vm::planner::plan(statement, self)?;
         vm::execute(self, plan).map_err(Into::into)
     }

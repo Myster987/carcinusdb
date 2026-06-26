@@ -274,7 +274,7 @@ pub fn analyze(statement: &Statement, catalog: &Catalog) -> Result<()> {
             catalog.get_table(table)?;
         }
 
-        _ => todo!(),
+        _ => {}
     }
 
     Ok(())

@@ -21,15 +21,12 @@ pub fn parse(sql: &str) -> sql::Result<Statement> {
 
 /// Trait to implement all esential statements.
 pub trait StatementParser {
-    fn parse_explain(&mut self) -> sql::Result<Statement>;
     fn parse_select(&mut self) -> sql::Result<Statement>;
     fn parse_create(&mut self) -> sql::Result<Statement>;
     fn parse_drop(&mut self) -> sql::Result<Statement>;
     fn parse_delete(&mut self) -> sql::Result<Statement>;
     fn parse_insert(&mut self) -> sql::Result<Statement>;
     fn parse_update(&mut self) -> sql::Result<Statement>;
-    fn parse_begin(&mut self) -> sql::Result<Statement>;
-    fn parse_commit(&mut self) -> sql::Result<Statement>;
 }
 
 /// Parser turns string into raw `Statement` (not yet optimized).
@@ -529,15 +526,6 @@ impl<'a> Parser<'a> {
 }
 
 impl<'a> StatementParser for Parser<'a> {
-    fn parse_explain(&mut self) -> sql::Result<Statement> {
-        todo!()
-    }
-    fn parse_begin(&mut self) -> sql::Result<Statement> {
-        todo!()
-    }
-    fn parse_commit(&mut self) -> sql::Result<Statement> {
-        todo!()
-    }
     fn parse_create(&mut self) -> sql::Result<Statement> {
         self.expect_keyword(Keyword::Create)?;
 
