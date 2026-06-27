@@ -8,7 +8,7 @@ use crate::{
         parser::statement::{
             BinaryOperator, Constrains, Create, Drop, Expression, Statement, UnaryOperator,
         },
-        schema::{Catalog, ROW_ID_COLUMN, Schema, TableMetadata},
+        schema::{CatalogData, ROW_ID_COLUMN, Schema, TableMetadata},
         types::{Value, ValueType},
     },
 };
@@ -76,7 +76,7 @@ pub enum TypeError {
     UnexpectedExpression { expr: Expression },
 }
 
-pub fn analyze(statement: &Statement, catalog: &Catalog) -> Result<()> {
+pub fn analyze(statement: &Statement, catalog: &CatalogData) -> Result<()> {
     match statement {
         Statement::Create(Create::Table { name, columns }) => {
             if let Ok(_) = catalog.get_table(name) {

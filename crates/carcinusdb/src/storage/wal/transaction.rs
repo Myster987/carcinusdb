@@ -99,7 +99,7 @@ impl Transaction {
         }
 
         // SAFETY: This needs to be handled carefully because this makes life
-        // so much simpler with compipler, but also removes protection from
+        // so much simpler with compiler, but also removes protection from
         // not dropping on time, but code logic should handle it properly.
         let guard = unsafe { std::mem::transmute(wal.writer.lock()) };
         let local_db_header = *wal.db_header.load_full();

@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
+use arc_swap::ArcSwap;
 use bytes::{Buf, BufMut, BytesMut};
 use dashmap::DashMap;
 use thiserror::Error;
@@ -33,13 +34,54 @@ pub enum Error {
     TableNotFound(String),
 }
 
-/// Collection of all tables in database that are currently loaded.
+/// Shared catalog - wraps CatalogData in ArcSwap for atomic transaction commits.
 #[derive(Debug)]
 pub struct Catalog {
-    tables: DashMap<String, TableMetadata>,
+    data: ArcSwap<CatalogData>,
 }
 
 impl Catalog {
+    pub fn new(data: CatalogData) -> Self {
+        Self {
+            data: ArcSwap::new(Arc::new(data)),
+        }
+    }
+
+    pub fn from_cursor(cursor: BTreeCursor) -> storage::Result<Self> {
+        Ok(Self::new(CatalogData::from_cursor(cursor)?))
+    }
+
+    // Delegate reads to current snapshot
+    pub fn get_table(&self, name: &str) -> Result<TableMetadata> {
+        self.data.load().get_table(name)
+    }
+
+    pub fn insert_table(&self, name: String, table: TableMetadata) {
+        self.data.load().insert_table(name, table);
+    }
+
+    pub fn insert_index(&self, table_name: &str, index: IndexMetadata) -> Result<()> {
+        self.data.load().insert_index(table_name, index)
+    }
+
+    /// Snapshot current state for a transaction to work on locally.
+    pub fn snapshot(&self) -> CatalogData {
+        self.data.load().as_ref().clone()
+    }
+
+    /// Atomically swap in a committed transaction's catalog state.
+    pub fn commit(&self, new_data: CatalogData) {
+        self.data.store(Arc::new(new_data));
+    }
+}
+
+/// Collection of all tables in database that are currently loaded.
+#[derive(Debug, Clone)]
+pub struct CatalogData {
+    tables: DashMap<String, TableMetadata>,
+}
+
+impl CatalogData {
     /// Returns `TableMetadata`, if table with given `name` exists.
     pub fn get_table(&self, name: &str) -> Result<TableMetadata> {
         self.tables
@@ -555,4 +597,20 @@ impl ColumnPropertiesBuilder {
     pub fn build(self) -> ColumnProperties {
         self.column_properties
     }
+}
+
+#[test]
+fn test_catalog() {
+    let a = Catalog::new(CatalogData {
+        tables: DashMap::new(),
+    });
+
+    let b = a.snapshot();
+
+    a.insert_table(
+        "test".into(),
+        TableMetadata::new(1, "test".into(), Schema::empty(), vec![]),
+    );
+
+    println!("{:?} {:?}", a, b);
 }

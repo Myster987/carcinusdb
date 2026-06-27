@@ -52,15 +52,22 @@ pub fn execute<'a>(
     plan: ExecutionPlan<'a>,
 ) -> Result<QueryResult<'a>> {
     match plan {
-        ExecutionPlan::Select(operator) => Ok(QueryResult::Records(RecordIterator::new(Box::new(
-            operator,
-        )))),
+        ExecutionPlan::Select(operator) => {
+            tx.acquire_read()?;
+            Ok(QueryResult::Records(RecordIterator::new(Box::new(
+                operator,
+            ))))
+        }
 
-        ExecutionPlan::Delete(operator) => Ok(QueryResult::Records(RecordIterator::new(Box::new(
-            operator,
-        )))),
+        ExecutionPlan::Delete(operator) => {
+            tx.acquire_write()?;
+            Ok(QueryResult::Records(RecordIterator::new(Box::new(
+                operator,
+            ))))
+        }
 
         ExecutionPlan::Insert(insert) => {
+            tx.acquire_write()?;
             let is_returning = insert.is_returning;
             let row_iterator = RecordIterator::new(Box::new(insert));
             if is_returning {
@@ -76,6 +83,7 @@ pub fn execute<'a>(
         }
 
         ExecutionPlan::Update(update) => {
+            tx.acquire_write()?;
             let is_returning = update.is_returning;
             let row_iterator = RecordIterator::new(Box::new(update));
             if is_returning {
@@ -90,7 +98,10 @@ pub fn execute<'a>(
             }
         }
 
-        ExecutionPlan::Create(create) => ddl::create(tx, create),
+        ExecutionPlan::Create(create) => {
+            tx.acquire_write()?;
+            ddl::create(tx, create)
+        }
 
         _ => todo!(),
     }

@@ -10,7 +10,7 @@ use crate::{
     sql::{
         self,
         parser::statement::Statement,
-        schema::{Catalog, Column, ColumnProperties, Schema, TableMetadata},
+        schema::{Catalog, CatalogData, Column, ColumnProperties, Schema, TableMetadata},
         types::ValueType,
     },
     storage::{
@@ -194,6 +194,8 @@ fn explicit_tx_worker(
             transaction.rollback()?;
             return Ok(());
         };
+
+        log::debug!("Client SQL: {sql}");
 
         match transaction.parse_sql(&sql) {
             Err(e) => {
@@ -489,20 +491,36 @@ impl Database {
         Ok(DatabaseTransaction {
             wal_tx: Arc::new(Mutex::new(wal_tx)),
             pager: self.pager.clone(),
-            catalog: self.catalog.clone(),
+            original_catalog: Arc::clone(&self.catalog),
+            local_catalog: Arc::new(self.catalog.snapshot()),
         })
+    }
+}
+
+impl AsRef<Database> for Database {
+    fn as_ref(&self) -> &Database {
+        self
     }
 }
 
 pub struct DatabaseTransaction {
     wal_tx: Arc<Mutex<Transaction>>,
     pager: Arc<Pager>,
-    catalog: Arc<Catalog>,
+    original_catalog: Arc<Catalog>,
+    local_catalog: Arc<CatalogData>,
 }
 
 impl DatabaseTransaction {
     pub fn cursor<'a>(&'a self, root: PageNumber) -> BTreeCursor<'a> {
         BTreeCursor::new(self.wal_tx.clone(), &self.pager, root, 3)
+    }
+
+    pub fn catalog(&self) -> &Arc<CatalogData> {
+        &self.local_catalog
+    }
+
+    pub fn page_size(&self) -> usize {
+        self.pager.db_header.load().get_page_size()
     }
 
     pub fn execute(&self, sql: &str) -> Result<QueryResult<'_>> {
@@ -540,6 +558,9 @@ impl DatabaseTransaction {
             self.pager.wal.commit(&mut wal_tx)?;
         }
 
+        let local_catalog = Arc::unwrap_or_clone(self.local_catalog);
+        self.original_catalog.commit(local_catalog);
+
         Ok(())
     }
 
@@ -555,17 +576,17 @@ impl DatabaseTransaction {
         Ok(())
     }
 
-    pub fn catalog(&self) -> &Arc<Catalog> {
-        &self.catalog
-    }
-
     pub fn create_btree(&self, btree_type: BTreeType) -> storage::Result<PageNumber> {
         self.pager
             .btree_create(self.wal_tx.lock().deref_mut(), btree_type)
     }
 
-    pub fn page_size(&self) -> usize {
-        self.pager.db_header.load().get_page_size()
+    pub fn acquire_read(&self) -> storage::Result<()> {
+        self.wal_tx.lock().acquire_read(&self.pager.wal)
+    }
+
+    pub fn acquire_write(&self) -> storage::Result<()> {
+        self.wal_tx.lock().acquire_write(&self.pager.wal)
     }
 }
 

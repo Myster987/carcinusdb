@@ -484,6 +484,11 @@ impl Pager {
 
         // check cache...
         if let Some(cached_page) = self.page_cache.get(&page_number) {
+            // avoid reading uncommited data.
+            if cached_page.is_dirty() && !tx.dirty_pages().contains(&page_number) {
+                return Ok(self.read_page_no_cache(tx, page_number)?);
+            }
+
             return Ok(cached_page);
         }
 
